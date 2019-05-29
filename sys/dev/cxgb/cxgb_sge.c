@@ -1,4 +1,5 @@
 /**************************************************************************
+SPDX-License-Identifier: BSD-2-Clause-FreeBSD
 
 Copyright (c) 2007-2009, Chelsio Inc.
 All rights reserved.
@@ -41,7 +42,6 @@ __FBSDID("$FreeBSD$");
 #include <sys/conf.h>
 #include <machine/bus.h>
 #include <machine/resource.h>
-#include <sys/bus_dma.h>
 #include <sys/rman.h>
 #include <sys/queue.h>
 #include <sys/sysctl.h>
@@ -389,6 +389,15 @@ reclaim_completed_tx(struct sge_qset *qs, int reclaim_min, int queue)
 
 	return (reclaim);
 }
+
+#ifdef NETDUMP
+int
+cxgb_netdump_poll_tx(struct sge_qset *qs)
+{
+
+	return (reclaim_completed_tx(qs, TX_RECLAIM_MAX, TXQ_ETH));
+}
+#endif
 
 /**
  *	should_restart_tx - are there enough resources to restart a Tx queue?
@@ -738,7 +747,7 @@ refill_fl(adapter_t *sc, struct sge_fl *q, int n)
 		    cl, q->buf_size, refill_fl_cb, &cb_arg, 0);
 		
 		if (err != 0 || cb_arg.error) {
-			if (q->zone == zone_pack)
+			if (q->zone != zone_pack)
 				uma_zfree(q->zone, cl);
 			m_free(m);
 			goto done;
@@ -795,12 +804,10 @@ free_rx_bufs(adapter_t *sc, struct sge_fl *q)
 			bus_dmamap_unload(q->entry_tag, d->map);
 			bus_dmamap_destroy(q->entry_tag, d->map);
 			if (q->zone == zone_pack) {
-				m_init(d->m, zone_pack, MCLBYTES,
-				    M_NOWAIT, MT_DATA, M_EXT);
+				m_init(d->m, M_NOWAIT, MT_DATA, M_EXT);
 				uma_zfree(zone_pack, d->m);
 			} else {
-				m_init(d->m, zone_mbuf, MLEN,
-				    M_NOWAIT, MT_DATA, 0);
+				m_init(d->m, M_NOWAIT, MT_DATA, 0);
 				uma_zfree(zone_mbuf, d->m);
 				uma_zfree(q->zone, d->rxsd_cl);
 			}			
@@ -1587,6 +1594,23 @@ t3_encap(struct sge_qset *qs, struct mbuf **m)
 
 	return (0);
 }
+
+#ifdef NETDUMP
+int
+cxgb_netdump_encap(struct sge_qset *qs, struct mbuf **m)
+{
+	int error;
+
+	error = t3_encap(qs, m);
+	if (error == 0)
+		check_ring_tx_db(qs->port->adapter, &qs->txq[TXQ_ETH], 1);
+	else if (*m != NULL) {
+		m_freem(*m);
+		*m = NULL;
+	}
+	return (error);
+}
+#endif
 
 void
 cxgb_tx_watchdog(void *arg)
@@ -2725,7 +2749,7 @@ get_packet(adapter_t *adap, unsigned int drop_thres, struct sge_qset *qs,
 		if ((sopeop == RSPQ_SOP_EOP) ||
 		    (sopeop == RSPQ_SOP))
 			flags |= M_PKTHDR;
-		m_init(m, fl->zone, fl->buf_size, M_NOWAIT, MT_DATA, flags);
+		m_init(m, M_NOWAIT, MT_DATA, flags);
 		if (fl->zone == zone_pack) {
 			/*
 			 * restore clobbered data pointer
@@ -2872,7 +2896,7 @@ process_responses(adapter_t *adap, struct sge_qset *qs, int budget)
 
                         memcpy(mtod(m, char *), r, AN_PKT_SIZE);
 			m->m_len = m->m_pkthdr.len = AN_PKT_SIZE;
-                        *mtod(m, char *) = CPL_ASYNC_NOTIF;
+                        *mtod(m, uint8_t *) = CPL_ASYNC_NOTIF;
 			opcode = CPL_ASYNC_NOTIF;
 			eop = 1;
                         rspq->async_notif++;
@@ -2902,7 +2926,8 @@ process_responses(adapter_t *adap, struct sge_qset *qs, int budget)
 			eop = get_packet(adap, drop_thresh, qs, mh, r);
 			if (eop) {
 				if (r->rss_hdr.hash_type && !adap->timestamp) {
-					M_HASHTYPE_SET(mh->mh_head, M_HASHTYPE_OPAQUE);
+					M_HASHTYPE_SET(mh->mh_head,
+					    M_HASHTYPE_OPAQUE_HASH);
 					mh->mh_head->m_pkthdr.flowid = rss_hash;
 				}
 			}
@@ -2978,11 +3003,7 @@ process_responses(adapter_t *adap, struct sge_qset *qs, int budget)
 
 #if defined(INET6) || defined(INET)
 	/* Flush LRO */
-	while (!SLIST_EMPTY(&lro_ctrl->lro_active)) {
-		struct lro_entry *queued = SLIST_FIRST(&lro_ctrl->lro_active);
-		SLIST_REMOVE_HEAD(&lro_ctrl->lro_active, next);
-		tcp_lro_flush(lro_ctrl, queued);
-	}
+	tcp_lro_flush_all(lro_ctrl);
 #endif
 
 	if (sleeping)
@@ -3019,6 +3040,14 @@ process_responses_gts(adapter_t *adap, struct sge_rspq *rq)
 	return (work);
 }
 
+#ifdef NETDUMP
+int
+cxgb_netdump_poll_rx(adapter_t *adap, struct sge_qset *qs)
+{
+
+	return (process_responses_gts(adap, &qs->rspq));
+}
+#endif
 
 /*
  * Interrupt handler for legacy INTx interrupts for T3B-based cards.
@@ -3579,11 +3608,11 @@ t3_add_configured_sysctls(adapter_t *sc)
 			    CTLTYPE_STRING | CTLFLAG_RD, &qs->txq[TXQ_CTRL],
 			    0, t3_dump_txq_ctrl, "A", "dump of the transmit queue");
 
-			SYSCTL_ADD_INT(ctx, lropoidlist, OID_AUTO, "lro_queued",
+			SYSCTL_ADD_U64(ctx, lropoidlist, OID_AUTO, "lro_queued",
 			    CTLFLAG_RD, &qs->lro.ctrl.lro_queued, 0, NULL);
-			SYSCTL_ADD_INT(ctx, lropoidlist, OID_AUTO, "lro_flushed",
+			SYSCTL_ADD_U64(ctx, lropoidlist, OID_AUTO, "lro_flushed",
 			    CTLFLAG_RD, &qs->lro.ctrl.lro_flushed, 0, NULL);
-			SYSCTL_ADD_INT(ctx, lropoidlist, OID_AUTO, "lro_bad_csum",
+			SYSCTL_ADD_U64(ctx, lropoidlist, OID_AUTO, "lro_bad_csum",
 			    CTLFLAG_RD, &qs->lro.ctrl.lro_bad_csum, 0, NULL);
 			SYSCTL_ADD_INT(ctx, lropoidlist, OID_AUTO, "lro_cnt",
 			    CTLFLAG_RD, &qs->lro.ctrl.lro_cnt, 0, NULL);

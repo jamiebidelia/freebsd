@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2011 Nathan Whitehorn
  * All rights reserved.
  *
@@ -43,6 +45,7 @@ __FBSDID("$FreeBSD$");
 #ifdef __sparc64__
 #include <machine/bus_private.h>
 #endif
+#include <machine/cpu.h>
 
 #include <dev/ofw/openfirm.h>
 #include <dev/ofw/ofw_bus.h>
@@ -57,6 +60,7 @@ struct ofwfb_softc {
 	int		iso_palette;
 };
 
+static void ofwfb_initialize(struct vt_device *vd);
 static vd_probe_t	ofwfb_probe;
 static vd_init_t	ofwfb_init;
 static vd_bitblt_text_t	ofwfb_bitblt_text;
@@ -88,11 +92,19 @@ ofwfb_probe(struct vt_device *vd)
 {
 	phandle_t chosen, node;
 	ihandle_t stdout;
-	char type[64];
+	char buf[64];
 
 	chosen = OF_finddevice("/chosen");
-	OF_getprop(chosen, "stdout", &stdout, sizeof(stdout));
-	node = OF_instance_to_package(stdout);
+	if (chosen == -1)
+		return (CN_DEAD);
+
+	node = -1;
+	if (OF_getprop(chosen, "stdout", &stdout, sizeof(stdout)) ==
+	    sizeof(stdout))
+		node = OF_instance_to_package(stdout);
+	if (node == -1)
+		if (OF_getprop(chosen, "stdout-path", buf, sizeof(buf)) > 0)
+			node = OF_finddevice(buf);
 	if (node == -1) {
 		/*
 		 * The "/chosen/stdout" does not exist try
@@ -100,8 +112,8 @@ ofwfb_probe(struct vt_device *vd)
 		 */
 		node = OF_finddevice("screen");
 	}
-	OF_getprop(node, "device_type", type, sizeof(type));
-	if (strcmp(type, "display") != 0)
+	OF_getprop(node, "device_type", buf, sizeof(buf));
+	if (strcmp(buf, "display") != 0)
 		return (CN_DEAD);
 
 	/* Looks OK... */
@@ -123,6 +135,19 @@ ofwfb_bitblt_bitmap(struct vt_device *vd, const struct vt_window *vw,
 		uint32_t l;
 		uint8_t	 c[4];
 	} ch1, ch2;
+
+#ifdef __powerpc__
+	/* Deal with unmapped framebuffers */
+	if (sc->fb_flags & FB_FLAG_NOWRITE) {
+		if (pmap_bootstrapped) {
+			sc->fb_flags &= ~FB_FLAG_NOWRITE;
+			ofwfb_initialize(vd);
+			vd->vd_driver->vd_blank(vd, TC_BLACK);
+		} else {
+			return;
+		}
+	}
+#endif
 
 	fgc = sc->fb_cmap[fg];
 	bgc = sc->fb_cmap[bg];
@@ -271,6 +296,11 @@ ofwfb_initialize(struct vt_device *vd)
 	cell_t retval;
 	uint32_t oldpix;
 
+	sc->fb.fb_cmsize = 16;
+
+	if (sc->fb.fb_flags & FB_FLAG_NOWRITE)
+		return;
+
 	/*
 	 * Set up the color map
 	 */
@@ -292,7 +322,7 @@ ofwfb_initialize(struct vt_device *vd)
 		}
 		if (i != 16)
 			sc->iso_palette = 1;
-				
+
 		break;
 
 	case 32:
@@ -318,15 +348,13 @@ ofwfb_initialize(struct vt_device *vd)
 		panic("Unknown color space depth %d", sc->fb.fb_bpp);
 		break;
         }
-
-	sc->fb.fb_cmsize = 16;
 }
 
 static int
 ofwfb_init(struct vt_device *vd)
 {
 	struct ofwfb_softc *sc;
-	char type[64];
+	char buf[64];
 	phandle_t chosen;
 	phandle_t node;
 	uint32_t depth, height, width, stride;
@@ -341,9 +369,18 @@ ofwfb_init(struct vt_device *vd)
 	/* Initialize softc */
 	vd->vd_softc = sc = &ofwfb_conssoftc;
 
+	node = -1;
 	chosen = OF_finddevice("/chosen");
-	OF_getprop(chosen, "stdout", &sc->sc_handle, sizeof(ihandle_t));
-	node = OF_instance_to_package(sc->sc_handle);
+	if (OF_getprop(chosen, "stdout", &sc->sc_handle,
+	    sizeof(ihandle_t)) == sizeof(ihandle_t))
+		node = OF_instance_to_package(sc->sc_handle);
+	if (node == -1)
+		/* Try "/chosen/stdout-path" now */
+		if (OF_getprop(chosen, "stdout-path", buf, sizeof(buf)) > 0) {
+			node = OF_finddevice(buf);
+			if (node != -1)
+				sc->sc_handle = OF_open(buf);
+		}
 	if (node == -1) {
 		/*
 		 * The "/chosen/stdout" does not exist try
@@ -352,8 +389,8 @@ ofwfb_init(struct vt_device *vd)
 		node = OF_finddevice("screen");
 		sc->sc_handle = OF_open("screen");
 	}
-	OF_getprop(node, "device_type", type, sizeof(type));
-	if (strcmp(type, "display") != 0)
+	OF_getprop(node, "device_type", buf, sizeof(buf));
+	if (strcmp(buf, "display") != 0)
 		return (CN_DEAD);
 
 	/* Keep track of the OF node */
@@ -369,8 +406,7 @@ ofwfb_init(struct vt_device *vd)
 	/* Make sure we have needed properties */
 	if (OF_getproplen(node, "height") != sizeof(height) ||
 	    OF_getproplen(node, "width") != sizeof(width) ||
-	    OF_getproplen(node, "depth") != sizeof(depth) ||
-	    OF_getproplen(node, "linebytes") != sizeof(sc->fb.fb_stride))
+	    OF_getproplen(node, "depth") != sizeof(depth))
 		return (CN_DEAD);
 
 	/* Only support 8 and 32-bit framebuffers */
@@ -381,7 +417,9 @@ ofwfb_init(struct vt_device *vd)
 
 	OF_getprop(node, "height", &height, sizeof(height));
 	OF_getprop(node, "width", &width, sizeof(width));
-	OF_getprop(node, "linebytes", &stride, sizeof(stride));
+	if (OF_getprop(node, "linebytes", &stride, sizeof(stride)) !=
+	    sizeof(stride))
+		stride = width*depth/8;
 
 	sc->fb.fb_height = height;
 	sc->fb.fb_width = width;
@@ -394,7 +432,7 @@ ofwfb_init(struct vt_device *vd)
 	 * remapped for us when relocation turns on.
 	 */
 	if (OF_getproplen(node, "address") == sizeof(fb_phys)) {
-	 	/* XXX We assume #address-cells is 1 at this point. */
+		/* XXX We assume #address-cells is 1 at this point. */
 		OF_getprop(node, "address", &fb_phys, sizeof(fb_phys));
 
 	#if defined(__powerpc__)
@@ -464,8 +502,9 @@ ofwfb_init(struct vt_device *vd)
 			return (CN_DEAD);
 
 	#if defined(__powerpc__)
-		OF_decode_addr(node, fb_phys, &sc->sc_memt, &sc->fb.fb_vbase);
-		sc->fb.fb_pbase = sc->fb.fb_vbase; /* 1:1 mapped */
+		OF_decode_addr(node, fb_phys, &sc->sc_memt, &sc->fb.fb_vbase,
+		    NULL);
+		sc->fb.fb_pbase = sc->fb.fb_vbase & ~DMAP_BASE_ADDRESS;
 	#else
 		/* No ability to interpret assigned-addresses otherwise */
 		return (CN_DEAD);
@@ -473,6 +512,17 @@ ofwfb_init(struct vt_device *vd)
         }
 
 
+	#if defined(__powerpc__)
+	/*
+	 * If we are running on PowerPC in real mode (supported only on AIM
+	 * CPUs), the frame buffer may be inaccessible (real mode does not
+	 * necessarily cover all RAM) and may also be mapped with the wrong
+	 * cache properties (all real mode accesses are assumed cacheable).
+	 * Just don't write to it for the time being.
+	 */
+	if (!(cpu_features & PPC_FEATURE_BOOKE) && !(mfmsr() & PSL_DR))
+		sc->fb.fb_flags |= FB_FLAG_NOWRITE;
+	#endif
 	ofwfb_initialize(vd);
 	vt_fb_init(vd);
 

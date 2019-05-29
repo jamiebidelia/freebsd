@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2000 Doug Rabson
  * All rights reserved.
  *
@@ -152,9 +154,9 @@ agp_alloc_gatt(device_t dev)
 		return 0;
 
 	gatt->ag_entries = entries;
-	gatt->ag_virtual = (void *)kmem_alloc_contig(kernel_arena,
-	    entries * sizeof(u_int32_t), M_NOWAIT | M_ZERO, 0, ~0, PAGE_SIZE,
-	    0, VM_MEMATTR_WRITE_COMBINING);
+	gatt->ag_virtual = (void *)kmem_alloc_contig(entries *
+	    sizeof(u_int32_t), M_NOWAIT | M_ZERO, 0, ~0, PAGE_SIZE, 0,
+	    VM_MEMATTR_WRITE_COMBINING);
 	if (!gatt->ag_virtual) {
 		if (bootverbose)
 			device_printf(dev, "contiguous allocation failed\n");
@@ -169,8 +171,8 @@ agp_alloc_gatt(device_t dev)
 void
 agp_free_gatt(struct agp_gatt *gatt)
 {
-	kmem_free(kernel_arena, (vm_offset_t)gatt->ag_virtual,
-	    gatt->ag_entries * sizeof(u_int32_t));
+	kmem_free((vm_offset_t)gatt->ag_virtual, gatt->ag_entries *
+	    sizeof(u_int32_t));
 	free(gatt, M_AGP);
 }
 
@@ -185,7 +187,7 @@ static u_int agp_max[][2] = {
 	{2048,	1920},
 	{4096,	3932}
 };
-#define agp_max_size	(sizeof(agp_max) / sizeof(agp_max[0]))
+#define	AGP_MAX_SIZE	nitems(agp_max)
 
 /**
  * Sets the PCI resource which represents the AGP aperture.
@@ -228,12 +230,12 @@ agp_generic_attach(device_t dev)
 	 * uses a heurisitc table from the Linux driver.
 	 */
 	memsize = ptoa(realmem) >> 20;
-	for (i = 0; i < agp_max_size; i++) {
+	for (i = 0; i < AGP_MAX_SIZE; i++) {
 		if (memsize <= agp_max[i][0])
 			break;
 	}
-	if (i == agp_max_size)
-		i = agp_max_size - 1;
+	if (i == AGP_MAX_SIZE)
+		i = AGP_MAX_SIZE - 1;
 	sc->as_maxmem = agp_max[i][1] << 20U;
 
 	/*
@@ -820,7 +822,7 @@ agp_close(struct cdev *kdev, int fflag, int devtype, struct thread *td)
 	/*
 	 * Clear the GATT and force release on last close
 	 */
-	while ((mem = TAILQ_FIRST(&sc->as_memory)) != 0) {
+	while ((mem = TAILQ_FIRST(&sc->as_memory)) != NULL) {
 		if (mem->am_is_bound)
 			AGP_UNBIND_MEMORY(dev, mem);
 		AGP_FREE_MEMORY(dev, mem);

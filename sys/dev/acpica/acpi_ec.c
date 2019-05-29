@@ -32,6 +32,7 @@ __FBSDID("$FreeBSD$");
 #include "opt_acpi.h"
 #include <sys/param.h>
 #include <sys/kernel.h>
+#include <sys/ktr.h>
 #include <sys/bus.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
@@ -345,101 +346,111 @@ acpi_ec_probe(device_t dev)
     struct acpi_ec_params *params;
     static char *ec_ids[] = { "PNP0C09", NULL };
 
+    ret = ENXIO;
+
     /* Check that this is a device and that EC is not disabled. */
     if (acpi_get_type(dev) != ACPI_TYPE_DEVICE || acpi_disabled("ec"))
-	return (ENXIO);
+	return (ret);
 
-    /*
-     * If probed via ECDT, set description and continue.  Otherwise,
-     * we can access the namespace and make sure this is not a
-     * duplicate probe.
-     */
-    ret = ENXIO;
-    ecdt = 0;
+    if (device_is_devclass_fixed(dev)) {
+	/*
+	 * If probed via ECDT, set description and continue. Otherwise, we can
+	 * access the namespace and make sure this is not a duplicate probe.
+	 */
+        ecdt = 1;
+        params = acpi_get_private(dev);
+	if (params != NULL)
+	    ret = 0;
+
+	goto out;
+    } else
+	ecdt = 0;
+
+    ret = ACPI_ID_PROBE(device_get_parent(dev), dev, ec_ids, NULL);
+    if (ret > 0)
+	return (ret);
+
+    params = malloc(sizeof(struct acpi_ec_params), M_TEMP, M_WAITOK | M_ZERO);
+
     buf.Pointer = NULL;
     buf.Length = ACPI_ALLOCATE_BUFFER;
-    params = acpi_get_private(dev);
-    if (params != NULL) {
-	ecdt = 1;
-	ret = 0;
-    } else if (ACPI_ID_PROBE(device_get_parent(dev), dev, ec_ids)) {
-	params = malloc(sizeof(struct acpi_ec_params), M_TEMP,
-			M_WAITOK | M_ZERO);
-	h = acpi_get_handle(dev);
+    h = acpi_get_handle(dev);
 
-	/*
-	 * Read the unit ID to check for duplicate attach and the
-	 * global lock value to see if we should acquire it when
-	 * accessing the EC.
-	 */
-	status = acpi_GetInteger(h, "_UID", &params->uid);
-	if (ACPI_FAILURE(status))
-	    params->uid = 0;
-	status = acpi_GetInteger(h, "_GLK", &params->glk);
-	if (ACPI_FAILURE(status))
-	    params->glk = 0;
+    /*
+     * Read the unit ID to check for duplicate attach and the global lock value
+     * to see if we should acquire it when accessing the EC.
+     */
+    status = acpi_GetInteger(h, "_UID", &params->uid);
+    if (ACPI_FAILURE(status))
+	params->uid = 0;
 
-	/*
-	 * Evaluate the _GPE method to find the GPE bit used by the EC to
-	 * signal status (SCI).  If it's a package, it contains a reference
-	 * and GPE bit, similar to _PRW.
-	 */
-	status = AcpiEvaluateObject(h, "_GPE", NULL, &buf);
-	if (ACPI_FAILURE(status)) {
-	    device_printf(dev, "can't evaluate _GPE - %s\n",
-			  AcpiFormatException(status));
-	    goto out;
-	}
-	obj = (ACPI_OBJECT *)buf.Pointer;
-	if (obj == NULL)
-	    goto out;
-
-	switch (obj->Type) {
-	case ACPI_TYPE_INTEGER:
-	    params->gpe_handle = NULL;
-	    params->gpe_bit = obj->Integer.Value;
-	    break;
-	case ACPI_TYPE_PACKAGE:
-	    if (!ACPI_PKG_VALID(obj, 2))
-		goto out;
-	    params->gpe_handle =
-		acpi_GetReference(NULL, &obj->Package.Elements[0]);
-	    if (params->gpe_handle == NULL ||
-		acpi_PkgInt32(obj, 1, &params->gpe_bit) != 0)
-		goto out;
-	    break;
-	default:
-	    device_printf(dev, "_GPE has invalid type %d\n", obj->Type);
-	    goto out;
-	}
-
-	/* Store the values we got from the namespace for attach. */
-	acpi_set_private(dev, params);
-
-	/*
-	 * Check for a duplicate probe.  This can happen when a probe
-	 * via ECDT succeeded already.  If this is a duplicate, disable
-	 * this device.
-	 */
-	peer = devclass_get_device(acpi_ec_devclass, params->uid);
-	if (peer == NULL || !device_is_alive(peer))
-	    ret = 0;
-	else
-	    device_disable(dev);
+    /*
+     * Check for a duplicate probe. This can happen when a probe via ECDT
+     * succeeded already. If this is a duplicate, disable this device.
+     *
+     * NB: It would seem device_disable would be sufficient to not get
+     * duplicated devices, and ENXIO isn't needed, however, device_probe() only
+     * checks DF_ENABLED at the start and so disabling it here is too late to
+     * prevent device_attach() from being called.
+     */
+    peer = devclass_get_device(acpi_ec_devclass, params->uid);
+    if (peer != NULL && device_is_alive(peer)) {
+	device_disable(dev);
+	ret = ENXIO;
+	goto out;
     }
 
+    status = acpi_GetInteger(h, "_GLK", &params->glk);
+    if (ACPI_FAILURE(status))
+	params->glk = 0;
+
+    /*
+     * Evaluate the _GPE method to find the GPE bit used by the EC to signal
+     * status (SCI).  If it's a package, it contains a reference and GPE bit,
+     * similar to _PRW.
+     */
+    status = AcpiEvaluateObject(h, "_GPE", NULL, &buf);
+    if (ACPI_FAILURE(status)) {
+	device_printf(dev, "can't evaluate _GPE - %s\n", AcpiFormatException(status));
+	goto out;
+    }
+
+    obj = (ACPI_OBJECT *)buf.Pointer;
+    if (obj == NULL)
+	goto out;
+
+    switch (obj->Type) {
+    case ACPI_TYPE_INTEGER:
+	params->gpe_handle = NULL;
+	params->gpe_bit = obj->Integer.Value;
+	break;
+    case ACPI_TYPE_PACKAGE:
+	if (!ACPI_PKG_VALID(obj, 2))
+	    goto out;
+	params->gpe_handle = acpi_GetReference(NULL, &obj->Package.Elements[0]);
+	if (params->gpe_handle == NULL ||
+	    acpi_PkgInt32(obj, 1, &params->gpe_bit) != 0)
+		goto out;
+	break;
+    default:
+	device_printf(dev, "_GPE has invalid type %d\n", obj->Type);
+	goto out;
+    }
+
+    /* Store the values we got from the namespace for attach. */
+    acpi_set_private(dev, params);
+
+    if (buf.Pointer)
+	AcpiOsFree(buf.Pointer);
 out:
-    if (ret == 0) {
+    if (ret <= 0) {
 	snprintf(desc, sizeof(desc), "Embedded Controller: GPE %#x%s%s",
 		 params->gpe_bit, (params->glk) ? ", GLK" : "",
 		 ecdt ? ", ECDT" : "");
 	device_set_desc_copy(dev, desc);
-    }
-
-    if (ret > 0 && params)
+    } else
 	free(params, M_TEMP);
-    if (buf.Pointer)
-	AcpiOsFree(buf.Pointer);
+
     return (ret);
 }
 
@@ -615,16 +626,14 @@ EcCheckStatus(struct acpi_ec_softc *sc, const char *msg, EC_EVENT event)
 }
 
 static void
-EcGpeQueryHandler(void *Context)
+EcGpeQueryHandlerSub(struct acpi_ec_softc *sc)
 {
-    struct acpi_ec_softc	*sc = (struct acpi_ec_softc *)Context;
     UINT8			Data;
     ACPI_STATUS			Status;
     int				retry;
     char			qxx[5];
 
     ACPI_FUNCTION_TRACE((char *)(uintptr_t)__func__);
-    KASSERT(Context != NULL, ("EcGpeQueryHandler called with NULL"));
 
     /* Serialize user access with EcSpaceHandler(). */
     Status = EcLock(sc);
@@ -649,7 +658,6 @@ EcGpeQueryHandler(void *Context)
 	    EC_EVENT_INPUT_BUFFER_EMPTY)))
 	    break;
     }
-    sc->ec_sci_pend = FALSE;
     if (ACPI_FAILURE(Status)) {
 	EcUnlock(sc);
 	device_printf(sc->ec_dev, "GPE query failed: %s\n",
@@ -680,6 +688,29 @@ EcGpeQueryHandler(void *Context)
     }
 }
 
+static void
+EcGpeQueryHandler(void *Context)
+{
+    struct acpi_ec_softc *sc = (struct acpi_ec_softc *)Context;
+    int pending;
+
+    KASSERT(Context != NULL, ("EcGpeQueryHandler called with NULL"));
+
+    do {
+	/* Read the current pending count */
+	pending = atomic_load_acq_int(&sc->ec_sci_pend);
+
+	/* Call GPE handler function */
+	EcGpeQueryHandlerSub(sc);
+
+	/*
+	 * Try to reset the pending count to zero. If this fails we
+	 * know another GPE event has occurred while handling the
+	 * current GPE event and need to loop.
+	 */
+    } while (!atomic_cmpset_int(&sc->ec_sci_pend, pending, 0));
+}
+
 /*
  * The GPE handler is called when IBE/OBF or SCI events occur.  We are
  * called from an unknown lock context.
@@ -708,13 +739,14 @@ EcGpeHandler(ACPI_HANDLE GpeDevice, UINT32 GpeNumber, void *Context)
      * It will run the query and _Qxx method later, under the lock.
      */
     EcStatus = EC_GET_CSR(sc);
-    if ((EcStatus & EC_EVENT_SCI) && !sc->ec_sci_pend) {
+    if ((EcStatus & EC_EVENT_SCI) &&
+	atomic_fetchadd_int(&sc->ec_sci_pend, 1) == 0) {
 	CTR0(KTR_ACPI, "ec gpe queueing query handler");
 	Status = AcpiOsExecute(OSL_GPE_HANDLER, EcGpeQueryHandler, Context);
-	if (ACPI_SUCCESS(Status))
-	    sc->ec_sci_pend = TRUE;
-	else
+	if (ACPI_FAILURE(Status)) {
 	    printf("EcGpeHandler: queuing GPE query handler failed\n");
+	    atomic_store_rel_int(&sc->ec_sci_pend, 0);
+	}
     }
     return (ACPI_REENABLE_GPE);
 }
@@ -761,7 +793,8 @@ EcSpaceHandler(UINT32 Function, ACPI_PHYSICAL_ADDRESS Address, UINT32 Width,
      * we call it directly here since our thread taskq is not active yet.
      */
     if (cold || rebooting || sc->ec_suspending) {
-	if ((EC_GET_CSR(sc) & EC_EVENT_SCI)) {
+	if ((EC_GET_CSR(sc) & EC_EVENT_SCI) &&
+	    atomic_fetchadd_int(&sc->ec_sci_pend, 1) == 0) {
 	    CTR0(KTR_ACPI, "ec running gpe handler directly");
 	    EcGpeQueryHandler(sc);
 	}

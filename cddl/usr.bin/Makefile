@@ -6,16 +6,12 @@ SUBDIR= \
 	ctfconvert \
 	ctfdump \
 	ctfmerge \
-	sgsmsg \
-	${_tests} \
 	${_zinject} \
 	${_zlook} \
 	${_zstreamdump} \
 	${_ztest}
 
-.if ${MK_TESTS} != "no"
-_tests=	tests
-.endif
+SUBDIR.${MK_TESTS}+= tests
 
 .if ${MK_ZFS} != "no"
 _zinject= zinject

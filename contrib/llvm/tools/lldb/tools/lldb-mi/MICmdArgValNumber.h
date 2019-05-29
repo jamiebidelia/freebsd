@@ -7,18 +7,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-//++
-// File:        MICmdArgValNumber.h
-//
-// Overview:    CMICmdArgValNumber interface.
-//
-// Environment: Compilers:  Visual C++ 12.
-//                          gcc (Ubuntu/Linaro 4.8.1-10ubuntu9) 4.8.1
-//              Libraries:  See MIReadmetxt.
-//
-// Copyright:   None.
-//--
-
 #pragma once
 
 // In-house headers:
@@ -27,39 +15,57 @@
 // Declarations:
 class CMICmdArgContext;
 
-//++ ============================================================================
+//++
+//============================================================================
 // Details: MI common code class. Command argument class. Arguments object
 //          needing specialization derived from the CMICmdArgValBase class.
 //          An argument knows what type of argument it is and how it is to
-//          interpret the options (context) string to find and validate a matching
+//          interpret the options (context) string to find and validate a
+//          matching
 //          argument and so extract a value from it .
 //          Based on the Interpreter pattern.
-// Gotchas: None.
-// Authors: Illya Rudkin 14/04/2014.
-// Changes: None.
 //--
-class CMICmdArgValNumber : public CMICmdArgValBaseTemplate<MIint64>
-{
-    // Methods:
-  public:
-    /* ctor */ CMICmdArgValNumber(void);
-    /* ctor */ CMICmdArgValNumber(const CMIUtilString &vrArgName, const bool vbMandatory, const bool vbHandleByCmd);
-    //
-    bool IsArgNumber(const CMIUtilString &vrTxt) const;
+class CMICmdArgValNumber : public CMICmdArgValBaseTemplate<MIint64> {
+  // Enums:
+public:
+  //++
+  //---------------------------------------------------------------------------------
+  // Details: CMICmdArgValNumber needs to know what format of argument to look
+  // for in
+  //          the command options text.
+  //--
+  enum ArgValNumberFormat_e {
+    eArgValNumberFormat_Decimal = (1u << 0),
+    eArgValNumberFormat_Hexadecimal = (1u << 1),
+    eArgValNumberFormat_Auto =
+        ((eArgValNumberFormat_Hexadecimal << 1) -
+         1u) ///< Indicates to try and lookup everything up during a query.
+  };
 
-    // Overridden:
-  public:
-    // From CMICmdArgValBase
-    /* dtor */ virtual ~CMICmdArgValNumber(void);
-    // From CMICmdArgSet::IArg
-    virtual bool Validate(CMICmdArgContext &vwArgContext);
+  // Methods:
+public:
+  /* ctor */ CMICmdArgValNumber();
+  /* ctor */ CMICmdArgValNumber(
+      const CMIUtilString &vrArgName, const bool vbMandatory,
+      const bool vbHandleByCmd,
+      const MIuint vnNumberFormatMask = eArgValNumberFormat_Decimal);
+  //
+  bool IsArgNumber(const CMIUtilString &vrTxt) const;
 
-    // Methods:
-  private:
-    bool ExtractNumber(const CMIUtilString &vrTxt);
-    MIint64 GetNumber(void) const;
+  // Overridden:
+public:
+  // From CMICmdArgValBase
+  /* dtor */ ~CMICmdArgValNumber() override;
+  // From CMICmdArgSet::IArg
+  bool Validate(CMICmdArgContext &vwArgContext) override;
 
-    // Attributes:
-  private:
-    MIint64 m_nNumber;
+  // Methods:
+private:
+  bool ExtractNumber(const CMIUtilString &vrTxt);
+  MIint64 GetNumber() const;
+
+  // Attributes:
+private:
+  MIuint m_nNumberFormatMask;
+  MIint64 m_nNumber;
 };

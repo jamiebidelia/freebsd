@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause OR GPL-2.0
+ *
  * Copyright (c) 2005 Network Appliance, Inc. All rights reserved.
  * Copyright (c) 2005 Open Grid Computing, Inc. All rights reserved.
  *
@@ -29,7 +31,10 @@
  * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
  * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
+ *
+ * $FreeBSD$
  */
+
 #ifndef IW_CM_H
 #define IW_CM_H
 
@@ -49,12 +54,11 @@ enum iw_cm_event_type {
 struct iw_cm_event {
 	enum iw_cm_event_type event;
 	int			 status;
-	struct sockaddr_in local_addr;
-	struct sockaddr_in remote_addr;
+	struct sockaddr_storage local_addr;
+	struct sockaddr_storage remote_addr;
 	void *private_data;
 	void *provider_data;
 	u8 private_data_len;
-	struct socket *so;
 	u8 ord;
 	u8 ird;
 };
@@ -84,15 +88,17 @@ struct iw_cm_id {
 	iw_cm_handler		cm_handler;      /* client callback function */
 	void		        *context;	 /* client cb context */
 	struct ib_device	*device;
-	struct sockaddr_in      local_addr;
-	struct sockaddr_in	remote_addr;
+	struct sockaddr_storage local_addr;      /* local addr */
+	struct sockaddr_storage	remote_addr;
+	struct sockaddr_storage m_local_addr;	 /* nmapped local addr */
+	struct sockaddr_storage	m_remote_addr;	 /* nmapped rem addr */
 	void			*provider_data;	 /* provider private data */
 	iw_event_handler        event_handler;   /* cb for provider
 						    events */
 	/* Used by provider to add and remove refs on IW cm_id */
 	void (*add_ref)(struct iw_cm_id *);
 	void (*rem_ref)(struct iw_cm_id *);
-	struct socket           *so;
+	u8  tos;
 };
 
 struct iw_cm_conn_param {
@@ -124,6 +130,7 @@ struct iw_cm_verbs {
 					 int backlog);
 
 	int		(*destroy_listen)(struct iw_cm_id *cm_id);
+	char		ifname[IFNAMSIZ];
 };
 
 /**
@@ -134,7 +141,7 @@ struct iw_cm_verbs {
  *   returned IW CM identifier.
  * @context: User specified context associated with the id.
  */
-struct iw_cm_id *iw_create_cm_id(struct ib_device *device, struct socket *so,
+struct iw_cm_id *iw_create_cm_id(struct ib_device *device,
 				 iw_cm_handler cm_handler, void *context);
 
 /**

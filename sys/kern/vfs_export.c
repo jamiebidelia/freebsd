@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1989, 1993
  *	The Regents of the University of California.  All rights reserved.
  * (c) UNIX System Laboratories, Inc.
@@ -15,7 +17,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 4. Neither the name of the University nor the names of its contributors
+ * 3. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -41,6 +43,7 @@ __FBSDID("$FreeBSD$");
 #include "opt_inet6.h"
 
 #include <sys/param.h>
+#include <sys/systm.h>
 #include <sys/dirent.h>
 #include <sys/jail.h>
 #include <sys/kernel.h>
@@ -49,11 +52,10 @@ __FBSDID("$FreeBSD$");
 #include <sys/mbuf.h>
 #include <sys/mount.h>
 #include <sys/mutex.h>
-#include <sys/rwlock.h>
+#include <sys/rmlock.h>
 #include <sys/refcount.h>
 #include <sys/signalvar.h>
 #include <sys/socket.h>
-#include <sys/systm.h>
 #include <sys/vnode.h>
 
 #include <netinet/in.h>
@@ -61,8 +63,10 @@ __FBSDID("$FreeBSD$");
 
 static MALLOC_DEFINE(M_NETADDR, "export_host", "Export host address structure");
 
+#if defined(INET) || defined(INET6)
 static struct radix_node_head *vfs_create_addrlist_af(
 		    struct radix_node_head **prnh, int off);
+#endif
 static void	vfs_free_addrlist(struct netexport *nep);
 static int	vfs_free_netcred(struct radix_node *rn, void *w);
 static void	vfs_free_addrlist_af(struct radix_node_head **prnh);
@@ -98,11 +102,11 @@ static int
 vfs_hang_addrlist(struct mount *mp, struct netexport *nep,
     struct export_args *argp)
 {
-	register struct netcred *np;
-	register struct radix_node_head *rnh;
-	register int i;
+	struct netcred *np;
+	struct radix_node_head *rnh;
+	int i;
 	struct radix_node *rn;
-	struct sockaddr *saddr, *smask = 0;
+	struct sockaddr *saddr, *smask = NULL;
 #if defined(INET6) || defined(INET)
 	int off;
 #endif
@@ -199,7 +203,7 @@ vfs_hang_addrlist(struct mount *mp, struct netexport *nep,
 		goto out;
 	}
 	RADIX_NODE_HEAD_LOCK(rnh);
-	rn = (*rnh->rnh_addaddr)(saddr, smask, rnh, np->netc_rnodes);
+	rn = (*rnh->rnh_addaddr)(saddr, smask, &rnh->rh, np->netc_rnodes);
 	RADIX_NODE_HEAD_UNLOCK(rnh);
 	if (rn == NULL || np != (struct netcred *)rn) {	/* already exists */
 		error = EPERM;
@@ -231,7 +235,7 @@ vfs_free_netcred(struct radix_node *rn, void *w)
 	struct radix_node_head *rnh = (struct radix_node_head *) w;
 	struct ucred *cred;
 
-	(*rnh->rnh_deladdr) (rn->rn_key, rn->rn_mask, rnh);
+	(*rnh->rnh_deladdr) (rn->rn_key, rn->rn_mask, &rnh->rh);
 	cred = ((struct netcred *)rn)->netc_anon;
 	if (cred != NULL)
 		crfree(cred);
@@ -239,6 +243,7 @@ vfs_free_netcred(struct radix_node *rn, void *w)
 	return (0);
 }
 
+#if defined(INET) || defined(INET6)
 static struct radix_node_head *
 vfs_create_addrlist_af(struct radix_node_head **prnh, int off)
 {
@@ -248,6 +253,7 @@ vfs_create_addrlist_af(struct radix_node_head **prnh, int off)
 	RADIX_NODE_HEAD_LOCK_INIT(*prnh);
 	return (*prnh);
 }
+#endif
 
 static void
 vfs_free_addrlist_af(struct radix_node_head **prnh)
@@ -256,10 +262,10 @@ vfs_free_addrlist_af(struct radix_node_head **prnh)
 
 	rnh = *prnh;
 	RADIX_NODE_HEAD_LOCK(rnh);
-	(*rnh->rnh_walktree) (rnh, vfs_free_netcred, rnh);
+	(*rnh->rnh_walktree)(&rnh->rh, vfs_free_netcred, rnh);
 	RADIX_NODE_HEAD_UNLOCK(rnh);
 	RADIX_NODE_HEAD_DESTROY(rnh);
-	free(rnh, M_RTABLE);
+	rn_detachhead((void **)prnh);
 	prnh = NULL;
 }
 
@@ -406,7 +412,7 @@ vfs_setpublicfs(struct mount *mp, struct netexport *nep,
 	 * If an indexfile was specified, pull it in.
 	 */
 	if (argp->ex_indexfile != NULL) {
-		if (nfs_pub.np_index != NULL)
+		if (nfs_pub.np_index == NULL)
 			nfs_pub.np_index = malloc(MAXNAMLEN + 1, M_TEMP,
 			    M_WAITOK);
 		error = copyinstr(argp->ex_indexfile, nfs_pub.np_index,
@@ -443,45 +449,47 @@ vfs_setpublicfs(struct mount *mp, struct netexport *nep,
 static struct netcred *
 vfs_export_lookup(struct mount *mp, struct sockaddr *nam)
 {
+	RADIX_NODE_HEAD_RLOCK_TRACKER;
 	struct netexport *nep;
-	register struct netcred *np;
-	register struct radix_node_head *rnh;
+	struct netcred *np = NULL;
+	struct radix_node_head *rnh;
 	struct sockaddr *saddr;
 
 	nep = mp->mnt_export;
 	if (nep == NULL)
 		return (NULL);
-	np = NULL;
-	if (mp->mnt_flag & MNT_EXPORTED) {
-		/*
-		 * Lookup in the export list first.
-		 */
-		if (nam != NULL) {
-			saddr = nam;
-			rnh = NULL;
-			switch (saddr->sa_family) {
-			case AF_INET:
-				rnh = nep->ne4;
-				break;
-			case AF_INET6:
-				rnh = nep->ne6;
-				break;
-			}
-			if (rnh != NULL) {
-				RADIX_NODE_HEAD_RLOCK(rnh);
-				np = (struct netcred *)
-				    (*rnh->rnh_matchaddr)(saddr, rnh);
-				RADIX_NODE_HEAD_RUNLOCK(rnh);
-				if (np && np->netc_rnodes->rn_flags & RNF_ROOT)
-					np = NULL;
-			}
+	if ((mp->mnt_flag & MNT_EXPORTED) == 0)
+		return (NULL);
+
+	/*
+	 * Lookup in the export list
+	 */
+	if (nam != NULL) {
+		saddr = nam;
+		rnh = NULL;
+		switch (saddr->sa_family) {
+		case AF_INET:
+			rnh = nep->ne4;
+			break;
+		case AF_INET6:
+			rnh = nep->ne6;
+			break;
 		}
-		/*
-		 * If no address match, use the default if it exists.
-		 */
-		if (np == NULL && mp->mnt_flag & MNT_DEFEXPORTED)
-			np = &nep->ne_defexported;
+		if (rnh != NULL) {
+			RADIX_NODE_HEAD_RLOCK(rnh);
+			np = (struct netcred *) (*rnh->rnh_matchaddr)(saddr, &rnh->rh);
+			RADIX_NODE_HEAD_RUNLOCK(rnh);
+			if (np != NULL && (np->netc_rnodes->rn_flags & RNF_ROOT) != 0)
+				return (NULL);
+		}
 	}
+
+	/*
+	 * If no address match, use the default if it exists.
+	 */
+	if (np == NULL && (mp->mnt_flag & MNT_DEFEXPORTED) != 0)
+		return (&nep->ne_defexported);
+
 	return (np);
 }
 

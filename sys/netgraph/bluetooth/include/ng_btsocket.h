@@ -3,6 +3,8 @@
  */
 
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2001-2002 Maksim Yevmenkin <m_evmenkin@yahoo.com>
  * All rights reserved.
  *
@@ -228,10 +230,6 @@ struct sockaddr_l2cap_compat {
 	bdaddr_t	l2cap_bdaddr;	/* address */
 };
 
-#define BDADDR_BREDR 0
-#define BDADDR_LE_PUBLIC 1
-#define BDADDR_LE_RANDOM 2
-
 struct sockaddr_l2cap {
 	u_char		l2cap_len;	/* total length */
 	u_char		l2cap_family;	/* address family */
@@ -255,7 +253,7 @@ struct sockaddr_l2cap {
 #define SO_L2CAP_IFLOW		3	/* get incoming flow spec. */
 #define SO_L2CAP_OFLOW		4	/* get/set outgoing flow spec. */
 #define SO_L2CAP_FLUSH		5	/* get/set flush timeout */
-
+#define SO_L2CAP_ENCRYPTED      6      /* get/set whether wait for encryptin on connect */
 /*
  * Raw L2CAP sockets ioctl's
  */

@@ -10,19 +10,19 @@
 #ifndef liblldb_FreeBSDSignals_H_
 #define liblldb_FreeBSDSignals_H_
 
-// Project includes
 #include "lldb/Target/UnixSignals.h"
 
+namespace lldb_private {
+
 /// FreeBSD specific set of Unix signals.
-class FreeBSDSignals
-    : public lldb_private::UnixSignals
-{
+class FreeBSDSignals : public UnixSignals {
 public:
-    FreeBSDSignals();
+  FreeBSDSignals();
 
 private:
-    void
-    Reset();
+  void Reset() override;
 };
+
+} // namespace lldb_private
 
 #endif // liblldb_FreeBSDSignals_H_

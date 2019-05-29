@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1990, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -82,6 +84,9 @@ struct atexit {
 static struct atexit *__atexit;		/* points to head of LIFO stack */
 typedef DECLARE_BLOCK(void, atexit_block, void);
 
+int atexit_b(atexit_block);
+int __cxa_atexit(void (*)(void *), void *, void *);
+
 /*
  * Register the function described by 'fptr' to be called at application
  * exit or owning shared object unload time. This is a helper function
@@ -137,6 +142,7 @@ atexit(void (*func)(void))
 	error = atexit_register(&fn);
 	return (error);
 }
+__weak_reference(atexit, __libc_atexit);
 
 /**
  * Register a block to be performed at exit.

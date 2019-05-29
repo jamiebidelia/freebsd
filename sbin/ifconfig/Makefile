@@ -3,6 +3,7 @@
 
 .include <src.opts.mk>
 
+PACKAGE=runtime
 PROG=	ifconfig
 
 SRCS=	ifconfig.c		# base support
@@ -33,12 +34,15 @@ SRCS+=	ifvlan.c		# SIOC[GS]ETVLAN support
 SRCS+=	ifvxlan.c		# VXLAN support
 SRCS+=	ifgre.c			# GRE keys etc
 SRCS+=	ifgif.c			# GIF reversed header workaround
+SRCS+=	ifipsec.c		# IPsec VTI
 
 SRCS+=	sfp.c			# SFP/SFP+ information
 LIBADD+=	m
 
-SRCS+=	ifieee80211.c regdomain.c # SIOC[GS]IEEE80211 support
-LIBADD+=	bsdxml sbuf
+.if ${MK_WIRELESS_SUPPORT} != "no"
+SRCS+=	ifieee80211.c		# SIOC[GS]IEEE80211 support
+LIBADD+=	80211
+.endif
 
 SRCS+=	carp.c			# SIOC[GS]VH support
 SRCS+=	ifgroup.c		# ...
@@ -49,6 +53,10 @@ SRCS+=	ifpfsync.c		# pfsync(4) support
 SRCS+=	ifbridge.c		# bridge support
 SRCS+=	iflagg.c		# lagg support
 
+.if ${MK_EXPERIMENTAL} != "no"
+CFLAGS+= -DDRAFT_IETF_6MAN_IPV6ONLY_FLAG
+CFLAGS+= -DEXPERIMENTAL
+.endif
 .if ${MK_INET6_SUPPORT} != "no"
 CFLAGS+= -DINET6
 .endif
@@ -65,8 +73,7 @@ MAN=	ifconfig.8
 CFLAGS+= -Wall -Wmissing-prototypes -Wcast-qual -Wwrite-strings -Wnested-externs
 WARNS?=	2
 
-.if ${MK_TESTS} != "no"
-SUBDIR+=	tests
-.endif
+HAS_TESTS=
+SUBDIR.${MK_TESTS}+= tests
 
 .include <bsd.prog.mk>

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause AND BSD-2-Clause-FreeBSD
+ *
  * Copyright (C) 1995, 1996 Wolfgang Solfrank.
  * Copyright (C) 1995, 1996 TooLs GmbH.
  * All rights reserved.
@@ -57,7 +59,6 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
-#include "opt_compat.h"
 #include "opt_fpu_emu.h"
 
 #include <sys/param.h>
@@ -93,6 +94,8 @@ __FBSDID("$FreeBSD$");
 #include <machine/trap.h>
 #include <machine/vmparam.h>
 
+#include <vm/pmap.h>
+
 #ifdef FPU_EMU
 #include <powerpc/fpu/fpu_extern.h>
 #endif
@@ -120,6 +123,12 @@ static int	grab_mcontext32(struct thread *td, mcontext32_t *, int flags);
 #endif
 
 static int	grab_mcontext(struct thread *, mcontext_t *, int);
+
+static void	cleanup_power_extras(struct thread *);
+
+#ifdef __powerpc64__
+extern struct sysentvec elf64_freebsd_sysvec_v2;
+#endif
 
 void
 sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
@@ -152,7 +161,8 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 	 * Fill siginfo structure.
 	 */
 	ksi->ksi_info.si_signo = ksi->ksi_signo;
-	ksi->ksi_info.si_addr = (void *)((tf->exc == EXC_DSI) ? 
+	ksi->ksi_info.si_addr =
+	    (void *)((tf->exc == EXC_DSI || tf->exc == EXC_DSE) ? 
 	    tf->dar : tf->srr0);
 
 	#ifdef COMPAT_FREEBSD32
@@ -162,7 +172,7 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 		code = siginfo32.si_code;
 		sfp = (caddr_t)&sf32;
 		sfpsize = sizeof(sf32);
-		rndfsize = ((sizeof(sf32) + 15) / 16) * 16;
+		rndfsize = roundup(sizeof(sf32), 16);
 
 		/*
 		 * Save user context
@@ -189,9 +199,9 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 		 * 64-bit PPC defines a 288 byte scratch region
 		 * below the stack.
 		 */
-		rndfsize = 288 + ((sizeof(sf) + 47) / 48) * 48;
+		rndfsize = 288 + roundup(sizeof(sf), 48);
 		#else
-		rndfsize = ((sizeof(sf) + 15) / 16) * 16;
+		rndfsize = roundup(sizeof(sf), 16);
 		#endif
 
 		/*
@@ -219,10 +229,10 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 	 */
 	if ((td->td_pflags & TDP_ALTSTACK) != 0 && !oonstack &&
 	    SIGISMEMBER(psp->ps_sigonstack, sig)) {
-		usfp = (void *)(td->td_sigstk.ss_sp +
-		   td->td_sigstk.ss_size - rndfsize);
+		usfp = (void *)(((uintptr_t)td->td_sigstk.ss_sp +
+		   td->td_sigstk.ss_size - rndfsize) & ~0xFul);
 	} else {
-		usfp = (void *)(tf->fixreg[1] - rndfsize);
+		usfp = (void *)((tf->fixreg[1] - rndfsize) & ~0xFul);
 	}
 
 	/*
@@ -451,7 +461,7 @@ set_mcontext(struct thread *td, mcontext_t *mcp)
 	/*
 	 * Don't let the user set privileged MSR bits
 	 */
-	if ((mcp->mc_srr1 & PSL_USERSTATIC) != (tf->srr1 & PSL_USERSTATIC)) {
+	if ((mcp->mc_srr1 & psl_userstatic) != (tf->srr1 & psl_userstatic)) {
 		return (EINVAL);
 	}
 
@@ -465,6 +475,10 @@ set_mcontext(struct thread *td, mcontext_t *mcp)
 		tf->fixreg[13] = tls;
 	else
 		tf->fixreg[2] = tls;
+
+	/* Disable FPU */
+	tf->srr1 &= ~PSL_FP;
+	pcb->pcb_flags &= ~PCB_FPU;
 
 	if (mcp->mc_flags & _MC_FP_VALID) {
 		/* enable_fpu() will happen lazily on a fault */
@@ -494,6 +508,30 @@ set_mcontext(struct thread *td, mcontext_t *mcp)
 }
 
 /*
+ * Clean up extra POWER state.  Some per-process registers and states are not
+ * managed by the MSR, so must be cleaned up explicitly on thread exit.
+ *
+ * Currently this includes:
+ * DSCR -- Data stream control register (PowerISA 2.06+)
+ * FSCR -- Facility Status and Control Register (PowerISA 2.07+)
+ */
+static void
+cleanup_power_extras(struct thread *td)
+{
+	uint32_t pcb_flags;
+
+	if (td != curthread)
+		return;
+
+	pcb_flags = td->td_pcb->pcb_flags;
+	/* Clean up registers not managed by MSR. */
+	if (pcb_flags & PCB_CFSCR)
+		mtspr(SPR_FSCR, 0);
+	if (pcb_flags & PCB_CDSCR) 
+		mtspr(SPR_DSCRP, 0);
+}
+
+/*
  * Set set up registers on exec.
  */
 void
@@ -501,9 +539,6 @@ exec_setregs(struct thread *td, struct image_params *imgp, u_long stack)
 {
 	struct trapframe	*tf;
 	register_t		argc;
-	#ifdef __powerpc64__
-	register_t		entry_desc[3];
-	#endif
 
 	tf = trapframe(td);
 	bzero(tf, sizeof *tf);
@@ -523,22 +558,11 @@ exec_setregs(struct thread *td, struct image_params *imgp, u_long stack)
 	 *	- ps_strings is a NetBSD extention, and will be
 	 * 	  ignored by executables which are strictly
 	 *	  compliant with the SVR4 ABI.
-	 *
-	 * XXX We have to set both regs and retval here due to different
-	 * XXX calling convention in trap.c and init_main.c.
 	 */
 
 	/* Collect argc from the user stack */
 	argc = fuword((void *)stack);
 
-        /*
-         * XXX PG: these get overwritten in the syscall return code.
-         * execve() should return EJUSTRETURN, like it does on NetBSD.
-         * Emulate by setting the syscall return value cells. The
-         * registers still have to be set for init's fork trampoline.
-         */
-        td->td_retval[0] = argc;
-        td->td_retval[1] = stack + sizeof(register_t);
 	tf->fixreg[3] = argc;
 	tf->fixreg[4] = stack + sizeof(register_t);
 	tf->fixreg[5] = stack + (2 + argc)*sizeof(register_t);
@@ -546,26 +570,12 @@ exec_setregs(struct thread *td, struct image_params *imgp, u_long stack)
 	tf->fixreg[7] = 0;				/* termination vector */
 	tf->fixreg[8] = (register_t)imgp->ps_strings;	/* NetBSD extension */
 
-	#ifdef __powerpc64__
-	/*
-	 * For 64-bit, we need to disentangle the function descriptor
-	 * 
-	 * 0. entry point
-	 * 1. TOC value (r2)
-	 * 2. Environment pointer (r11)
-	 */
-
-	(void)copyin((void *)imgp->entry_addr, entry_desc, sizeof(entry_desc));
-	tf->srr0 = entry_desc[0] + imgp->reloc_base;
-	tf->fixreg[2] = entry_desc[1] + imgp->reloc_base;
-	tf->fixreg[11] = entry_desc[2] + imgp->reloc_base;
-	tf->srr1 = PSL_SF | PSL_USERSET | PSL_FE_DFLT;
-	if (mfmsr() & PSL_HV)
-		tf->srr1 |= PSL_HV;
-	#else
 	tf->srr0 = imgp->entry_addr;
-	tf->srr1 = PSL_USERSET | PSL_FE_DFLT;
+	#ifdef __powerpc64__
+	tf->fixreg[12] = imgp->entry_addr;
 	#endif
+	tf->srr1 = psl_userset | PSL_FE_DFLT;
+	cleanup_power_extras(td);
 	td->td_pcb->pcb_flags = 0;
 }
 
@@ -582,8 +592,6 @@ ppc32_setregs(struct thread *td, struct image_params *imgp, u_long stack)
 
 	argc = fuword32((void *)stack);
 
-        td->td_retval[0] = argc;
-        td->td_retval[1] = stack + sizeof(uint32_t);
 	tf->fixreg[3] = argc;
 	tf->fixreg[4] = stack + sizeof(uint32_t);
 	tf->fixreg[5] = stack + (2 + argc)*sizeof(uint32_t);
@@ -592,10 +600,8 @@ ppc32_setregs(struct thread *td, struct image_params *imgp, u_long stack)
 	tf->fixreg[8] = (register_t)imgp->ps_strings;	/* NetBSD extension */
 
 	tf->srr0 = imgp->entry_addr;
-	tf->srr1 = PSL_USERSET | PSL_FE_DFLT;
-	tf->srr1 &= ~PSL_SF;
-	if (mfmsr() & PSL_HV)
-		tf->srr1 |= PSL_HV;
+	tf->srr1 = psl_userset32 | PSL_FE_DFLT;
+	cleanup_power_extras(td);
 	td->td_pcb->pcb_flags = 0;
 }
 #endif
@@ -622,13 +628,18 @@ int
 fill_fpregs(struct thread *td, struct fpreg *fpregs)
 {
 	struct pcb *pcb;
+	int i;
 
 	pcb = td->td_pcb;
 
 	if ((pcb->pcb_flags & PCB_FPREGS) == 0)
 		memset(fpregs, 0, sizeof(struct fpreg));
-	else
-		memcpy(fpregs, &pcb->pcb_fpu, sizeof(struct fpreg));
+	else {
+		memcpy(&fpregs->fpscr, &pcb->pcb_fpu.fpscr, sizeof(double));
+		for (i = 0; i < 32; i++)
+			memcpy(&fpregs->fpreg[i], &pcb->pcb_fpu.fpr[i].fpr,
+			    sizeof(double));
+	}
 
 	return (0);
 }
@@ -655,10 +666,15 @@ int
 set_fpregs(struct thread *td, struct fpreg *fpregs)
 {
 	struct pcb *pcb;
+	int i;
 
 	pcb = td->td_pcb;
 	pcb->pcb_flags |= PCB_FPREGS;
-	memcpy(&pcb->pcb_fpu, fpregs, sizeof(struct fpreg));
+	memcpy(&pcb->pcb_fpu.fpscr, &fpregs->fpscr, sizeof(double));
+	for (i = 0; i < 32; i++) {
+		memcpy(&pcb->pcb_fpu.fpr[i].fpr, &fpregs->fpreg[i],
+		    sizeof(double));
+	}
 
 	return (0);
 }
@@ -805,6 +821,7 @@ freebsd32_getcontext(struct thread *td, struct freebsd32_getcontext_args *uap)
 	if (uap->ucp == NULL)
 		ret = EINVAL;
 	else {
+		bzero(&uc, sizeof(uc));
 		get_mcontext32(td, &uc.uc_mcontext, GET_MC_CLEAR_RET);
 		PROC_LOCK(td->td_proc);
 		uc.uc_sigmask = td->td_sigmask;
@@ -844,6 +861,7 @@ freebsd32_swapcontext(struct thread *td, struct freebsd32_swapcontext_args *uap)
 	if (uap->oucp == NULL || uap->ucp == NULL)
 		ret = EINVAL;
 	else {
+		bzero(&uc, sizeof(uc));
 		get_mcontext32(td, &uc.uc_mcontext, GET_MC_CLEAR_RET);
 		PROC_LOCK(td->td_proc);
 		uc.uc_sigmask = td->td_sigmask;
@@ -881,10 +899,11 @@ cpu_set_syscall_retval(struct thread *td, int error)
 	if (tf->fixreg[0] == SYS___syscall &&
 	    (SV_PROC_FLAG(p, SV_ILP32))) {
 		int code = tf->fixreg[FIRSTARG + 1];
-		if (p->p_sysent->sv_mask)
-			code &= p->p_sysent->sv_mask;
-		fixup = (code != SYS_freebsd6_lseek && code != SYS_lseek) ?
-		    1 : 0;
+		fixup = (
+#if defined(COMPAT_FREEBSD6) && defined(SYS_freebsd6_lseek)
+		    code != SYS_freebsd6_lseek &&
+#endif
+		    code != SYS_lseek) ?  1 : 0;
 	} else
 		fixup = 0;
 
@@ -909,11 +928,7 @@ cpu_set_syscall_retval(struct thread *td, int error)
 		tf->srr0 -= 4;
 		break;
 	default:
-		if (p->p_sysent->sv_errsize) {
-			error = (error < p->p_sysent->sv_errsize) ?
-			    p->p_sysent->sv_errtbl[error] : -1;
-		}
-		tf->fixreg[FIRSTARG] = error;
+		tf->fixreg[FIRSTARG] = SV_ABI_ERRNO(p, error);
 		tf->cr |= 0x10000000;		/* Set summary overflow */
 		break;
 	}
@@ -925,6 +940,7 @@ cpu_set_syscall_retval(struct thread *td, int error)
 void
 cpu_thread_exit(struct thread *td)
 {
+	cleanup_power_extras(td);
 }
 
 void
@@ -960,7 +976,7 @@ cpu_set_user_tls(struct thread *td, void *tls_base)
 }
 
 void
-cpu_set_upcall(struct thread *td, struct thread *td0)
+cpu_copy_thread(struct thread *td, struct thread *td0)
 {
 	struct pcb *pcb2;
 	struct trapframe *tf;
@@ -986,22 +1002,27 @@ cpu_set_upcall(struct thread *td, struct thread *td0)
 	cf->cf_arg1 = (register_t)tf;
 
 	pcb2->pcb_sp = (register_t)cf;
-	#ifdef __powerpc64__
+	#if defined(__powerpc64__) && (!defined(_CALL_ELF) || _CALL_ELF == 1)
 	pcb2->pcb_lr = ((register_t *)fork_trampoline)[0];
 	pcb2->pcb_toc = ((register_t *)fork_trampoline)[1];
 	#else
 	pcb2->pcb_lr = (register_t)fork_trampoline;
+	pcb2->pcb_context[0] = pcb2->pcb_lr;
 	#endif
 	pcb2->pcb_cpu.aim.usr_vsid = 0;
+#ifdef __SPE__
+	pcb2->pcb_vec.vscr = SPEFSCR_FINVE | SPEFSCR_FDBZE |
+	    SPEFSCR_FUNFE | SPEFSCR_FOVFE;
+#endif
 
 	/* Setup to release spin count in fork_exit(). */
 	td->td_md.md_spinlock_count = 1;
-	td->td_md.md_saved_msr = PSL_KERNSET;
+	td->td_md.md_saved_msr = psl_kernset;
 }
 
 void
-cpu_set_upcall_kse(struct thread *td, void (*entry)(void *), void *arg,
-	stack_t *stack)
+cpu_set_upcall(struct thread *td, void (*entry)(void *), void *arg,
+    stack_t *stack)
 {
 	struct trapframe *tf;
 	uintptr_t sp;
@@ -1021,36 +1042,81 @@ cpu_set_upcall_kse(struct thread *td, void (*entry)(void *), void *arg,
 	tf->fixreg[3] = (register_t)arg;
 	if (SV_PROC_FLAG(td->td_proc, SV_ILP32)) {
 		tf->srr0 = (register_t)entry;
-		tf->srr1 = PSL_USERSET | PSL_FE_DFLT;
 		#ifdef __powerpc64__
-		tf->srr1 &= ~PSL_SF;
+		tf->srr1 = psl_userset32 | PSL_FE_DFLT;
+		#else
+		tf->srr1 = psl_userset | PSL_FE_DFLT;
 		#endif
 	} else {
 	    #ifdef __powerpc64__
-		register_t entry_desc[3];
-		(void)copyin((void *)entry, entry_desc, sizeof(entry_desc));
-		tf->srr0 = entry_desc[0];
-		tf->fixreg[2] = entry_desc[1];
-		tf->fixreg[11] = entry_desc[2];
-		tf->srr1 = PSL_SF | PSL_USERSET | PSL_FE_DFLT;
+		if (td->td_proc->p_sysent == &elf64_freebsd_sysvec_v2) {
+			tf->srr0 = (register_t)entry;
+			/* ELFv2 ABI requires that the global entry point be in r12. */
+			tf->fixreg[12] = (register_t)entry;
+		}
+		else {
+			register_t entry_desc[3];
+			(void)copyin((void *)entry, entry_desc, sizeof(entry_desc));
+			tf->srr0 = entry_desc[0];
+			tf->fixreg[2] = entry_desc[1];
+			tf->fixreg[11] = entry_desc[2];
+		}
+		tf->srr1 = psl_userset | PSL_FE_DFLT;
 	    #endif
 	}
 
-	#ifdef __powerpc64__
-	if (mfmsr() & PSL_HV)
-		tf->srr1 |= PSL_HV;
-	#endif
 	td->td_pcb->pcb_flags = 0;
+#ifdef __SPE__
+	td->td_pcb->pcb_vec.vscr = SPEFSCR_FINVE | SPEFSCR_FDBZE |
+	    SPEFSCR_FUNFE | SPEFSCR_FOVFE;
+#endif
 
 	td->td_retval[0] = (register_t)entry;
 	td->td_retval[1] = 0;
 }
 
+static int
+emulate_mfspr(int spr, int reg, struct trapframe *frame){
+	struct thread *td;
+
+	td = curthread;
+
+	if (spr == SPR_DSCR || spr == SPR_DSCRP) {
+		// If DSCR was never set, get the default DSCR
+		if ((td->td_pcb->pcb_flags & PCB_CDSCR) == 0)
+			td->td_pcb->pcb_dscr = mfspr(SPR_DSCRP);
+
+		frame->fixreg[reg] = td->td_pcb->pcb_dscr;
+		frame->srr0 += 4;
+		return 0;
+	} else
+		return SIGILL;
+}
+
+static int
+emulate_mtspr(int spr, int reg, struct trapframe *frame){
+	struct thread *td;
+
+	td = curthread;
+
+	if (spr == SPR_DSCR || spr == SPR_DSCRP) {
+		td->td_pcb->pcb_flags |= PCB_CDSCR;
+		td->td_pcb->pcb_dscr = frame->fixreg[reg];
+		mtspr(SPR_DSCRP, frame->fixreg[reg]);
+		frame->srr0 += 4;
+		return 0;
+	} else
+		return SIGILL;
+}
+
+#define XFX 0xFC0007FF
 int
-ppc_instr_emulate(struct trapframe *frame, struct pcb *pcb)
+ppc_instr_emulate(struct trapframe *frame, struct thread *td)
 {
+	struct pcb *pcb;
 	uint32_t instr;
 	int reg, sig;
+	int rs, spr;
 
 	instr = fuword32((void *)frame->srr0);
 	sig = SIGILL;
@@ -1060,21 +1126,39 @@ ppc_instr_emulate(struct trapframe *frame, struct pcb *pcb)
 		frame->fixreg[reg] = mfpvr();
 		frame->srr0 += 4;
 		return (0);
-	}
-
-	if ((instr & 0xfc000ffe) == 0x7c0004ac) {	/* various sync */
+	} else if ((instr & XFX) == 0x7c0002a6) {	/* mfspr */
+		rs = (instr &  0x3e00000) >> 21;
+		spr = (instr & 0x1ff800) >> 16;
+		return emulate_mfspr(spr, rs, frame);
+	} else if ((instr & XFX) == 0x7c0003a6) {	/* mtspr */
+		rs = (instr &  0x3e00000) >> 21;
+		spr = (instr & 0x1ff800) >> 16;
+		return emulate_mtspr(spr, rs, frame);
+	} else if ((instr & 0xfc000ffe) == 0x7c0004ac) {	/* various sync */
 		powerpc_sync(); /* Do a heavy-weight sync */
 		frame->srr0 += 4;
 		return (0);
 	}
 
+	pcb = td->td_pcb;
 #ifdef FPU_EMU
 	if (!(pcb->pcb_flags & PCB_FPREGS)) {
 		bzero(&pcb->pcb_fpu, sizeof(pcb->pcb_fpu));
 		pcb->pcb_flags |= PCB_FPREGS;
-	}
-	sig = fpu_emulate(frame, (struct fpreg *)&pcb->pcb_fpu);
+	} else if (pcb->pcb_flags & PCB_FPU)
+		save_fpu(td);
+	sig = fpu_emulate(frame, &pcb->pcb_fpu);
+	if ((sig == 0 || sig == SIGFPE) && pcb->pcb_flags & PCB_FPU)
+		enable_fpu(td);
 #endif
+	if (sig == SIGILL) {
+		if (pcb->pcb_lastill != frame->srr0) {
+			/* Allow a second chance, in case of cache sync issues. */
+			sig = 0;
+			pmap_sync_icache(PCPU_GET(curpmap), frame->srr0, 4);
+			pcb->pcb_lastill = frame->srr0;
+		}
+	}
 
 	return (sig);
 }

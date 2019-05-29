@@ -44,6 +44,8 @@
 #include <sys/_lock.h>
 #include <sys/_mutex.h>
 
+#include <vm/_vm_radix.h>
+
 #ifdef _KERNEL
 
 #define	vtophys(va)	pmap_kextract((vm_offset_t)(va))
@@ -78,9 +80,11 @@ struct pv_addr {
 struct pmap {
 	struct mtx		pm_mtx;
 	struct pmap_statistics	pm_stats;	/* pmap statictics */
-	pd_entry_t		*pm_l1;
+	pd_entry_t		*pm_l0;
 	TAILQ_HEAD(,pv_chunk)	pm_pvchunk;	/* list of mappings in pmap */
+	struct vm_radix		pm_root;	/* spare page table pages */
 };
+typedef struct pmap *pmap_t;
 
 typedef struct pv_entry {
 	vm_offset_t		pv_va;	/* virtual address for mapping */
@@ -93,15 +97,22 @@ typedef struct pv_entry {
  */
 #define	_NPCM	3
 #define	_NPCPV	168
-struct pv_chunk {
-	struct pmap *		pc_pmap;
-	TAILQ_ENTRY(pv_chunk)	pc_list;
-	uint64_t		pc_map[_NPCM];  /* bitmap; 1 = free */
+#define	PV_CHUNK_HEADER							\
+	pmap_t			pc_pmap;				\
+	TAILQ_ENTRY(pv_chunk)	pc_list;				\
+	uint64_t		pc_map[_NPCM];	/* bitmap; 1 = free */	\
 	TAILQ_ENTRY(pv_chunk)	pc_lru;
+
+struct pv_chunk_header {
+	PV_CHUNK_HEADER
+};
+
+struct pv_chunk {
+	PV_CHUNK_HEADER
 	struct pv_entry		pc_pventry[_NPCPV];
 };
 
-typedef struct pmap *pmap_t;
+struct thread;
 
 #ifdef _KERNEL
 extern struct pmap	kernel_pmap_store;
@@ -121,7 +132,7 @@ extern struct pmap	kernel_pmap_store;
 #define	PMAP_TRYLOCK(pmap)	mtx_trylock(&(pmap)->pm_mtx)
 #define	PMAP_UNLOCK(pmap)	mtx_unlock(&(pmap)->pm_mtx)
 
-#define	PHYS_AVAIL_SIZE	10
+#define	PHYS_AVAIL_SIZE	32
 extern vm_paddr_t phys_avail[];
 extern vm_paddr_t dump_avail[];
 extern vm_offset_t virtual_avail;
@@ -134,12 +145,14 @@ extern vm_offset_t virtual_end;
 #define	L1_MAPPABLE_P(va, pa, size)					\
 	((((va) | (pa)) & L1_OFFSET) == 0 && (size) >= L1_SIZE)
 
-void	pmap_bootstrap(vm_offset_t, vm_paddr_t, vm_size_t);
-void	pmap_kenter(vm_offset_t, vm_paddr_t);
+void	pmap_bootstrap(vm_offset_t, vm_offset_t, vm_paddr_t, vm_size_t);
+void	pmap_kenter(vm_offset_t sva, vm_size_t size, vm_paddr_t pa, int mode);
 void	pmap_kenter_device(vm_offset_t, vm_size_t, vm_paddr_t);
 vm_paddr_t pmap_kextract(vm_offset_t va);
 void	pmap_kremove(vm_offset_t);
 void	pmap_kremove_device(vm_offset_t, vm_size_t);
+void	*pmap_mapdev_attr(vm_offset_t pa, vm_size_t size, vm_memattr_t ma);
+bool	pmap_ps_enabled(pmap_t pmap);
 
 void	*pmap_mapdev(vm_offset_t, vm_size_t);
 void	*pmap_mapbios(vm_paddr_t, vm_size_t);
@@ -149,7 +162,21 @@ void	pmap_unmapbios(vm_offset_t, vm_size_t);
 boolean_t pmap_map_io_transient(vm_page_t *, vm_offset_t *, int, boolean_t);
 void	pmap_unmap_io_transient(vm_page_t *, vm_offset_t *, int, boolean_t);
 
+bool	pmap_get_tables(pmap_t, vm_offset_t, pd_entry_t **, pd_entry_t **,
+    pd_entry_t **, pt_entry_t **);
+
+int	pmap_fault(pmap_t, uint64_t, uint64_t);
+
+struct pcb *pmap_switch(struct thread *, struct thread *);
+
 #define	pmap_page_is_mapped(m)	(!TAILQ_EMPTY(&(m)->md.pv_list))
+
+static inline int
+pmap_vmspace_copy(pmap_t dst_pmap __unused, pmap_t src_pmap __unused)
+{
+
+	return (0);
+}
 
 #endif	/* _KERNEL */
 

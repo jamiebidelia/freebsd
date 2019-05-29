@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2002 Networks Associates Technology, Inc.
  * All rights reserved.
  *
@@ -19,7 +21,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 4. Neither the name of the University nor the names of its contributors
+ * 3. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -119,7 +121,7 @@ static char	*dkname;
 static char	*disktype;
 
 static void getfssize(intmax_t *, const char *p, intmax_t, intmax_t);
-static struct disklabel *getdisklabel(char *s);
+static struct disklabel *getdisklabel(void);
 static void usage(void);
 static int expand_number_int(const char *buf, int *num);
 
@@ -130,7 +132,6 @@ main(int argc, char *argv[])
 {
 	struct partition *pp;
 	struct disklabel *lp;
-	struct partition oldpartition;
 	struct stat st;
 	char *cp, *special;
 	intmax_t reserved;
@@ -151,9 +152,11 @@ main(int argc, char *argv[])
 		case 'L':
 			volumelabel = optarg;
 			i = -1;
-			while (isalnum(volumelabel[++i]));
+			while (isalnum(volumelabel[++i]) ||
+			    volumelabel[i] == '_' || volumelabel[i] == '-');
 			if (volumelabel[i] != '\0') {
-				errx(1, "bad volume label. Valid characters are alphanumerics.");
+				errx(1, "bad volume label. Valid characters "
+				    "are alphanumerics, dashes, and underscores.");
 			}
 			if (strlen(volumelabel) >= MAXVOLLEN) {
 				errx(1, "bad volume label. Length is longer than %d.",
@@ -183,6 +186,7 @@ main(int argc, char *argv[])
 		case 'j':
 			jflag = 1;
 			/* fall through to enable soft updates */
+			/* FALLTHROUGH */
 		case 'U':
 			Uflag = 1;
 			break;
@@ -307,7 +311,7 @@ main(int argc, char *argv[])
 	if (!special[0])
 		err(1, "empty file/special name");
 	cp = strrchr(special, '/');
-	if (cp == 0) {
+	if (cp == NULL) {
 		/*
 		 * No path prefix; try prefixing _PATH_DEV.
 		 */
@@ -349,7 +353,7 @@ main(int argc, char *argv[])
 		getfssize(&fssize, special, mediasize / sectorsize, reserved);
 	}
 	pp = NULL;
-	lp = getdisklabel(special);
+	lp = getdisklabel();
 	if (lp != NULL) {
 		if (!is_file) /* already set for files */
 			part_name = special[strlen(special) - 1];
@@ -362,7 +366,6 @@ main(int argc, char *argv[])
 			pp = &lp->d_partitions[RAW_PART];
 		else
 			pp = &lp->d_partitions[*cp - 'a'];
-		oldpartition = *pp;
 		if (pp->p_size == 0)
 			errx(1, "%s: `%c' partition is unavailable",
 			    special, *cp);
@@ -425,7 +428,7 @@ getfssize(intmax_t *fsz, const char *s, intmax_t disksize, intmax_t reserved)
 }
 
 struct disklabel *
-getdisklabel(char *s)
+getdisklabel(void)
 {
 	static struct disklabel lab;
 	struct disklabel *lp;
@@ -452,7 +455,7 @@ getdisklabel(char *s)
 }
 
 static void
-usage()
+usage(void)
 {
 	fprintf(stderr,
 	    "usage: %s [ -fsoptions ] special-device%s\n",

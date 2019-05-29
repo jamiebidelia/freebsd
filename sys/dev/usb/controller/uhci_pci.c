@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 1998 The NetBSD Foundation, Inc.
  * All rights reserved.
  *
@@ -77,6 +79,7 @@ __FBSDID("$FreeBSD$");
 #include "usb_if.h"
 
 #define	PCI_UHCI_VENDORID_INTEL		0x8086
+#define	PCI_UHCI_VENDORID_HP		0x103c
 #define	PCI_UHCI_VENDORID_VIA		0x1106
 
 /* PIIX4E has no separate stepping */
@@ -160,6 +163,12 @@ uhci_pci_match(device_t self)
 	case 0x24de8086:
 		return ("Intel 82801EB (ICH5) USB controller USB-D");
 
+	case 0x25a98086:
+		return ("Intel 6300ESB USB controller USB-A");
+
+	case 0x25aa8086:
+		return ("Intel 6300ESB USB controller USB-B");
+
 	case 0x26588086:
 		return ("Intel 82801FB/FR/FW/FRW (ICH6) USB controller USB-A");
 
@@ -221,6 +230,9 @@ uhci_pci_match(device_t self)
 
 	case 0x76028086:
 		return ("Intel 82372FB/82468GX USB controller");
+
+	case 0x3300103c:
+		return ("HP iLO Standard Virtual USB controller");
 
 	case 0x30381106:
 		return ("VIA 83C572 USB controller");
@@ -309,6 +321,9 @@ uhci_pci_attach(device_t self)
 	case PCI_UHCI_VENDORID_INTEL:
 		sprintf(sc->sc_vendor, "Intel");
 		break;
+	case PCI_UHCI_VENDORID_HP:
+		sprintf(sc->sc_vendor, "HP");
+		break;
 	case PCI_UHCI_VENDORID_VIA:
 		sprintf(sc->sc_vendor, "VIA");
 		break;
@@ -380,13 +395,7 @@ int
 uhci_pci_detach(device_t self)
 {
 	uhci_softc_t *sc = device_get_softc(self);
-	device_t bdev;
 
-	if (sc->sc_bus.bdev) {
-		bdev = sc->sc_bus.bdev;
-		device_detach(bdev);
-		device_delete_child(self, bdev);
-	}
 	/* during module unload there are lots of children leftover */
 	device_delete_children(self);
 

@@ -50,18 +50,45 @@ namespace PPC {
     PRED_UN_PLUS  = (3 << 5) | 15,
     PRED_NU_PLUS  = (3 << 5) |  7,
 
+    // SPE scalar compare instructions always set the GT bit.
+    PRED_SPE      = PRED_GT,
+
     // When dealing with individual condition-register bits, we have simple set
     // and unset predicates.
     PRED_BIT_SET =   1024,
     PRED_BIT_UNSET = 1025
   };
-  
+
+  // Bit for branch taken (plus) or not-taken (minus) hint
+  enum BranchHintBit {
+    BR_NO_HINT       = 0x0,
+    BR_NONTAKEN_HINT = 0x2,
+    BR_TAKEN_HINT    = 0x3,
+    BR_HINT_MASK     = 0X3
+  };
+
   /// Invert the specified predicate.  != -> ==, < -> >=.
   Predicate InvertPredicate(Predicate Opcode);
 
   /// Assume the condition register is set by MI(a,b), return the predicate if
   /// we modify the instructions such that condition register is set by MI(b,a).
   Predicate getSwappedPredicate(Predicate Opcode);
+
+  /// Return the condition without hint bits.
+  inline unsigned getPredicateCondition(Predicate Opcode) {
+    return (unsigned)(Opcode & ~BR_HINT_MASK);
+  }
+
+  /// Return the hint bits of the predicate.
+  inline unsigned getPredicateHint(Predicate Opcode) {
+    return (unsigned)(Opcode & BR_HINT_MASK);
+  }
+
+  /// Return predicate consisting of specified condition and hint bits.
+  inline Predicate getPredicate(unsigned Condition, unsigned Hint) {
+    return (Predicate)((Condition & ~BR_HINT_MASK) |
+                       (Hint & BR_HINT_MASK));
+  }
 }
 }
 

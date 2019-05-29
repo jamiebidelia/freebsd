@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2011 NetApp, Inc.
  * All rights reserved.
  *
@@ -76,11 +78,17 @@ struct pptintr_arg {				/* pptintr(pptintr_arg) */
 	uint64_t	msg_data;
 };
 
+struct pptseg {
+	vm_paddr_t	gpa;
+	size_t		len;
+	int		wired;
+};
+
 struct pptdev {
 	device_t	dev;
 	struct vm	*vm;			/* owner of this device */
 	TAILQ_ENTRY(pptdev)	next;
-	struct vm_memory_segment mmio[MAX_MMIOSEGS];
+	struct pptseg mmio[MAX_MMIOSEGS];
 	struct {
 		int	num_msgs;		/* guest state */
 
@@ -148,6 +156,7 @@ ppt_attach(device_t dev)
 
 	ppt = device_get_softc(dev);
 
+	iommu_remove_device(iommu_host_domain(), pci_get_rid(dev));
 	num_pptdevs++;
 	TAILQ_INSERT_TAIL(&pptdev_list, ppt, next);
 	ppt->dev = dev;
@@ -169,6 +178,8 @@ ppt_detach(device_t dev)
 		return (EBUSY);
 	num_pptdevs--;
 	TAILQ_REMOVE(&pptdev_list, ppt, next);
+	pci_disable_busmaster(dev);
+	iommu_add_device(iommu_host_domain(), pci_get_rid(dev));
 
 	return (0);
 }
@@ -207,14 +218,14 @@ static void
 ppt_unmap_mmio(struct vm *vm, struct pptdev *ppt)
 {
 	int i;
-	struct vm_memory_segment *seg;
+	struct pptseg *seg;
 
 	for (i = 0; i < MAX_MMIOSEGS; i++) {
 		seg = &ppt->mmio[i];
 		if (seg->len == 0)
 			continue;
 		(void)vm_unmap_mmio(vm, seg->gpa, seg->len);
-		bzero(seg, sizeof(struct vm_memory_segment));
+		bzero(seg, sizeof(struct pptseg));
 	}
 }
 
@@ -324,7 +335,7 @@ ppt_is_mmio(struct vm *vm, vm_paddr_t gpa)
 {
 	int i;
 	struct pptdev *ppt;
-	struct vm_memory_segment *seg;
+	struct pptseg *seg;
 
 	TAILQ_FOREACH(ppt, &pptdev_list, next) {
 		if (ppt->vm != vm)
@@ -342,6 +353,17 @@ ppt_is_mmio(struct vm *vm, vm_paddr_t gpa)
 	return (FALSE);
 }
 
+static void
+ppt_pci_reset(device_t dev)
+{
+
+	if (pcie_flr(dev,
+	     max(pcie_get_max_completion_timeout(dev) / 1000, 10), true))
+		return;
+
+	pci_power_reset(dev);
+}
+
 int
 ppt_assign_device(struct vm *vm, int bus, int slot, int func)
 {
@@ -356,6 +378,9 @@ ppt_assign_device(struct vm *vm, int bus, int slot, int func)
 		if (ppt->vm != NULL && ppt->vm != vm)
 			return (EBUSY);
 
+		pci_save_state(ppt->dev);
+		ppt_pci_reset(ppt->dev);
+		pci_restore_state(ppt->dev);
 		ppt->vm = vm;
 		iommu_add_device(vm_iommu_domain(vm), pci_get_rid(ppt->dev));
 		return (0);
@@ -375,6 +400,10 @@ ppt_unassign_device(struct vm *vm, int bus, int slot, int func)
 		 */
 		if (ppt->vm != vm)
 			return (EBUSY);
+
+		pci_save_state(ppt->dev);
+		ppt_pci_reset(ppt->dev);
+		pci_restore_state(ppt->dev);
 		ppt_unmap_mmio(vm, ppt);
 		ppt_teardown_msi(ppt);
 		ppt_teardown_msix(ppt);
@@ -410,7 +439,7 @@ ppt_map_mmio(struct vm *vm, int bus, int slot, int func,
 	     vm_paddr_t gpa, size_t len, vm_paddr_t hpa)
 {
 	int i, error;
-	struct vm_memory_segment *seg;
+	struct pptseg *seg;
 	struct pptdev *ppt;
 
 	ppt = ppt_find(bus, slot, func);

@@ -1,5 +1,7 @@
 /*-
- * Copyright (c) 2010-2015 Solarflare Communications Inc.
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
+ * Copyright (c) 2010-2016 Solarflare Communications Inc.
  * All rights reserved.
  *
  * This software was developed in part by Philip Paeps under contract for
@@ -34,7 +36,10 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
-#include <sys/types.h>
+#include "opt_rss.h"
+
+#include <sys/param.h>
+#include <sys/malloc.h>
 #include <sys/mbuf.h>
 #include <sys/smp.h>
 #include <sys/socket.h>
@@ -53,6 +58,10 @@ __FBSDID("$FreeBSD$");
 #include <netinet/tcp.h>
 
 #include <machine/in_cksum.h>
+
+#ifdef RSS
+#include <net/rss_config.h>
+#endif
 
 #include "common/efx.h"
 
@@ -159,6 +168,9 @@ sfxge_rx_qflush_failed(struct sfxge_rxq *rxq)
 	rxq->flush_state = SFXGE_FLUSH_FAILED;
 }
 
+#ifdef RSS
+static uint8_t toep_key[RSS_KEYSIZE];
+#else
 static uint8_t toep_key[] = {
 	0x6d, 0x5a, 0x56, 0xda, 0x25, 0x5b, 0x0e, 0xc2,
 	0x41, 0x67, 0x25, 0x3d, 0x43, 0xa3, 0x8f, 0xb0,
@@ -166,6 +178,7 @@ static uint8_t toep_key[] = {
 	0x77, 0xcb, 0x2d, 0xa3, 0x80, 0x30, 0xf2, 0x0c,
 	0x6a, 0x42, 0xb7, 0x3b, 0xbe, 0xac, 0x01, 0xfa
 };
+#endif
 
 static void
 sfxge_rx_post_refill(void *arg)
@@ -179,8 +192,7 @@ sfxge_rx_post_refill(void *arg)
 	sc = rxq->sc;
 	index = rxq->index;
 	evq = sc->evq[index];
-
-	magic = SFXGE_MAGIC_RX_QREFILL | index;
+	magic = sfxge_sw_ev_rxq_magic(SFXGE_SW_EV_RX_QREFILL, rxq);
 
 	/* This is guaranteed due to the start/stop order of rx and ev */
 	KASSERT(evq->init_state == SFXGE_EVQ_STARTED,
@@ -203,25 +215,6 @@ sfxge_rx_schedule_refill(struct sfxge_rxq *rxq, boolean_t retrying)
 
 	callout_reset_curcpu(&rxq->refill_callout, rxq->refill_delay,
 			     sfxge_rx_post_refill, rxq);
-}
-
-static struct mbuf *sfxge_rx_alloc_mbuf(struct sfxge_softc *sc)
-{
-	struct mb_args args;
-	struct mbuf *m;
-
-	/* Allocate mbuf structure */
-	args.flags = M_PKTHDR;
-	args.type = MT_DATA;
-	m = (struct mbuf *)uma_zalloc_arg(zone_mbuf, &args, M_NOWAIT);
-
-	/* Allocate (and attach) packet buffer */
-	if (m != NULL && !uma_zalloc_arg(sc->rx_buffer_zone, m, M_NOWAIT)) {
-		uma_zfree(zone_mbuf, m);
-		m = NULL;
-	}
-
-	return (m);
 }
 
 #define	SFXGE_REFILL_BATCH  64
@@ -273,7 +266,8 @@ sfxge_rx_qfill(struct sfxge_rxq *rxq, unsigned int target, boolean_t retrying)
 		KASSERT(rx_desc->mbuf == NULL, ("rx_desc->mbuf != NULL"));
 
 		rx_desc->flags = EFX_DISCARD;
-		m = rx_desc->mbuf = sfxge_rx_alloc_mbuf(sc);
+		m = rx_desc->mbuf = m_getjcl(M_NOWAIT, MT_DATA, M_PKTHDR,
+		    sc->rx_cluster_size);
 		if (m == NULL)
 			break;
 
@@ -338,8 +332,9 @@ static void __sfxge_rx_deliver(struct sfxge_softc *sc, struct mbuf *m)
 }
 
 static void
-sfxge_rx_deliver(struct sfxge_softc *sc, struct sfxge_rx_sw_desc *rx_desc)
+sfxge_rx_deliver(struct sfxge_rxq *rxq, struct sfxge_rx_sw_desc *rx_desc)
 {
+	struct sfxge_softc *sc = rxq->sc;
 	struct mbuf *m = rx_desc->mbuf;
 	int flags = rx_desc->flags;
 	int csum_flags;
@@ -352,7 +347,7 @@ sfxge_rx_deliver(struct sfxge_softc *sc, struct sfxge_rx_sw_desc *rx_desc)
 
 	if (flags & (EFX_PKT_IPV4 | EFX_PKT_IPV6)) {
 		m->m_pkthdr.flowid =
-			efx_psuedo_hdr_hash_get(sc->enp,
+			efx_pseudo_hdr_hash_get(rxq->common,
 						EFX_RX_HASHALG_TOEPLITZ,
 						mtod(m, uint8_t *));
 		/* The hash covers a 4-tuple for TCP only */
@@ -431,7 +426,7 @@ static void sfxge_lro_drop(struct sfxge_rxq *rxq, struct sfxge_lro_conn *c)
 	KASSERT(!c->mbuf, ("found orphaned mbuf"));
 
 	if (c->next_buf.mbuf != NULL) {
-		sfxge_rx_deliver(rxq->sc, &c->next_buf);
+		sfxge_rx_deliver(rxq, &c->next_buf);
 		LIST_REMOVE(c, active_link);
 	}
 
@@ -626,7 +621,7 @@ sfxge_lro_try_merge(struct sfxge_rxq *rxq, struct sfxge_lro_conn *c)
 	return (1);
 
  deliver_buf_out:
-	sfxge_rx_deliver(rxq->sc, rx_buf);
+	sfxge_rx_deliver(rxq, rx_buf);
 	return (1);
 }
 
@@ -687,7 +682,7 @@ sfxge_lro(struct sfxge_rxq *rxq, struct sfxge_rx_sw_desc *rx_buf)
 	unsigned bucket;
 
 	/* Get the hardware hash */
-	conn_hash = efx_psuedo_hdr_hash_get(sc->enp,
+	conn_hash = efx_pseudo_hdr_hash_get(rxq->common,
 					    EFX_RX_HASHALG_TOEPLITZ,
 					    mtod(m, uint8_t *));
 
@@ -773,7 +768,7 @@ sfxge_lro(struct sfxge_rxq *rxq, struct sfxge_rx_sw_desc *rx_buf)
 
 	sfxge_lro_new_conn(&rxq->lro, conn_hash, l2_id, nh, th);
  deliver_now:
-	sfxge_rx_deliver(sc, rx_buf);
+	sfxge_rx_deliver(rxq, rx_buf);
 }
 
 static void sfxge_lro_end_of_burst(struct sfxge_rxq *rxq)
@@ -846,11 +841,11 @@ sfxge_rx_qcomplete(struct sfxge_rxq *rxq, boolean_t eop)
 		if (rx_desc->flags & (EFX_ADDR_MISMATCH | EFX_DISCARD))
 			goto discard;
 
-		/* Read the length from the psuedo header if required */
+		/* Read the length from the pseudo header if required */
 		if (rx_desc->flags & EFX_PKT_PREFIX_LEN) {
 			uint16_t tmp_size;
 			int rc;
-			rc = efx_psuedo_hdr_pkt_length_get(sc->enp, 
+			rc = efx_pseudo_hdr_pkt_length_get(rxq->common,
 							   mtod(m, uint8_t *),
 							   &tmp_size);
 			KASSERT(rc == 0, ("cannot get packet length: %d", rc));
@@ -899,7 +894,7 @@ sfxge_rx_qcomplete(struct sfxge_rxq *rxq, boolean_t eop)
 			     (EFX_PKT_TCP | EFX_CKSUM_TCPUDP)))
 				sfxge_lro(rxq, prev);
 			else
-				sfxge_rx_deliver(sc, prev);
+				sfxge_rx_deliver(rxq, prev);
 		}
 		prev = rx_desc;
 		continue;
@@ -920,7 +915,7 @@ discard:
 		     (EFX_PKT_TCP | EFX_CKSUM_TCPUDP)))
 			sfxge_lro(rxq, prev);
 		else
-			sfxge_rx_deliver(sc, prev);
+			sfxge_rx_deliver(rxq, prev);
 	}
 
 	/*
@@ -1041,9 +1036,9 @@ sfxge_rx_qstart(struct sfxge_softc *sc, unsigned int index)
 		return (rc);
 
 	/* Create the common code receive queue. */
-	if ((rc = efx_rx_qcreate(sc->enp, index, index, EFX_RXQ_TYPE_DEFAULT,
-	    esmp, sc->rxq_entries, rxq->buf_base_id, evq->common,
-	    &rxq->common)) != 0)
+	if ((rc = efx_rx_qcreate(sc->enp, index, 0, EFX_RXQ_TYPE_DEFAULT,
+	    esmp, sc->rxq_entries, rxq->buf_base_id, EFX_RXQ_FLAG_NONE,
+	    evq->common, &rxq->common)) != 0)
 		goto fail;
 
 	SFXGE_EVQ_LOCK(evq);
@@ -1103,7 +1098,7 @@ sfxge_rx_start(struct sfxge_softc *sc)
 	encp = efx_nic_cfg_get(sc->enp);
 	sc->rx_buffer_size = EFX_MAC_PDU(sc->ifnet->if_mtu);
 
-	/* Calculate the receive packet buffer size. */	
+	/* Calculate the receive packet buffer size. */
 	sc->rx_prefix_size = encp->enc_rx_prefix_size;
 
 	/* Ensure IP headers are 32bit aligned */
@@ -1117,7 +1112,7 @@ sfxge_rx_start(struct sfxge_softc *sc)
 	EFSYS_ASSERT(ISP2(align));
 	sc->rx_buffer_size = P2ROUNDUP(sc->rx_buffer_size, align);
 
-	/* 
+	/*
 	 * Standard mbuf zones only guarantee pointer-size alignment;
 	 * we need extra space to align to the cache line
 	 */
@@ -1125,27 +1120,38 @@ sfxge_rx_start(struct sfxge_softc *sc)
 
 	/* Select zone for packet buffers */
 	if (reserved <= MCLBYTES)
-		sc->rx_buffer_zone = zone_clust;
+		sc->rx_cluster_size = MCLBYTES;
 	else if (reserved <= MJUMPAGESIZE)
-		sc->rx_buffer_zone = zone_jumbop;
+		sc->rx_cluster_size = MJUMPAGESIZE;
 	else if (reserved <= MJUM9BYTES)
-		sc->rx_buffer_zone = zone_jumbo9;
+		sc->rx_cluster_size = MJUM9BYTES;
 	else
-		sc->rx_buffer_zone = zone_jumbo16;
+		sc->rx_cluster_size = MJUM16BYTES;
 
 	/*
 	 * Set up the scale table.  Enable all hash types and hash insertion.
 	 */
-	for (index = 0; index < SFXGE_RX_SCALE_MAX; index++)
+	for (index = 0; index < nitems(sc->rx_indir_table); index++)
+#ifdef RSS
+		sc->rx_indir_table[index] =
+			rss_get_indirection_to_bucket(index) % sc->rxq_count;
+#else
 		sc->rx_indir_table[index] = index % sc->rxq_count;
-	if ((rc = efx_rx_scale_tbl_set(sc->enp, sc->rx_indir_table,
-				       SFXGE_RX_SCALE_MAX)) != 0)
+#endif
+	if ((rc = efx_rx_scale_tbl_set(sc->enp, EFX_RSS_CONTEXT_DEFAULT,
+				       sc->rx_indir_table,
+				       nitems(sc->rx_indir_table))) != 0)
 		goto fail;
-	(void)efx_rx_scale_mode_set(sc->enp, EFX_RX_HASHALG_TOEPLITZ,
-	    (1 << EFX_RX_HASH_IPV4) | (1 << EFX_RX_HASH_TCPIPV4) |
-	    (1 << EFX_RX_HASH_IPV6) | (1 << EFX_RX_HASH_TCPIPV6), B_TRUE);
+	(void)efx_rx_scale_mode_set(sc->enp, EFX_RSS_CONTEXT_DEFAULT,
+	    EFX_RX_HASHALG_TOEPLITZ,
+	    EFX_RX_HASH_IPV4 | EFX_RX_HASH_TCPIPV4 |
+	    EFX_RX_HASH_IPV6 | EFX_RX_HASH_TCPIPV6, B_TRUE);
 
-	if ((rc = efx_rx_scale_key_set(sc->enp, toep_key,
+#ifdef RSS
+	rss_getkey(toep_key);
+#endif
+	if ((rc = efx_rx_scale_key_set(sc->enp, EFX_RSS_CONTEXT_DEFAULT,
+				       toep_key,
 				       sizeof(toep_key))) != 0)
 		goto fail;
 

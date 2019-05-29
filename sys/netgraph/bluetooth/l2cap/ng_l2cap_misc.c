@@ -3,6 +3,8 @@
  */
 
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) Maksim Yevmenkin <m_evmenkin@yahoo.com>
  * All rights reserved.
  *
@@ -114,7 +116,7 @@ ng_l2cap_new_con(ng_l2cap_p l2cap, bdaddr_p bdaddr, int type)
 
 	con->l2cap = l2cap;
 	con->state = NG_L2CAP_CON_CLOSED;
-
+	con->encryption = 0;
 	/*
 	 * XXX
 	 *
@@ -325,7 +327,7 @@ ng_l2cap_con_by_handle(ng_l2cap_p l2cap, u_int16_t con_handle)
 } /* ng_l2cap_con_by_handle */
 
 /*
- * Allocate new L2CAP channel descriptor on "con" conection with "psm".
+ * Allocate new L2CAP channel descriptor on "con" connection with "psm".
  * Will link the channel to the l2cap node
  */
 
@@ -340,11 +342,14 @@ ng_l2cap_new_chan(ng_l2cap_p l2cap, ng_l2cap_con_p con, u_int16_t psm, int idtyp
 		return (NULL);
 	if(idtype == NG_L2CAP_L2CA_IDTYPE_ATT){
 		ch->scid = ch->dcid = NG_L2CAP_ATT_CID;
+	}else if(idtype == NG_L2CAP_L2CA_IDTYPE_SMP){
+		ch->scid = ch->dcid = NG_L2CAP_SMP_CID;
 	}else{
 		ch->scid = ng_l2cap_get_cid(l2cap,
 					    (con->linktype!= NG_HCI_LINK_ACL));
 	}
-
+	
+	ch->idtype = idtype;
 	if (ch->scid != NG_L2CAP_NULL_CID) {
 		/* Initialize channel */
 		ch->psm = psm;
@@ -379,7 +384,8 @@ ng_l2cap_chan_by_scid(ng_l2cap_p l2cap, u_int16_t scid, int idtype)
 {
 	ng_l2cap_chan_p	ch = NULL;
 
-	if(idtype == NG_L2CAP_L2CA_IDTYPE_ATT){
+	if((idtype == NG_L2CAP_L2CA_IDTYPE_ATT)||
+	   (idtype == NG_L2CAP_L2CA_IDTYPE_SMP)){
 		return NULL;
 	}
 	
@@ -390,7 +396,6 @@ ng_l2cap_chan_by_scid(ng_l2cap_p l2cap, u_int16_t scid, int idtype)
 		if((idtype != NG_L2CAP_L2CA_IDTYPE_LE)&&
 		   (ch->con->linktype != NG_HCI_LINK_ACL ))
 			continue;
-
 		if (ch->scid == scid)
 			break;
 	}

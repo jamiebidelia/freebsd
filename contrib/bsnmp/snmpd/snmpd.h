@@ -4,7 +4,7 @@
  *	All rights reserved.
  *
  * Author: Harti Brandt <harti@freebsd.org>
- * 
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
  * are met:
@@ -13,7 +13,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 
+ *
  * THIS SOFTWARE IS PROVIDED BY AUTHOR AND CONTRIBUTORS ``AS IS'' AND
  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
@@ -174,7 +174,7 @@ TAILQ_HEAD(tport_list, tport);
 
 int snmpd_input(struct port_input *, struct tport *);
 void snmpd_input_close(struct port_input *);
-
+void snmpd_input_init(struct port_input *);
 
 /*
  * Transport domain
@@ -193,6 +193,11 @@ struct transport_def {
 
 	ssize_t		(*send)(struct tport *, const u_char *, size_t,
 			    const struct sockaddr *, size_t);
+	ssize_t         (*recv)(struct tport *, struct port_input *);
+
+	/** send via a multi-socket port */
+	ssize_t		(*send2)(struct tport *, const u_char *, size_t,
+			    struct port_input *);
 };
 struct transport {
 	struct asn_oid	index;		/* transport table index */
@@ -307,7 +312,7 @@ struct trapsink {
 	struct asn_oid	index;
 	u_int		status;
 	int		socket;
-	u_char		comm[SNMP_COMMUNITY_MAXLEN];
+	u_char		comm[SNMP_COMMUNITY_MAXLEN + 1];
 	int		version;
 };
 enum {
@@ -332,6 +337,7 @@ int init_actvals(void);
 extern char engine_file[];
 int init_snmpd_engine(void);
 int set_snmpd_engine(void);
+void update_snmpd_engine_time(void);
 
 int read_config(const char *, struct lmodule *);
 int define_macro(const char *name, const char *value);

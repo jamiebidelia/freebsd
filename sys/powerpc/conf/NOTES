@@ -3,6 +3,27 @@
 # This file contains machine dependent kernel configuration notes.  For
 # machine independent notes, look in /sys/conf/NOTES.
 
+#
+# Enable the kernel DTrace hooks which are required to load the DTrace
+# kernel modules.
+#
+options 	KDTRACE_HOOKS
+
+# DTrace core
+# NOTE: introduces CDDL-licensed components into the kernel
+#device		dtrace
+
+# DTrace modules
+#device		dtrace_profile
+#device		dtrace_sdt
+#device		dtrace_fbt
+#device		dtrace_systrace
+#device		dtrace_prototype
+#device		dtnfscl
+#device		dtmalloc
+
+# Alternatively include all the DTrace modules
+#device		dtraceall
 
 
 #####################################################################
@@ -31,10 +52,8 @@ options 	SC_OFWFB		# OFW frame buffer
 device		cpufreq
 
 # Standard busses
-device		pci
 device		agp
 
-device		bm		# Apple BMAC (Big Mac Ethernet)
 device		glc		# Sony Playstation 3 Ethernet
 device		kiic		# Apple Keywest I2C Controller
 device		ofwd		# Open Firmware disks
@@ -56,8 +75,12 @@ device		adm1030		# Apple G4 MDD fan controller
 # Devices we don't want to deal with
 
 nodevice	bktr
+nodevice	ccr
 nodevice	cxgbe		# XXX: builds on powerpc64 only.
+nodevice	cxgbev
 nodevice	fdc
+nodevice	mpr		# no 64-bit atomics
+nodevice	mps		# no 64-bit atomics
 nodevice	ppc
 nodevice	splash
 # when splash works enable *_saver
@@ -75,9 +98,6 @@ nodevice	warp_saver
 nodevice	daemon_saver
 nodevice	star_saver
 nodevice	snake_saver
-# isa
-nodevice	pcii
-nodevice	tnt4882
 # sound
 nodevice	snd_cmi
 # wants gdb_cur

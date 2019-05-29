@@ -1,4 +1,4 @@
-//===- SampleProfWriter.h - Write LLVM sample profile data ----------------===//
+//===- SampleProfWriter.h - Write LLVM sample profile data ------*- C++ -*-===//
 //
 //                      The LLVM Compiler Infrastructure
 //
@@ -13,98 +13,182 @@
 #ifndef LLVM_PROFILEDATA_SAMPLEPROFWRITER_H
 #define LLVM_PROFILEDATA_SAMPLEPROFWRITER_H
 
+#include "llvm/ADT/MapVector.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/IR/Function.h"
-#include "llvm/IR/Module.h"
+#include "llvm/IR/ProfileSummary.h"
 #include "llvm/ProfileData/SampleProf.h"
 #include "llvm/Support/ErrorOr.h"
-#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/raw_ostream.h"
+#include <algorithm>
+#include <cstdint>
+#include <memory>
+#include <set>
+#include <system_error>
 
 namespace llvm {
-
 namespace sampleprof {
 
-enum SampleProfileFormat { SPF_None = 0, SPF_Text, SPF_Binary, SPF_GCC };
-
-/// \brief Sample-based profile writer. Base class.
+/// Sample-based profile writer. Base class.
 class SampleProfileWriter {
 public:
-  SampleProfileWriter(StringRef Filename, std::error_code &EC,
-                      sys::fs::OpenFlags Flags)
-      : OS(Filename, EC, Flags) {}
-  virtual ~SampleProfileWriter() {}
+  virtual ~SampleProfileWriter() = default;
 
-  /// \brief Write sample profiles in \p S for function \p FName.
+  /// Write sample profiles in \p S.
   ///
-  /// \returns true if the file was updated successfully. False, otherwise.
-  virtual bool write(StringRef FName, const FunctionSamples &S) = 0;
+  /// \returns status code of the file update operation.
+  virtual std::error_code write(const FunctionSamples &S) = 0;
 
-  /// \brief Write sample profiles in \p S for function \p F.
-  bool write(const Function &F, const FunctionSamples &S) {
-    return write(F.getName(), S);
-  }
-
-  /// \brief Write all the sample profiles for all the functions in \p M.
+  /// Write all the sample profiles in the given map of samples.
   ///
-  /// \returns true if the file was updated successfully. False, otherwise.
-  bool write(const Module &M, StringMap<FunctionSamples> &P) {
-    for (const auto &F : M) {
-      StringRef Name = F.getName();
-      if (!write(Name, P[Name]))
-        return false;
-    }
-    return true;
-  }
+  /// \returns status code of the file update operation.
+  virtual std::error_code write(const StringMap<FunctionSamples> &ProfileMap);
 
-  /// \brief Write all the sample profiles in the given map of samples.
+  raw_ostream &getOutputStream() { return *OutputStream; }
+
+  /// Profile writer factory.
   ///
-  /// \returns true if the file was updated successfully. False, otherwise.
-  bool write(StringMap<FunctionSamples> &ProfileMap) {
-    for (auto &I : ProfileMap) {
-      StringRef FName = I.first();
-      FunctionSamples &Profile = I.second;
-      if (!write(FName, Profile))
-        return false;
-    }
-    return true;
-  }
-
-  /// \brief Profile writer factory. Create a new writer based on the value of
-  /// \p Format.
+  /// Create a new file writer based on the value of \p Format.
   static ErrorOr<std::unique_ptr<SampleProfileWriter>>
   create(StringRef Filename, SampleProfileFormat Format);
 
+  /// Create a new stream writer based on the value of \p Format.
+  /// For testing.
+  static ErrorOr<std::unique_ptr<SampleProfileWriter>>
+  create(std::unique_ptr<raw_ostream> &OS, SampleProfileFormat Format);
+
 protected:
-  /// \brief Output stream where to emit the profile to.
-  raw_fd_ostream OS;
+  SampleProfileWriter(std::unique_ptr<raw_ostream> &OS)
+      : OutputStream(std::move(OS)) {}
+
+  /// Write a file header for the profile file.
+  virtual std::error_code
+  writeHeader(const StringMap<FunctionSamples> &ProfileMap) = 0;
+
+  /// Output stream where to emit the profile to.
+  std::unique_ptr<raw_ostream> OutputStream;
+
+  /// Profile summary.
+  std::unique_ptr<ProfileSummary> Summary;
+
+  /// Compute summary for this profile.
+  void computeSummary(const StringMap<FunctionSamples> &ProfileMap);
 };
 
-/// \brief Sample-based profile writer (text format).
+/// Sample-based profile writer (text format).
 class SampleProfileWriterText : public SampleProfileWriter {
 public:
-  SampleProfileWriterText(StringRef F, std::error_code &EC)
-      : SampleProfileWriter(F, EC, sys::fs::F_Text) {}
+  std::error_code write(const FunctionSamples &S) override;
 
-  bool write(StringRef FName, const FunctionSamples &S) override;
-  bool write(const Module &M, StringMap<FunctionSamples> &P) {
-    return SampleProfileWriter::write(M, P);
+protected:
+  SampleProfileWriterText(std::unique_ptr<raw_ostream> &OS)
+      : SampleProfileWriter(OS), Indent(0) {}
+
+  std::error_code
+  writeHeader(const StringMap<FunctionSamples> &ProfileMap) override {
+    return sampleprof_error::success;
   }
+
+private:
+  /// Indent level to use when writing.
+  ///
+  /// This is used when printing inlined callees.
+  unsigned Indent;
+
+  friend ErrorOr<std::unique_ptr<SampleProfileWriter>>
+  SampleProfileWriter::create(std::unique_ptr<raw_ostream> &OS,
+                              SampleProfileFormat Format);
 };
 
-/// \brief Sample-based profile writer (binary format).
+/// Sample-based profile writer (binary format).
 class SampleProfileWriterBinary : public SampleProfileWriter {
 public:
-  SampleProfileWriterBinary(StringRef F, std::error_code &EC);
+  virtual std::error_code write(const FunctionSamples &S) override;
+  SampleProfileWriterBinary(std::unique_ptr<raw_ostream> &OS)
+      : SampleProfileWriter(OS) {}
 
-  bool write(StringRef F, const FunctionSamples &S) override;
-  bool write(const Module &M, StringMap<FunctionSamples> &P) {
-    return SampleProfileWriter::write(M, P);
-  }
+protected:
+  virtual std::error_code writeNameTable() = 0;
+  virtual std::error_code writeMagicIdent() = 0;
+  virtual std::error_code
+  writeHeader(const StringMap<FunctionSamples> &ProfileMap) override;
+  std::error_code writeSummary();
+  std::error_code writeNameIdx(StringRef FName);
+  std::error_code writeBody(const FunctionSamples &S);
+  inline void stablizeNameTable(std::set<StringRef> &V);
+
+  MapVector<StringRef, uint32_t> NameTable;
+
+private:
+  void addName(StringRef FName);
+  void addNames(const FunctionSamples &S);
+
+  friend ErrorOr<std::unique_ptr<SampleProfileWriter>>
+  SampleProfileWriter::create(std::unique_ptr<raw_ostream> &OS,
+                              SampleProfileFormat Format);
 };
 
-} // End namespace sampleprof
+class SampleProfileWriterRawBinary : public SampleProfileWriterBinary {
+  using SampleProfileWriterBinary::SampleProfileWriterBinary;
 
-} // End namespace llvm
+protected:
+  virtual std::error_code writeNameTable() override;
+  virtual std::error_code writeMagicIdent() override;
+};
+
+// CompactBinary is a compact format of binary profile which both reduces
+// the profile size and the load time needed when compiling. It has two
+// major difference with Binary format.
+// 1. It represents all the strings in name table using md5 hash.
+// 2. It saves a function offset table which maps function name index to
+// the offset of its function profile to the start of the binary profile,
+// so by using the function offset table, for those function profiles which
+// will not be needed when compiling a module, the profile reader does't
+// have to read them and it saves compile time if the profile size is huge.
+// The layout of the compact format is shown as follows:
+//
+//    Part1: Profile header, the same as binary format, containing magic
+//           number, version, summary, name table...
+//    Part2: Function Offset Table Offset, which saves the position of
+//           Part4.
+//    Part3: Function profile collection
+//             function1 profile start
+//                 ....
+//             function2 profile start
+//                 ....
+//             function3 profile start
+//                 ....
+//                ......
+//    Part4: Function Offset Table
+//             function1 name index --> function1 profile start
+//             function2 name index --> function2 profile start
+//             function3 name index --> function3 profile start
+//
+// We need Part2 because profile reader can use it to find out and read
+// function offset table without reading Part3 first.
+class SampleProfileWriterCompactBinary : public SampleProfileWriterBinary {
+  using SampleProfileWriterBinary::SampleProfileWriterBinary;
+
+public:
+  virtual std::error_code write(const FunctionSamples &S) override;
+  virtual std::error_code
+  write(const StringMap<FunctionSamples> &ProfileMap) override;
+
+protected:
+  /// The table mapping from function name to the offset of its FunctionSample
+  /// towards profile start.
+  MapVector<StringRef, uint64_t> FuncOffsetTable;
+  /// The offset of the slot to be filled with the offset of FuncOffsetTable
+  /// towards profile start.
+  uint64_t TableOffset;
+  virtual std::error_code writeNameTable() override;
+  virtual std::error_code writeMagicIdent() override;
+  virtual std::error_code
+  writeHeader(const StringMap<FunctionSamples> &ProfileMap) override;
+  std::error_code writeFuncOffsetTable();
+};
+
+} // end namespace sampleprof
+} // end namespace llvm
 
 #endif // LLVM_PROFILEDATA_SAMPLEPROFWRITER_H

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 1999,2000 Jonathan Lemon
  * All rights reserved.
  *
@@ -39,6 +41,8 @@
 #include <sys/bus.h>
 #include <sys/conf.h>
 #include <sys/cons.h>
+#include <sys/lock.h>
+#include <sys/mutex.h>
 
 #include <machine/bus.h>
 #include <sys/rman.h>

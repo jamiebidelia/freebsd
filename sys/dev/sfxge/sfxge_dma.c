@@ -1,5 +1,7 @@
 /*-
- * Copyright (c) 2010-2015 Solarflare Communications Inc.
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
+ * Copyright (c) 2010-2016 Solarflare Communications Inc.
  * All rights reserved.
  *
  * This software was developed in part by Philip Paeps under contract for
@@ -134,6 +136,7 @@ sfxge_dma_free(efsys_mem_t *esmp)
 
 	esmp->esm_addr = 0;
 	esmp->esm_base = NULL;
+	esmp->esm_size = 0;
 }
 
 int
@@ -173,6 +176,7 @@ sfxge_dma_alloc(struct sfxge_softc *sc, bus_size_t len, efsys_mem_t *esmp)
 		goto fail_load_check;
 
 	esmp->esm_base = vaddr;
+	esmp->esm_size = len;
 
 	return (0);
 

@@ -2,15 +2,13 @@
 
 .include <src.opts.mk>
 
-MDOCMLDIR=	${.CURDIR}/../../contrib/mdocml
-.PATH: ${MDOCMLDIR}
+MANDOCDIR=	${SRCTOP}/contrib/mandoc
+.PATH: ${MANDOCDIR}
 
 PROG=	mandoc
-FILES=	example.style.css style.css
-FILESDIR=	${SHAREDIR}/mdocml
-MAN=	mandoc.1 eqn.7 mandoc_char.7 tbl.7 man.7 mdoc.7 # roff.7
+MAN=	mandoc.1 eqn.7 mandoc_char.7 tbl.7 man.7 mdoc.7 roff.7
 MLINKS=	mandoc.1 mdocml.1
-.if ${MK_MANDOCDB} != no
+.if ${MK_MAN_UTILS} != no
 MAN+=	apropos.1 makewhatis.8
 MLINKS+=	apropos.1 whatis.1
 LINKS=	${BINDIR}/mandoc ${BINDIR}/whatis \
@@ -19,21 +17,25 @@ LINKS=	${BINDIR}/mandoc ${BINDIR}/whatis \
 .endif
 
 LIBMAN_SRCS=	man.c \
-		man_hash.c \
 		man_macro.c \
 		man_validate.c
 
-LIBMDOC_SRCS=	att.c \
+LIBMDOC_SRCS=	arch.c \
+		att.c \
 		lib.c \
 		mdoc.c \
 		mdoc_argv.c \
-		mdoc_hash.c \
 		mdoc_macro.c \
+		mdoc_markdown.c \
+		mdoc_state.c \
 		mdoc_validate.c \
 		st.c \
 
 LIBROFF_SRCS=	eqn.c \
 		roff.c \
+		roff_html.c \
+		roff_term.c \
+		roff_validate.c \
 		tbl.c \
 		tbl_data.c \
 		tbl_layout.c \
@@ -45,9 +47,13 @@ LIB_SRCS=	${LIBMAN_SRCS} \
 		chars.c \
 		mandoc.c \
 		mandoc_aux.c \
+		mandoc_msg.c \
+		mandoc_ohash.c \
+		mandoc_xr.c \
 		msec.c \
 		preconv.c \
-		read.c
+		read.c \
+		compat_recallocarray.c \
 
 HTML_SRCS=	eqn_html.c \
 		html.c \
@@ -63,27 +69,36 @@ TERM_SRCS=	eqn_term.c \
 		term.c \
 		term_ascii.c \
 		term_ps.c \
+		term_tab.c \
 		tbl_term.c
 
-DB_SRCS=	mandocdb.c \
-		mansearch.c \
-		mansearch_const.c \
-		manpath.c
+DBM_SRCS=	dbm.c \
+		dbm_map.c \
+		mansearch.c
+
+DBA_SRCS=	dba.c \
+		dba_array.c \
+		dba_read.c \
+		dba_write.c \
+		mandocdb.c
 
 SRCS=		${LIB_SRCS} \
 		${HTML_SRCS} \
 		${MAN_SRCS} \
 		${TERM_SRCS} \
+		${DBM_SRCS} \
+		${DBA_SRCS} \
 		main.c \
+		manpath.c \
 		out.c \
+		tag.c \
 		tree.c
 
-SRCS+=	${DB_SRCS}
-
-WARNS?=	2
+WARNS?=	3
 CFLAGS+= -DHAVE_CONFIG_H \
-	 -I${.CURDIR}/../../lib/libohash/ \
-	 -I${.CURDIR}/../../contrib/sqlite3
-LIBADD=	ohash sqlite3 z
+	 -I${SRCTOP}/lib/libopenbsd/
+# This can be removed after swtiching to newer gcc
+CFLAGS.gcc+=	-Wno-format
+LIBADD=	openbsd z
 
 .include <bsd.prog.mk>

@@ -78,6 +78,10 @@ interpos_func_t __libc_interposing[INTERPOS_MAX] = {
 	SLOT(kevent, __sys_kevent),
 	SLOT(wait6, __sys_wait6),
 	SLOT(ppoll, __sys_ppoll),
+	SLOT(map_stacks_exec, __libc_map_stacks_exec),
+	SLOT(fdatasync, __sys_fdatasync),
+	SLOT(clock_nanosleep, __sys_clock_nanosleep),
+	SLOT(distribute_static_tls, __libc_distribute_static_tls),
 };
 #undef SLOT
 

@@ -13,7 +13,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "ClangSACheckers.h"
+#include "clang/StaticAnalyzer/Checkers/BuiltinCheckerRegistration.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/Expr.h"
@@ -57,8 +57,8 @@ static void Scan(IvarUsageMap& M, const Stmt *S) {
       Scan(M, sub);
     }
 
-  for (Stmt::const_child_iterator I=S->child_begin(),E=S->child_end(); I!=E;++I)
-    Scan(M, *I);
+  for (const Stmt *SubStmt : S->children())
+    Scan(M, SubStmt);
 }
 
 static void Scan(IvarUsageMap& M, const ObjCPropertyImplDecl *D) {
@@ -98,7 +98,7 @@ static void Scan(IvarUsageMap &M, const DeclContext *C, const FileID FID,
                  SourceManager &SM) {
   for (const auto *I : C->decls())
     if (const auto *FD = dyn_cast<FunctionDecl>(I)) {
-      SourceLocation L = FD->getLocStart();
+      SourceLocation L = FD->getBeginLoc();
       if (SM.getFileID(L) == FID)
         Scan(M, FD->getBody());
     }

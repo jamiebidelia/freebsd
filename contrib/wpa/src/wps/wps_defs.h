@@ -14,6 +14,10 @@
 extern int wps_version_number;
 extern int wps_testing_dummy_cred;
 extern int wps_corrupt_pkhash;
+extern int wps_force_auth_types_in_use;
+extern u16 wps_force_auth_types;
+extern int wps_force_encr_types_in_use;
+extern u16 wps_force_encr_types;
 #define WPS_VERSION wps_version_number
 
 #else /* CONFIG_WPS_TESTING */
@@ -41,6 +45,11 @@ extern int wps_corrupt_pkhash;
 #define WPS_OOB_DEVICE_PASSWORD_MIN_LEN 16
 #define WPS_OOB_DEVICE_PASSWORD_LEN 32
 #define WPS_OOB_PUBKEY_HASH_LEN 20
+#define WPS_DEV_NAME_MAX_LEN 32
+#define WPS_MANUFACTURER_MAX_LEN 64
+#define WPS_MODEL_NAME_MAX_LEN 32
+#define WPS_MODEL_NUMBER_MAX_LEN 32
+#define WPS_SERIAL_NUMBER_MAX_LEN 32
 
 /* Attribute Types */
 enum wps_attribute {
@@ -143,7 +152,8 @@ enum {
 	WFA_ELEM_NETWORK_KEY_SHAREABLE = 0x02,
 	WFA_ELEM_REQUEST_TO_ENROLL = 0x03,
 	WFA_ELEM_SETTINGS_DELAY_TIME = 0x04,
-	WFA_ELEM_REGISTRAR_CONFIGURATION_METHODS = 0x05
+	WFA_ELEM_REGISTRAR_CONFIGURATION_METHODS = 0x05,
+	WFA_ELEM_MULTI_AP = 0x06
 };
 
 /* Device Password ID */
@@ -232,6 +242,7 @@ enum wps_error_indication {
 /* RF Bands */
 #define WPS_RF_24GHZ 0x01
 #define WPS_RF_50GHZ 0x02
+#define WPS_RF_60GHZ 0x04
 
 /* Config Methods */
 #define WPS_CONFIG_USBA 0x0001

@@ -265,6 +265,8 @@ static struct nfe_type nfe_devs[] = {
 	    "NVIDIA nForce MCP79 Networking Adapter"},
 	{PCI_VENDOR_NVIDIA, PCI_PRODUCT_NVIDIA_MCP79_LAN4,
 	    "NVIDIA nForce MCP79 Networking Adapter"},
+	{PCI_VENDOR_NVIDIA, PCI_PRODUCT_NVIDIA_MCP89_LAN,
+	    "NVIDIA nForce MCP89 Networking Adapter"},
 	{0, 0, NULL}
 };
 
@@ -531,6 +533,7 @@ nfe_attach(device_t dev)
 	case PCI_PRODUCT_NVIDIA_MCP79_LAN2:
 	case PCI_PRODUCT_NVIDIA_MCP79_LAN3:
 	case PCI_PRODUCT_NVIDIA_MCP79_LAN4:
+	case PCI_PRODUCT_NVIDIA_MCP89_LAN:
 		/* XXX flow control */
 		sc->nfe_flags |= NFE_JUMBO_SUP | NFE_40BIT_ADDR | NFE_HW_CSUM |
 		    NFE_PWR_MGMT | NFE_CORRECT_MACADDR | NFE_MIB_V3;
@@ -843,7 +846,7 @@ nfe_can_use_msix(struct nfe_softc *sc)
 	product = kern_getenv("smbios.planar.product");
 	use_msix = 1;
 	if (maker != NULL && product != NULL) {
-		count = sizeof(msix_blacklists) / sizeof(msix_blacklists[0]);
+		count = nitems(msix_blacklists);
 		mblp = msix_blacklists;
 		for (n = 0; n < count; n++) {
 			if (strcmp(maker, mblp->maker) == 0 &&
@@ -1873,7 +1876,7 @@ nfe_intr(void *arg)
 	if (status == 0 || status == 0xffffffff)
 		return (FILTER_STRAY);
 	nfe_disable_intr(sc);
-	taskqueue_enqueue_fast(sc->nfe_tq, &sc->nfe_int_task);
+	taskqueue_enqueue(sc->nfe_tq, &sc->nfe_int_task);
 
 	return (FILTER_HANDLED);
 }
@@ -1932,7 +1935,7 @@ nfe_int_task(void *arg, int pending)
 	NFE_UNLOCK(sc);
 
 	if (domore || (NFE_READ(sc, sc->nfe_irq_status) != 0)) {
-		taskqueue_enqueue_fast(sc->nfe_tq, &sc->nfe_int_task);
+		taskqueue_enqueue(sc->nfe_tq, &sc->nfe_int_task);
 		return;
 	}
 
@@ -2590,7 +2593,7 @@ nfe_setmulti(struct nfe_softc *sc)
 		bzero(addr, ETHER_ADDR_LEN);
 		bzero(mask, ETHER_ADDR_LEN);
 		goto done;
-	};
+	}
 
 	if_multiaddr_array(ifp, mta, &mcnt, mc_count);
 

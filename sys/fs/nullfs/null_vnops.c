@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1992, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -13,7 +15,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 4. Neither the name of the University nor the names of its contributors
+ * 3. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -117,7 +119,7 @@
  * are created as a result of vnode operations on
  * this or other null vnode stacks.
  *
- * New vnode stacks come into existance as a result of
+ * New vnode stacks come into existence as a result of
  * an operation which returns a vnode.
  * The bypass routine stacks a null-node above the new
  * vnode before returning it to the caller.
@@ -337,15 +339,15 @@ null_add_writecount(struct vop_add_writecount_args *ap)
 
 	vp = ap->a_vp;
 	lvp = NULLVPTOLOWERVP(vp);
-	KASSERT(vp->v_writecount + ap->a_inc >= 0, ("wrong writecount inc"));
-	if (vp->v_writecount > 0 && vp->v_writecount + ap->a_inc == 0)
-		error = VOP_ADD_WRITECOUNT(lvp, -1);
-	else if (vp->v_writecount == 0 && vp->v_writecount + ap->a_inc > 0)
-		error = VOP_ADD_WRITECOUNT(lvp, 1);
-	else
-		error = 0;
+	VI_LOCK(vp);
+	/* text refs are bypassed to lowervp */
+	VNASSERT(vp->v_writecount >= 0, vp, ("wrong null writecount"));
+	VNASSERT(vp->v_writecount + ap->a_inc >= 0, vp,
+	    ("wrong writecount inc %d", ap->a_inc));
+	error = VOP_ADD_WRITECOUNT(lvp, ap->a_inc);
 	if (error == 0)
 		vp->v_writecount += ap->a_inc;
+	VI_UNLOCK(vp);
 	return (error);
 }
 
@@ -568,14 +570,16 @@ static int
 null_remove(struct vop_remove_args *ap)
 {
 	int retval, vreleit;
-	struct vnode *lvp;
+	struct vnode *lvp, *vp;
 
-	if (vrefcnt(ap->a_vp) > 1) {
-		lvp = NULLVPTOLOWERVP(ap->a_vp);
+	vp = ap->a_vp;
+	if (vrefcnt(vp) > 1) {
+		lvp = NULLVPTOLOWERVP(vp);
 		VREF(lvp);
 		vreleit = 1;
 	} else
 		vreleit = 0;
+	VTONULL(vp)->null_flags |= NULLV_DROP;
 	retval = null_bypass(&ap->a_gen);
 	if (vreleit != 0)
 		vrele(lvp);
@@ -617,6 +621,14 @@ null_rename(struct vop_rename_args *ap)
 	return (null_bypass((struct vop_generic_args *)ap));
 }
 
+static int
+null_rmdir(struct vop_rmdir_args *ap)
+{
+
+	VTONULL(ap->a_vp)->null_flags |= NULLV_DROP;
+	return (null_bypass(&ap->a_gen));
+}
+
 /*
  * We need to process our own vnode lock and then clear the
  * interlock flag as it applies only to our vnode, not the
@@ -639,7 +651,7 @@ null_lock(struct vop_lock1_args *ap)
 	nn = VTONULL(vp);
 	/*
 	 * If we're still active we must ask the lower layer to
-	 * lock as ffs has special lock considerations in it's
+	 * lock as ffs has special lock considerations in its
 	 * vop lock.
 	 */
 	if (nn != NULL && (lvp = NULLVPTOLOWERVP(vp)) != NULL) {
@@ -652,7 +664,7 @@ null_lock(struct vop_lock1_args *ap)
 		 * the lowervp's vop_lock routine.  When we vgone we will
 		 * drop our last ref to the lowervp, which would allow it
 		 * to be reclaimed.  The lowervp could then be recycled,
-		 * in which case it is not legal to be sleeping in it's VOP.
+		 * in which case it is not legal to be sleeping in its VOP.
 		 * We prevent it from being recycled by holding the vnode
 		 * here.
 		 */
@@ -790,15 +802,17 @@ null_reclaim(struct vop_reclaim_args *ap)
 	vp->v_data = NULL;
 	vp->v_object = NULL;
 	vp->v_vnlock = &vp->v_lock;
-	VI_UNLOCK(vp);
 
 	/*
-	 * If we were opened for write, we leased one write reference
+	 * If we were opened for write, we leased the write reference
 	 * to the lower vnode.  If this is a reclamation due to the
 	 * forced unmount, undo the reference now.
 	 */
 	if (vp->v_writecount > 0)
-		VOP_ADD_WRITECOUNT(lowervp, -1);
+		VOP_ADD_WRITECOUNT(lowervp, -vp->v_writecount);
+
+	VI_UNLOCK(vp);
+
 	if ((xp->null_flags & NULLV_NOUNLOCK) != 0)
 		vunref(lowervp);
 	else
@@ -858,14 +872,14 @@ null_vptocnp(struct vop_vptocnp_args *ap)
 	struct vnode **dvp = ap->a_vpp;
 	struct vnode *lvp, *ldvp;
 	struct ucred *cred = ap->a_cred;
+	struct mount *mp;
 	int error, locked;
-
-	if (vp->v_type == VDIR)
-		return (vop_stdvptocnp(ap));
 
 	locked = VOP_ISLOCKED(vp);
 	lvp = NULLVPTOLOWERVP(vp);
 	vhold(lvp);
+	mp = vp->v_mount;
+	vfs_ref(mp);
 	VOP_UNLOCK(vp, 0); /* vp is held by vn_vptocnp_locked that called us */
 	ldvp = lvp;
 	vref(lvp);
@@ -873,6 +887,7 @@ null_vptocnp(struct vop_vptocnp_args *ap)
 	vdrop(lvp);
 	if (error != 0) {
 		vn_lock(vp, locked | LK_RETRY);
+		vfs_rel(mp);
 		return (ENOENT);
 	}
 
@@ -884,10 +899,10 @@ null_vptocnp(struct vop_vptocnp_args *ap)
 	if (error != 0) {
 		vrele(ldvp);
 		vn_lock(vp, locked | LK_RETRY);
+		vfs_rel(mp);
 		return (ENOENT);
 	}
-	vref(ldvp);
-	error = null_nodeget(vp->v_mount, ldvp, dvp);
+	error = null_nodeget(mp, ldvp, dvp);
 	if (error == 0) {
 #ifdef DIAGNOSTIC
 		NULLVPTOLOWERVP(*dvp);
@@ -895,6 +910,7 @@ null_vptocnp(struct vop_vptocnp_args *ap)
 		VOP_UNLOCK(*dvp, 0); /* keep reference on *dvp */
 	}
 	vn_lock(vp, locked | LK_RETRY);
+	vfs_rel(mp);
 	return (error);
 }
 
@@ -918,6 +934,7 @@ struct vop_vector null_vnodeops = {
 	.vop_reclaim =		null_reclaim,
 	.vop_remove =		null_remove,
 	.vop_rename =		null_rename,
+	.vop_rmdir =		null_rmdir,
 	.vop_setattr =		null_setattr,
 	.vop_strategy =		VOP_EOPNOTSUPP,
 	.vop_unlock =		null_unlock,

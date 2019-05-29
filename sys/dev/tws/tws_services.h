@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2010, LSI Corp.
  * All rights reserved.
  * Author : Manjunath Ranganathaiah
@@ -129,12 +131,5 @@ struct error_desc {
 
 
 /* ------------------------ */
-#if (__FreeBSD_version >= 700000)
 #include <sys/clock.h>
 #define TWS_LOCAL_TIME (time_second - utc_offset())
-#else
-#include <machine/clock.h>
-#define TWS_LOCAL_TIME (time_second - (tz_minuteswest * 60) -   \
-                  (wall_cmos_clock ? adjkerntz : 0))
-#endif
-

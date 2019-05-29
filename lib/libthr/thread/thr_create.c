@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2003 Daniel M. Eischen <deischen@gdeb.com>
  * Copyright (c) 2005, David Xu <davidxu@freebsd.org>
  * All rights reserved.
@@ -23,9 +25,10 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * $FreeBSD$
  */
+
+#include <sys/cdefs.h>
+__FBSDID("$FreeBSD$");
 
 #include "namespace.h"
 #include <sys/types.h>
@@ -49,19 +52,20 @@ static void thread_start(struct pthread *curthread);
 __weak_reference(_pthread_create, pthread_create);
 
 int
-_pthread_create(pthread_t * thread, const pthread_attr_t * attr,
-	       void *(*start_routine) (void *), void *arg)
+_pthread_create(pthread_t * __restrict thread,
+    const pthread_attr_t * __restrict attr, void *(*start_routine) (void *),
+    void * __restrict arg)
 {
 	struct pthread *curthread, *new_thread;
 	struct thr_param param;
 	struct sched_param sched_param;
 	struct rtprio rtp;
-	int ret = 0, locked, create_suspended;
 	sigset_t set, oset;
-	cpuset_t *cpusetp = NULL;
-	int cpusetsize = 0;
-	int old_stack_prot;
+	cpuset_t *cpusetp;
+	int i, cpusetsize, create_suspended, locked, old_stack_prot, ret;
 
+	cpusetp = NULL;
+	ret = cpusetsize = 0;
 	_thr_check_init();
 
 	/*
@@ -69,8 +73,7 @@ _pthread_create(pthread_t * thread, const pthread_attr_t * attr,
 	 */
 	if (_thr_isthreaded() == 0) {
 		_malloc_first_thread();
-		if (_thr_setthreaded(1))
-			return (EAGAIN);
+		_thr_setthreaded(1);
 	}
 
 	curthread = _get_curthread();
@@ -118,8 +121,8 @@ _pthread_create(pthread_t * thread, const pthread_attr_t * attr,
 	new_thread->cancel_enable = 1;
 	new_thread->cancel_async = 0;
 	/* Initialize the mutex queue: */
-	TAILQ_INIT(&new_thread->mutexq);
-	TAILQ_INIT(&new_thread->pp_mutexq);
+	for (i = 0; i < TMQ_NITEMS; i++)
+		TAILQ_INIT(&new_thread->mq[i]);
 
 	/* Initialise hooks in the thread structure: */
 	if (new_thread->attr.suspend == THR_CREATE_SUSPENDED) {
@@ -165,7 +168,7 @@ _pthread_create(pthread_t * thread, const pthread_attr_t * attr,
 		param.flags |= THR_SYSTEM_SCOPE;
 	if (new_thread->attr.sched_inherit == PTHREAD_INHERIT_SCHED)
 		param.rtp = NULL;
-	else { 	 
+	else {
 		sched_param.sched_priority = new_thread->attr.prio;
 		_schedparam_to_rtp(new_thread->attr.sched_policy,
 			&sched_param, &rtp);

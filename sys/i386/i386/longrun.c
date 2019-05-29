@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) 2001 Tamotsu Hattori.
  * Copyright (c) 2001 Mitsuru IWASAKI.
  * All rights reserved.
@@ -42,6 +44,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/systm.h>
 #include <sys/kernel.h>
 #include <sys/conf.h>
+#include <sys/eventhandler.h>
 #include <sys/power.h>
 #include <sys/sysctl.h>
 #include <sys/types.h>

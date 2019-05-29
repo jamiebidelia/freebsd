@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2008 Isilon Inc http://www.isilon.com/
  * Authors: Doug Rabson <dfr@rabson.org>
  * Developed with Red Inc: Alfred Perlstein <alfred@freebsd.org>
@@ -64,7 +66,7 @@ __FBSDID("$FreeBSD$");
 
 struct gss_resource {
 	LIST_ENTRY(gss_resource) gr_link;
-	uint64_t	gr_id;	/* indentifier exported to kernel */
+	uint64_t	gr_id;	/* identifier exported to kernel */
 	void*		gr_res;	/* GSS-API resource pointer */
 };
 LIST_HEAD(gss_resource_list, gss_resource) gss_resources;
@@ -200,6 +202,7 @@ main(int argc, char **argv)
 		signal(SIGHUP, SIG_IGN);
 	}
 	signal(SIGTERM, gssd_terminate);
+	signal(SIGPIPE, gssd_terminate);
 
 	memset(&sun, 0, sizeof sun);
 	sun.sun_family = AF_LOCAL;
@@ -254,6 +257,7 @@ main(int argc, char **argv)
 
 	gssd_syscall(_PATH_GSSDSOCK);
 	svc_run();
+	gssd_syscall("");
 
 	return (0);
 }
@@ -751,8 +755,8 @@ gssd_pname_to_uid_1_svc(pname_to_uid_args *argp, pname_to_uid_res *result, struc
 					buflen_hint = buflen;
 			}
 			if (pw) {
-				int len = NGRPS;
-				int groups[NGRPS];
+				int len = NGROUPS;
+				int groups[NGROUPS];
 				result->gid = pw->pw_gid;
 				getgrouplist(pw->pw_name, pw->pw_gid,
 				    groups, &len);
@@ -1285,6 +1289,7 @@ void gssd_terminate(int sig __unused)
 	if (hostbased_initiator_cred != 0)
 		unlink(GSSD_CREDENTIAL_CACHE_FILE);
 #endif
+	gssd_syscall("");
 	exit(0);
 }
 

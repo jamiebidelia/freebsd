@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2002-2009 Sam Leffler, Errno Consulting
  * All rights reserved.
  *
@@ -126,7 +128,7 @@ struct ath_tid {
 	TAILQ_HEAD(,ath_buf)	tid_q;		/* pending buffers */
 	struct ath_node		*an;		/* pointer to parent */
 	int			tid;		/* tid */
-	int			ac;		/* which AC gets this trafic */
+	int			ac;		/* which AC gets this traffic */
 	int			hwq_depth;	/* how many buffers are on HW */
 	u_int			axq_depth;	/* SW queue depth */
 
@@ -202,6 +204,7 @@ struct ath_node {
 					   node */
 	int			clrdmask;	/* has clrdmask been set */
 	uint32_t	an_leak_count;	/* How many frames to leak during pause */
+	HAL_NODE_STATS	an_node_stats;	/* HAL node stats for this node */
 	/* variable-length rate control state follows */
 };
 #define	ATH_NODE(ni)	((struct ath_node *)(ni))
@@ -314,8 +317,9 @@ typedef TAILQ_HEAD(ath_bufhead_s, ath_buf) ath_bufhead;
 #define	ATH_BUF_BUSY	0x00000002	/* (tx) desc owned by h/w */
 #define	ATH_BUF_FIFOEND	0x00000004
 #define	ATH_BUF_FIFOPTR	0x00000008
+#define	ATH_BUF_TOA_PROBE	0x00000010	/* ToD/ToA exchange probe */
 
-#define	ATH_BUF_FLAGS_CLONE	(ATH_BUF_MGMT)
+#define	ATH_BUF_FLAGS_CLONE	(ATH_BUF_MGMT | ATH_BUF_TOA_PROBE)
 
 /*
  * DMA state for tx/rx descriptors.
@@ -370,9 +374,9 @@ struct ath_txq {
 	 */
 	struct {
 		TAILQ_HEAD(axq_q_f_s, ath_buf)	axq_q;
-		u_int				axq_depth;
+		u_int				axq_depth;	/* how many frames (1 per legacy, 1 per A-MPDU list) are in the FIFO queue */
 	} fifo;
-	u_int			axq_fifo_depth;	/* depth of FIFO frames */
+	u_int			axq_fifo_depth;	/* how many FIFO slots are active */
 
 	/*
 	 * XXX the holdingbf field is protected by the TXBUF lock
@@ -477,7 +481,6 @@ struct ath_vap {
 	struct ieee80211vap av_vap;	/* base class */
 	int		av_bslot;	/* beacon slot index */
 	struct ath_buf	*av_bcbuf;	/* beacon buffer */
-	struct ieee80211_beacon_offsets av_boff;/* dynamic update state */
 	struct ath_txq	av_mcastq;	/* buffered mcast s/w queue */
 
 	void		(*av_recv_mgmt)(struct ieee80211_node *,
@@ -490,6 +493,7 @@ struct ath_vap {
 	int		(*av_set_tim)(struct ieee80211_node *, int);
 	void		(*av_recv_pspoll)(struct ieee80211_node *,
 				struct mbuf *);
+	struct ieee80211_quiet_ie	quiet_ie;
 };
 #define	ATH_VAP(vap)	((struct ath_vap *)(vap))
 
@@ -555,8 +559,8 @@ struct ath_tx_methods {
 };
 
 struct ath_softc {
-	struct ifnet		*sc_ifp;	/* interface common */
-	struct ath_stats	sc_stats;	/* interface statistics */
+	struct ieee80211com	sc_ic;
+	struct ath_stats	sc_stats;	/* device statistics */
 	struct ath_tx_aggr_stats	sc_aggr_stats;
 	struct ath_intr_stats	sc_intr_stats;
 	uint64_t		sc_debug;
@@ -650,12 +654,15 @@ struct ath_softc {
 	/*
 	 * Second set of flags.
 	 */
-	u_int32_t		sc_use_ent  : 1,
+	u_int32_t		sc_running  : 1,	/* initialized */
+				sc_use_ent  : 1,
 				sc_rx_stbc  : 1,
 				sc_tx_stbc  : 1,
+				sc_has_ldpc : 1,
 				sc_hasenforcetxop : 1, /* support enforce TxOP */
 				sc_hasdivcomb : 1,     /* RX diversity combining */
-				sc_rx_lnamixer : 1;    /* RX using LNA mixing */
+				sc_rx_lnamixer : 1,    /* RX using LNA mixing */
+				sc_btcoex_mci : 1;     /* MCI bluetooth coex */
 
 	int			sc_cabq_enable;	/* Enable cabq transmission */
 
@@ -907,6 +914,19 @@ struct ath_softc {
 
 	/* ATH_PCI_* flags */
 	uint32_t		sc_pci_devinfo;
+
+	/* BT coex */
+	struct {
+		struct ath_descdma buf;
+
+		/* gpm/sched buffer, saved pointers */
+		char *sched_buf;
+		bus_addr_t sched_paddr;
+		char *gpm_buf;
+		bus_addr_t gpm_paddr;
+
+		uint32_t wlan_channels[4];
+	} sc_btcoex;
 };
 
 #define	ATH_LOCK_INIT(_sc) \
@@ -939,26 +959,6 @@ struct ath_softc {
 		MA_NOTOWNED)
 #define	ATH_TX_TRYLOCK(_sc)	(mtx_owned(&(_sc)->sc_tx_mtx) != 0 &&	\
 					mtx_trylock(&(_sc)->sc_tx_mtx))
-
-/*
- * The IC TX lock is non-reentrant and serialises packet queuing from
- * the upper layers.
- */
-#define	ATH_TX_IC_LOCK_INIT(_sc) do {\
-	snprintf((_sc)->sc_tx_ic_mtx_name,				\
-	    sizeof((_sc)->sc_tx_ic_mtx_name),				\
-	    "%s IC TX lock",						\
-	    device_get_nameunit((_sc)->sc_dev));			\
-	mtx_init(&(_sc)->sc_tx_ic_mtx, (_sc)->sc_tx_ic_mtx_name,	\
-		 NULL, MTX_DEF);					\
-	} while (0)
-#define	ATH_TX_IC_LOCK_DESTROY(_sc)	mtx_destroy(&(_sc)->sc_tx_ic_mtx)
-#define	ATH_TX_IC_LOCK(_sc)		mtx_lock(&(_sc)->sc_tx_ic_mtx)
-#define	ATH_TX_IC_UNLOCK(_sc)		mtx_unlock(&(_sc)->sc_tx_ic_mtx)
-#define	ATH_TX_IC_LOCK_ASSERT(_sc)	mtx_assert(&(_sc)->sc_tx_ic_mtx,	\
-		MA_OWNED)
-#define	ATH_TX_IC_UNLOCK_ASSERT(_sc)	mtx_assert(&(_sc)->sc_tx_ic_mtx,	\
-		MA_NOTOWNED)
 
 /*
  * The PCU lock is non-recursive and should be treated as a spinlock.
@@ -1055,8 +1055,9 @@ void	ath_intr(void *);
  */
 #define	ath_hal_detach(_ah) \
 	((*(_ah)->ah_detach)((_ah)))
-#define	ath_hal_reset(_ah, _opmode, _chan, _outdoor, _pstatus) \
-	((*(_ah)->ah_reset)((_ah), (_opmode), (_chan), (_outdoor), (_pstatus)))
+#define	ath_hal_reset(_ah, _opmode, _chan, _fullreset, _resettype, _pstatus) \
+	((*(_ah)->ah_reset)((_ah), (_opmode), (_chan), (_fullreset), \
+	    (_resettype), (_pstatus)))
 #define	ath_hal_macversion(_ah) \
 	(((_ah)->ah_macVersion << 4) | ((_ah)->ah_macRev))
 #define	ath_hal_getratetable(_ah, _mode) \
@@ -1155,8 +1156,8 @@ void	ath_intr(void *);
 	((*(_ah)->ah_stopTxDma)((_ah), (_qnum)))
 #define	ath_hal_stoppcurecv(_ah) \
 	((*(_ah)->ah_stopPcuReceive)((_ah)))
-#define	ath_hal_startpcurecv(_ah) \
-	((*(_ah)->ah_startPcuReceive)((_ah)))
+#define	ath_hal_startpcurecv(_ah, _is_scanning) \
+	((*(_ah)->ah_startPcuReceive)((_ah), (_is_scanning)))
 #define	ath_hal_stopdmarecv(_ah) \
 	((*(_ah)->ah_stopDmaReceive)((_ah)))
 #define	ath_hal_getdiagstate(_ah, _id, _indata, _insize, _outdata, _outsize) \
@@ -1326,6 +1327,10 @@ void	ath_intr(void *);
 
 #define	ath_hal_hasdivantcomb(_ah) \
 	(ath_hal_getcapability(_ah, HAL_CAP_ANT_DIV_COMB, 0, NULL) == HAL_OK)
+#define	ath_hal_hasldpc(_ah) \
+	(ath_hal_getcapability(_ah, HAL_CAP_LDPC, 0, NULL) == HAL_OK)
+#define	ath_hal_hasldpcwar(_ah) \
+	(ath_hal_getcapability(_ah, HAL_CAP_LDPCWAR, 0, NULL) == HAL_OK)
 
 /* EDMA definitions */
 #define	ath_hal_hasedma(_ah) \
@@ -1348,7 +1353,7 @@ void	ath_intr(void *);
 	== HAL_OK)
 #define	ath_hal_setrxbufsize(_ah, _req) \
 	(ath_hal_setcapability(_ah, HAL_CAP_RXBUFSIZE, 0, _req, NULL)	\
-	== HAL_OK)
+	== AH_TRUE)
 
 #define	ath_hal_getchannoise(_ah, _c) \
 	((*(_ah)->ah_getChanNoise)((_ah), (_c)))
@@ -1370,9 +1375,12 @@ void	ath_intr(void *);
 	0, NULL) == HAL_OK)
 #define	ath_hal_gtxto_supported(_ah) \
 	(ath_hal_getcapability(_ah, HAL_CAP_GTXTO, 0, NULL) == HAL_OK)
-#define	ath_hal_has_long_rxdesc_tsf(_ah) \
-	(ath_hal_getcapability(_ah, HAL_CAP_LONG_RXDESC_TSF, \
-	0, NULL) == HAL_OK)
+#define	ath_hal_get_rx_tsf_prec(_ah, _pr) \
+	(ath_hal_getcapability((_ah), HAL_CAP_RXTSTAMP_PREC, 0, (_pr)) \
+	    == HAL_OK)
+#define	ath_hal_get_tx_tsf_prec(_ah, _pr) \
+	(ath_hal_getcapability((_ah), HAL_CAP_TXTSTAMP_PREC, 0, (_pr)) \
+	    == HAL_OK)
 #define	ath_hal_setuprxdesc(_ah, _ds, _size, _intreq) \
 	((*(_ah)->ah_setupRxDesc)((_ah), (_ds), (_size), (_intreq)))
 #define	ath_hal_rxprocdesc(_ah, _ds, _dspa, _dsnext, _rs) \
@@ -1480,6 +1488,8 @@ void	ath_intr(void *);
 	((*(_ah)->ah_get11nExtBusy)((_ah)))
 #define	ath_hal_setchainmasks(_ah, _txchainmask, _rxchainmask) \
 	((*(_ah)->ah_setChainMasks)((_ah), (_txchainmask), (_rxchainmask)))
+#define	ath_hal_set_quiet(_ah, _p, _d, _o, _f) \
+	((*(_ah)->ah_setQuiet)((_ah), (_p), (_d), (_o), (_f)))
 
 #define	ath_hal_spectral_supported(_ah) \
 	(ath_hal_getcapability(_ah, HAL_CAP_SPECTRAL_SCAN, 0, NULL) == HAL_OK)
@@ -1502,8 +1512,6 @@ void	ath_intr(void *);
 	((*(_ah)->ah_btCoexSetQcuThresh)((_ah), (_qcuid)))
 #define	ath_hal_btcoex_set_weights(_ah, _weight) \
 	((*(_ah)->ah_btCoexSetWeights)((_ah), (_weight)))
-#define	ath_hal_btcoex_set_weights(_ah, _weight) \
-	((*(_ah)->ah_btCoexSetWeights)((_ah), (_weight)))
 #define	ath_hal_btcoex_set_bmiss_thresh(_ah, _thr) \
 	((*(_ah)->ah_btCoexSetBmissThresh)((_ah), (_thr)))
 #define	ath_hal_btcoex_set_parameter(_ah, _attrib, _val) \
@@ -1512,6 +1520,17 @@ void	ath_intr(void *);
 	((*(_ah)->ah_btCoexEnable)((_ah)))
 #define	ath_hal_btcoex_disable(_ah) \
 	((*(_ah)->ah_btCoexDisable)((_ah)))
+
+#define	ath_hal_btcoex_mci_setup(_ah, _gp, _gb, _gl, _sp) \
+	((*(_ah)->ah_btMciSetup)((_ah), (_gp), (_gb), (_gl), (_sp)))
+#define	ath_hal_btcoex_mci_send_message(_ah, _h, _f, _p, _l, _wd, _cbt) \
+	((*(_ah)->ah_btMciSendMessage)((_ah), (_h), (_f), (_p), (_l), (_wd), (_cbt)))
+#define	ath_hal_btcoex_mci_get_interrupt(_ah, _mi, _mm) \
+	((*(_ah)->ah_btMciGetInterrupt)((_ah), (_mi), (_mm)))
+#define	ath_hal_btcoex_mci_state(_ah, _st, _pd) \
+	((*(_ah)->ah_btMciState)((_ah), (_st), (_pd)))
+#define	ath_hal_btcoex_mci_detach(_ah) \
+	((*(_ah)->ah_btMciDetach)((_ah)))
 
 #define	ath_hal_div_comb_conf_get(_ah, _conf) \
 	((*(_ah)->ah_divLnaConfGet)((_ah), (_conf)))

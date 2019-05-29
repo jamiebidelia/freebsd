@@ -31,10 +31,11 @@ __FBSDID("$FreeBSD$");
 
 #include "opt_acpi.h"
 #include <sys/param.h>
+#include <sys/bus.h>
+#include <sys/eventhandler.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/module.h>
-#include <sys/bus.h>
 #include <sys/power.h>
 
 #include <contrib/dev/acpica/include/acpi.h>
@@ -137,14 +138,16 @@ static int
 acpi_panasonic_probe(device_t dev)
 {
 	static char *mat_ids[] = { "MAT0019", NULL };
-
+	int rv;
+	
 	if (acpi_disabled("panasonic") ||
-	    ACPI_ID_PROBE(device_get_parent(dev), dev, mat_ids) == NULL ||
 	    device_get_unit(dev) != 0)
 		return (ENXIO);
+	rv = ACPI_ID_PROBE(device_get_parent(dev), dev, mat_ids, NULL);
 
-	device_set_desc(dev, "Panasonic Notebook Hotkeys");
-	return (0);
+	if (rv <= 0)
+		device_set_desc(dev, "Panasonic Notebook Hotkeys");
+	return (rv);
 }
 
 static int
@@ -493,6 +496,10 @@ acpi_panasonic_notify(ACPI_HANDLE h, UINT32 notify, void *context)
 		}
 		ACPI_SERIAL_END(panasonic);
 		break;
+	case 0x81:
+		if (!bootverbose)
+			break;
+		/* FALLTHROUGH */
 	default:
 		device_printf(sc->dev, "unknown notify: %#x\n", notify);
 		break;

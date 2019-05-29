@@ -25,6 +25,8 @@
  *
  */
 
+#include "opt_platform.h"
+
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
@@ -34,6 +36,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/proc.h>
 #include <sys/sf_buf.h>
 #include <sys/signal.h>
+#include <sys/sysent.h>
 #include <sys/unistd.h>
 
 #include <vm/vm.h>
@@ -44,12 +47,15 @@ __FBSDID("$FreeBSD$");
 
 #include <machine/armreg.h>
 #include <machine/cpu.h>
+#include <machine/md_var.h>
 #include <machine/pcb.h>
 #include <machine/frame.h>
 
 #ifdef VFP
 #include <machine/vfp.h>
 #endif
+
+#include <dev/psci/psci.h>
 
 /*
  * Finish a fork operation, with process p2 nearly set up.
@@ -72,9 +78,10 @@ cpu_fork(struct thread *td1, struct proc *p2, struct thread *td2, int flags)
 		 * this may not have happened.
 		 */
 		td1->td_pcb->pcb_tpidr_el0 = READ_SPECIALREG(tpidr_el0);
+		td1->td_pcb->pcb_tpidrro_el0 = READ_SPECIALREG(tpidrro_el0);
 #ifdef VFP
 		if ((td1->td_pcb->pcb_fpflags & PCB_FP_STARTED) != 0)
-			vfp_save_state(td1);
+			vfp_save_state(td1, td1->td_pcb);
 #endif
 	}
 
@@ -84,14 +91,14 @@ cpu_fork(struct thread *td1, struct proc *p2, struct thread *td2, int flags)
 	td2->td_pcb = pcb2;
 	bcopy(td1->td_pcb, pcb2, sizeof(*pcb2));
 
-	td2->td_pcb->pcb_l1addr =
-	    vtophys(vmspace_pmap(td2->td_proc->p_vmspace)->pm_l1);
+	td2->td_proc->p_md.md_l0addr =
+	    vtophys(vmspace_pmap(td2->td_proc->p_vmspace)->pm_l0);
 
 	tf = (struct trapframe *)STACKALIGN((struct trapframe *)pcb2 - 1);
 	bcopy(td1->td_frame, tf, sizeof(*tf));
 	tf->tf_x[0] = 0;
 	tf->tf_x[1] = 0;
-	tf->tf_spsr = 0;
+	tf->tf_spsr = td1->td_frame->tf_spsr & PSR_M_32;
 
 	td2->td_frame = tf;
 
@@ -100,18 +107,21 @@ cpu_fork(struct thread *td1, struct proc *p2, struct thread *td2, int flags)
 	td2->td_pcb->pcb_x[9] = (uintptr_t)td2;
 	td2->td_pcb->pcb_x[PCB_LR] = (uintptr_t)fork_trampoline;
 	td2->td_pcb->pcb_sp = (uintptr_t)td2->td_frame;
+	td2->td_pcb->pcb_fpusaved = &td2->td_pcb->pcb_fpustate;
 	td2->td_pcb->pcb_vfpcpu = UINT_MAX;
 
 	/* Setup to release spin count in fork_exit(). */
 	td2->td_md.md_spinlock_count = 1;
-	td2->td_md.md_saved_daif = 0;
+	td2->td_md.md_saved_daif = td1->td_md.md_saved_daif & ~DAIF_I_MASKED;
 }
 
 void
 cpu_reset(void)
 {
 
-	printf("cpu_reset");
+	psci_reset();
+
+	printf("cpu_reset failed");
 	while(1)
 		__asm volatile("wfi" ::: "memory");
 }
@@ -146,20 +156,20 @@ cpu_set_syscall_retval(struct thread *td, int error)
 		break;
 	default:
 		frame->tf_spsr |= PSR_C;	/* carry bit */
-		frame->tf_x[0] = error;
+		frame->tf_x[0] = SV_ABI_ERRNO(td->td_proc, error);
 		break;
 	}
 }
 
 /*
- * Initialize machine state (pcb and trap frame) for a new thread about to
- * upcall. Put enough state in the new thread's PCB to get it to go back
- * userret(), where we can intercept it again to set the return (upcall)
- * Address and stack, along with those from upcals that are from other sources
- * such as those generated in thread_userret() itself.
+ * Initialize machine state, mostly pcb and trap frame for a new
+ * thread, about to return to userspace.  Put enough state in the new
+ * thread's PCB to get it to go back to the fork_return(), which
+ * finalizes the thread state and handles peculiarities of the first
+ * return to userspace for the new thread.
  */
 void
-cpu_set_upcall(struct thread *td, struct thread *td0)
+cpu_copy_thread(struct thread *td, struct thread *td0)
 {
 	bcopy(td0->td_frame, td->td_frame, sizeof(struct trapframe));
 	bcopy(td0->td_pcb, td->td_pcb, sizeof(struct pcb));
@@ -168,31 +178,57 @@ cpu_set_upcall(struct thread *td, struct thread *td0)
 	td->td_pcb->pcb_x[9] = (uintptr_t)td;
 	td->td_pcb->pcb_x[PCB_LR] = (uintptr_t)fork_trampoline;
 	td->td_pcb->pcb_sp = (uintptr_t)td->td_frame;
+	td->td_pcb->pcb_fpusaved = &td->td_pcb->pcb_fpustate;
 	td->td_pcb->pcb_vfpcpu = UINT_MAX;
 
 	/* Setup to release spin count in fork_exit(). */
 	td->td_md.md_spinlock_count = 1;
-	td->td_md.md_saved_daif = 0;
+	td->td_md.md_saved_daif = td0->td_md.md_saved_daif & ~DAIF_I_MASKED;
 }
 
 /*
- * Set that machine state for performing an upcall that has to
- * be done in thread_userret() so that those upcalls generated
- * in thread_userret() itself can be done as well.
+ * Set that machine state for performing an upcall that starts
+ * the entry function with the given argument.
  */
 void
-cpu_set_upcall_kse(struct thread *td, void (*entry)(void *), void *arg,
+cpu_set_upcall(struct thread *td, void (*entry)(void *), void *arg,
 	stack_t *stack)
 {
+	struct trapframe *tf = td->td_frame;
 
-	panic("cpu_set_upcall_kse");
+	/* 32bits processes use r13 for sp */
+	if (td->td_frame->tf_spsr & PSR_M_32)
+		tf->tf_x[13] = STACKALIGN((uintptr_t)stack->ss_sp + stack->ss_size);
+	else
+		tf->tf_sp = STACKALIGN((uintptr_t)stack->ss_sp + stack->ss_size);
+	tf->tf_elr = (register_t)entry;
+	tf->tf_x[0] = (register_t)arg;
 }
 
 int
 cpu_set_user_tls(struct thread *td, void *tls_base)
 {
+	struct pcb *pcb;
 
-	panic("cpu_set_user_tls");
+	if ((uintptr_t)tls_base >= VM_MAXUSER_ADDRESS)
+		return (EINVAL);
+
+	pcb = td->td_pcb;
+	if (td->td_frame->tf_spsr & PSR_M_32) {
+		/* 32bits arm stores the user TLS into tpidrro */
+		pcb->pcb_tpidrro_el0 = (register_t)tls_base;
+		pcb->pcb_tpidr_el0 = (register_t)tls_base;
+		if (td == curthread) {
+			WRITE_SPECIALREG(tpidrro_el0, tls_base);
+			WRITE_SPECIALREG(tpidr_el0, tls_base);
+		}
+	} else {
+		pcb->pcb_tpidr_el0 = (register_t)tls_base;
+		if (td == curthread)
+			WRITE_SPECIALREG(tpidr_el0, tls_base);
+	}
+
+	return (0);
 }
 
 void
@@ -207,7 +243,7 @@ cpu_thread_alloc(struct thread *td)
 	td->td_pcb = (struct pcb *)(td->td_kstack +
 	    td->td_kstack_pages * PAGE_SIZE) - 1;
 	td->td_frame = (struct trapframe *)STACKALIGN(
-	    td->td_pcb - 1);
+	    (struct trapframe *)td->td_pcb - 1);
 }
 
 void
@@ -227,13 +263,14 @@ cpu_thread_clean(struct thread *td)
  * This is needed to make kernel threads stay in kernel mode.
  */
 void
-cpu_set_fork_handler(struct thread *td, void (*func)(void *), void *arg)
+cpu_fork_kthread_handler(struct thread *td, void (*func)(void *), void *arg)
 {
 
 	td->td_pcb->pcb_x[8] = (uintptr_t)func;
 	td->td_pcb->pcb_x[9] = (uintptr_t)arg;
 	td->td_pcb->pcb_x[PCB_LR] = (uintptr_t)fork_trampoline;
 	td->td_pcb->pcb_sp = (uintptr_t)td->td_frame;
+	td->td_pcb->pcb_fpusaved = &td->td_pcb->pcb_fpustate;
 	td->td_pcb->pcb_vfpcpu = UINT_MAX;
 }
 
@@ -242,24 +279,25 @@ cpu_exit(struct thread *td)
 {
 }
 
+bool
+cpu_exec_vmspace_reuse(struct proc *p __unused, vm_map_t map __unused)
+{
+
+	return (true);
+}
+
+int
+cpu_procctl(struct thread *td __unused, int idtype __unused, id_t id __unused,
+    int com __unused, void *data __unused)
+{
+
+	return (EINVAL);
+}
+
 void
 swi_vm(void *v)
 {
 
-	/* Nothing to do here - busdma bounce buffers are not implemented. */
+	if (busdma_swi_pending != 0)
+		busdma_swi();
 }
-
-void *
-uma_small_alloc(uma_zone_t zone, vm_size_t bytes, u_int8_t *flags, int wait)
-{
-
-	panic("uma_small_alloc");
-}
-
-void
-uma_small_free(void *mem, vm_size_t size, u_int8_t flags)
-{
-
-	panic("uma_small_free");
-}
-

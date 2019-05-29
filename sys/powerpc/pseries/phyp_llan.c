@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright 2013 Nathan Whitehorn
  * All rights reserved.
  *
@@ -87,6 +89,8 @@ struct llan_softc {
 	cell_t		unit;
 	uint8_t		mac_address[8];
 
+	struct ifmedia	media;
+
 	int		irqid;
 	struct resource	*irq;
 	void		*irq_cookie;
@@ -116,6 +120,8 @@ static void	llan_intr(void *xsc);
 static void	llan_init(void *xsc);
 static void	llan_start(struct ifnet *ifp);
 static int	llan_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data);
+static void	llan_media_status(struct ifnet *ifp, struct ifmediareq *ifmr);
+static int	llan_media_change(struct ifnet *ifp);
 static void	llan_rx_load_cb(void *xsc, bus_dma_segment_t *segs, int nsegs,
 		    int err);
 static int	llan_add_rxbuf(struct llan_softc *sc, struct llan_xfer *rx);
@@ -159,7 +165,7 @@ llan_attach(device_t dev)
 	node = ofw_bus_get_node(dev);
 	OF_getprop(node, "local-mac-address", sc->mac_address,
 	    sizeof(sc->mac_address));
-	OF_getprop(node, "reg", &sc->unit, sizeof(sc->unit));
+	OF_getencprop(node, "reg", &sc->unit, sizeof(sc->unit));
 
 	mtx_init(&sc->io_lock, "llan", NULL, MTX_DEF);
 
@@ -220,13 +226,43 @@ llan_attach(device_t dev)
 	sc->ifp->if_ioctl = llan_ioctl;
 	sc->ifp->if_init = llan_init;
 
+	ifmedia_init(&sc->media, IFM_IMASK, llan_media_change,
+	    llan_media_status);
+	ifmedia_add(&sc->media, IFM_ETHER | IFM_AUTO, 0, NULL);
+	ifmedia_set(&sc->media, IFM_ETHER | IFM_AUTO);
+
 	IFQ_SET_MAXLEN(&sc->ifp->if_snd, LLAN_MAX_TX_PACKETS);
 	sc->ifp->if_snd.ifq_drv_maxlen = LLAN_MAX_TX_PACKETS;
 	IFQ_SET_READY(&sc->ifp->if_snd);
 
 	ether_ifattach(sc->ifp, &sc->mac_address[2]);
 
+	/* We don't have link state reporting, so make it always up */
+	if_link_state_change(sc->ifp, LINK_STATE_UP);
+
 	return (0);
+}
+
+static int
+llan_media_change(struct ifnet *ifp)
+{
+	struct llan_softc *sc = ifp->if_softc;
+
+	if (IFM_TYPE(sc->media.ifm_media) != IFM_ETHER)
+		return (EINVAL);
+
+	if (IFM_SUBTYPE(sc->media.ifm_media) != IFM_AUTO)
+		return (EINVAL);
+
+	return (0);
+}
+
+static void
+llan_media_status(struct ifnet *ifp, struct ifmediareq *ifmr)
+{
+
+	ifmr->ifm_status = IFM_AVALID | IFM_ACTIVE | IFM_UNKNOWN | IFM_FDX;
+	ifmr->ifm_active = IFM_ETHER;
 }
 
 static void
@@ -350,8 +386,6 @@ restart:
 		/* llan_add_rxbuf does DMA sync and unload as well as requeue */
 		if (llan_add_rxbuf(sc, rx) != 0) {
 			if_inc_counter(sc->ifp, IFCOUNTER_IERRORS, 1);
-			phyp_hcall(H_ADD_LOGICAL_LAN_BUFFER, sc->unit,
-			    rx->rx_bufdesc);
 			continue;
 		}
 
@@ -391,7 +425,7 @@ llan_send_packet(void *xsc, bus_dma_segment_t *segs, int nsegs,
 {
 	struct llan_softc *sc = xsc;
 	uint64_t bufdescs[6];
-	int i;
+	int i, err;
 
 	bzero(bufdescs, sizeof(bufdescs));
 
@@ -401,7 +435,7 @@ llan_send_packet(void *xsc, bus_dma_segment_t *segs, int nsegs,
 		bufdescs[i] |= segs[i].ds_addr;
 	}
 
-	phyp_hcall(H_SEND_LOGICAL_LAN, sc->unit, bufdescs[0],
+	err = phyp_hcall(H_SEND_LOGICAL_LAN, sc->unit, bufdescs[0],
 	    bufdescs[1], bufdescs[2], bufdescs[3], bufdescs[4], bufdescs[5], 0);
 	/*
 	 * The hypercall returning implies completion -- or that the call will
@@ -409,6 +443,10 @@ llan_send_packet(void *xsc, bus_dma_segment_t *segs, int nsegs,
 	 * H_BUSY based on the continuation token in R4. For now, just drop
 	 * the packet in such cases.
 	 */
+	if (err == H_SUCCESS)
+		if_inc_counter(sc->ifp, IFCOUNTER_OPACKETS, 1);
+	else
+		if_inc_counter(sc->ifp, IFCOUNTER_OERRORS, 1);
 }
 
 static void
@@ -473,7 +511,7 @@ llan_set_multicast(struct llan_softc *sc)
 	phyp_hcall(H_MULTICAST_CTRL, sc->unit, LLAN_CLEAR_MULTICAST, 0);
 
 	if_maddr_rlock(ifp);
-	TAILQ_FOREACH(inm, &ifp->if_multiaddrs, ifma_link) {
+	CK_STAILQ_FOREACH(inm, &ifp->if_multiaddrs, ifma_link) {
 		if (inm->ifma_addr->sa_family != AF_LINK)
 			continue;
 
@@ -500,6 +538,10 @@ llan_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 		if ((sc->ifp->if_drv_flags & IFF_DRV_RUNNING) != 0)
 			llan_set_multicast(sc);
 		mtx_unlock(&sc->io_lock);
+		break;
+	case SIOCGIFMEDIA:
+	case SIOCSIFMEDIA:
+		err = ifmedia_ioctl(ifp, (struct ifreq *)data, &sc->media, cmd);
 		break;
 	case SIOCSIFFLAGS:
 	default:

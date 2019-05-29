@@ -16,6 +16,7 @@ noinst_HEADERS =	\
 	intreswork.h	\
 	iosignal.h	\
 	l_stdlib.h	\
+	libssl_compat.h	\
 	lib_strbuf.h	\
 	libntp.h	\
 	mbg_gps166.h	\
@@ -36,6 +37,7 @@ noinst_HEADERS =	\
 	ntp_if.h	\
 	ntp_intres.h	\
 	ntp_io.h	\
+	ntp_keyacc.h	\
 	ntp_libopts.h	\
 	ntp_lineedit.h	\
 	ntp_lists.h	\
@@ -62,8 +64,11 @@ noinst_HEADERS =	\
 	ntpsim.h	\
 	parse.h		\
 	parse_conf.h	\
+	rc_cmdlength.h	\
 	recvbuff.h	\
 	refclock_atom.h	\
+	refidsmear.h	\
+	safecast.h	\
 	ssl_applink.c	\
 	timepps-SCO.h	\
 	timepps-Solaris.h	\

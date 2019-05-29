@@ -15,7 +15,7 @@
  *   Currently the STREAMS module is only available for Suns running
  *   SunOS 4.x and SunOS5.x.
  *
- * Copyright (c) 1995-2009 by Frank Kardel <kardel <AT> ntp.org>
+ * Copyright (c) 1995-2015 by Frank Kardel <kardel <AT> ntp.org>
  * Copyright (c) 1989-1994 by Frank Kardel, Friedrich-Alexander Universitaet Erlangen-Nuernberg, Germany
  *
  * Redistribution and use in source and binary forms, with or without
@@ -1630,9 +1630,9 @@ list_err(
 static char *
 mkreadable(
 	char  *buffer,
-	long  blen,
+	size_t blen,
 	const char  *src,
-	u_long  srclen,
+	size_t srclen,
 	int hex
 	)
 {
@@ -2264,8 +2264,8 @@ local_input(
 							if (debug > 3)
 							{
 								printf(
-								       "parse: local_receive: fd %d PPSAPI seq %ld - PPS %s\n",
-								       rbufp->fd,
+								       "parse: local_receive: fd %ld PPSAPI seq %ld - PPS %s\n",
+								       (long)rbufp->fd,
 								       (long)pps_info.assert_sequence + (long)pps_info.clear_sequence,
 								       lfptoa(&parse->parseio.parse_dtime.parse_ptime.fp, 6));
 							}
@@ -2277,8 +2277,8 @@ local_input(
 							if (debug > 3)
 							{
 								printf(
-								       "parse: local_receive: fd %d PPSAPI seq assert %ld, seq clear %ld - NO PPS event\n",
-								       rbufp->fd,
+								       "parse: local_receive: fd %ld PPSAPI seq assert %ld, seq clear %ld - NO PPS event\n",
+								       (long)rbufp->fd,
 								       (long)pps_info.assert_sequence, (long)pps_info.clear_sequence);
 							}
 						}
@@ -2291,8 +2291,8 @@ local_input(
 						if (debug > 3)
 						{
 							printf(
-							       "parse: local_receive: fd %d PPSAPI time_pps_fetch errno = %d\n",
-							       rbufp->fd,
+							       "parse: local_receive: fd %ld PPSAPI time_pps_fetch errno = %d\n",
+							       (long)rbufp->fd,
 							       errno);
 						}
 					}
@@ -2540,7 +2540,7 @@ parsestate(
 	  {
 		  { PARSEB_S_LEAP,     "LEAP INDICATION" },
 		  { PARSEB_S_PPS,      "PPS SIGNAL" },
-		  { PARSEB_S_ANTENNA,  "ANTENNA" },
+		  { PARSEB_S_CALLBIT,  "CALLBIT" },
 		  { PARSEB_S_POSITION, "POSITION" },
 		  { 0,		       NULL }
 	  };
@@ -2562,7 +2562,7 @@ parsestate(
 		i++;
 	}
 
-	if (lstate & (PARSEB_S_LEAP|PARSEB_S_ANTENNA|PARSEB_S_PPS|PARSEB_S_POSITION))
+	if (lstate & (PARSEB_S_LEAP|PARSEB_S_CALLBIT|PARSEB_S_PPS|PARSEB_S_POSITION))
 	{
 		if (s != t)
 			t = ap(buffer, size, t, "; ");
@@ -2587,6 +2587,9 @@ parsestate(
 			i++;
 		}
 		t = ap(buffer, size, t, ")");
+		/* t is unused here, but if we don't track it and
+		 * need it later, that's a bug waiting to happen.
+		 */
 	}
 	return buffer;
 }
@@ -2998,7 +3001,7 @@ parse_start(
 	if (!notice)
         {
 		NLOG(NLOG_CLOCKINFO) /* conditional if clause for conditional syslog */
-			msyslog(LOG_INFO, "NTP PARSE support: Copyright (c) 1989-2009, Frank Kardel");
+			msyslog(LOG_INFO, "NTP PARSE support: Copyright (c) 1989-2015, Frank Kardel");
 		notice = 1;
 	}
 
@@ -3611,7 +3614,9 @@ parse_control(
 		}
 		else
 		{
-			int count = tmpctl.parseformat.parse_count - 1;
+			int count = tmpctl.parseformat.parse_count;
+			if (count)
+				--count;
 
 			start = tt = add_var(&out->kv_list, 80, RO|DEF);
 			tt = ap(start, 80, tt, "refclock_format=\"");
@@ -3672,8 +3677,7 @@ parse_control(
 			}
 		}
 
-		tt = ap(start, LEN_STATES, tt,
-		    "; running time: %s\"", l_mktime(sum));
+		ap(start, LEN_STATES, tt, "; running time: %s\"", l_mktime(sum));
 
 		tt = add_var(&out->kv_list, 32, RO);
 		snprintf(tt, 32,  "refclock_id=\"%s\"", parse->parse_type->cl_id);
@@ -3778,10 +3782,17 @@ parse_process(
 			}
 			else
 			{
+				unsigned int count = tmpctl.parsegettc.parse_count;
+				if (count)
+					--count;
 				ERR(ERR_BADDATA)
-					msyslog(LOG_WARNING, "PARSE receiver #%d: FAILED TIMECODE: \"%s\" (check receiver configuration / wiring)",
-						CLK_UNIT(parse->peer), mkascii(buffer, sizeof buffer, tmpctl.parsegettc.parse_buffer, (unsigned)(tmpctl.parsegettc.parse_count - 1)));
+				    msyslog(LOG_WARNING, "PARSE receiver #%d: FAILED TIMECODE: \"%s\" (check receiver configuration / wiring)",
+					    CLK_UNIT(parse->peer),
+					    mkascii(buffer, sizeof(buffer),
+						    tmpctl.parsegettc.parse_buffer, count));
 			}
+			/* copy status to show only changes in case of failures */
+			parse->timedata.parse_status = parsetime->parse_status;
 		}
 	}
 
@@ -4221,13 +4232,13 @@ parse_process(
 
 static void
 mk_utcinfo(
-	   char *t,  // pointer to the output string buffer
-	   int wnt,
-	   int wnlsf,
+	   char *t,  /* pointer to the output string buffer */
+	   uint16_t wnt,
+	   uint16_t wnlsf,
 	   int dn,
 	   int dtls,
 	   int dtlsf,
-	   int size  // size of the output string buffer
+	   int size  /* size of the output string buffer */
 	   )
 {
 	/*
@@ -4243,32 +4254,36 @@ mk_utcinfo(
 	{
 		time_t t_ls;
 		struct tm *tm;
-		int n = 0;
+		int nc;
 
-		if (wnlsf < GPSWRAP)
-			wnlsf += GPSWEEKS;
-
-		if (wnt < GPSWRAP)
-			wnt += GPSWEEKS;
+		wnlsf = basedate_expand_gpsweek(wnlsf);
+		/* 'wnt' not used here: would need the same treatment as 'wnlsf */
 
 		t_ls = (time_t) wnlsf * SECSPERWEEK
 			+ (time_t) dn * SECSPERDAY
 			+ GPS_SEC_BIAS - 1;
 
 		tm = gmtime( &t_ls );
-		if (tm == NULL)  // gmtime() failed
+		if (tm == NULL)  /* gmtime() failed */
 		{
 			snprintf( t, size, "** (gmtime() failed in mk_utcinfo())" );
 			return;
 		}
 
-		n += snprintf( t, size, "UTC offset transition from %is to %is due to leap second %s",
+		nc = snprintf( t, size, "UTC offset transition from %is to %is due to leap second %s",
 				dtls, dtlsf, ( dtls < dtlsf ) ? "insertion" : "deletion" );
-		n += snprintf( t + n, size - n, " at UTC midnight at the end of %s, %04i-%02i-%02i",
+		if (nc < 0)
+			nc = strlen(t);
+		else if (nc > size)
+			nc = size;
+		
+		snprintf( t + nc, size - nc, " at UTC midnight at the end of %s, %04i-%02i-%02i",
 				daynames[tm->tm_wday], tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday );
 	}
 	else
+	{
 		snprintf( t, size, "UTC offset parameter: %is, no leap second announced.\n", dtls );
+	}
 
 }
 

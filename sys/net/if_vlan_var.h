@@ -73,6 +73,9 @@ struct	vlanreq {
 #define	SIOCSETVLAN	SIOCSIFGENERIC
 #define	SIOCGETVLAN	SIOCGIFGENERIC
 
+#define	SIOCGVLANPCP	SIOCGLANPCP	/* Get VLAN PCP */
+#define	SIOCSVLANPCP	SIOCSLANPCP	/* Set VLAN PCP */
+
 #ifdef _KERNEL
 /*
  * Drivers that are capable of adding and removing the VLAN header
@@ -110,37 +113,50 @@ struct	vlanreq {
  * if_capabilities.
  */
 
+/*
+ * The 802.1q code may also tag mbufs with the PCP (priority) field for use in
+ * other layers of the stack, in which case an m_tag will be used.  This is
+ * semantically quite different from use of the ether_vtag field, which is
+ * defined only between the device driver and VLAN layer.
+ */
+#define	MTAG_8021Q		1326104895
+#define	MTAG_8021Q_PCP_IN	0		/* Input priority. */
+#define	MTAG_8021Q_PCP_OUT	1		/* Output priority. */
+
 #define	VLAN_CAPABILITIES(_ifp) do {				\
 	if ((_ifp)->if_vlantrunk != NULL) 			\
 		(*vlan_trunk_cap_p)(_ifp);			\
 } while (0)
 
 #define	VLAN_TRUNKDEV(_ifp)					\
-	(_ifp)->if_type == IFT_L2VLAN ? (*vlan_trunkdev_p)((_ifp)) : NULL
+	((_ifp)->if_type == IFT_L2VLAN ? (*vlan_trunkdev_p)((_ifp)) : NULL)
 #define	VLAN_TAG(_ifp, _vid)					\
-	(_ifp)->if_type == IFT_L2VLAN ? (*vlan_tag_p)((_ifp), (_vid)) : EINVAL
+	((_ifp)->if_type == IFT_L2VLAN ? (*vlan_tag_p)((_ifp), (_vid)) : EINVAL)
+#define	VLAN_PCP(_ifp, _pcp)					\
+	((_ifp)->if_type == IFT_L2VLAN ? (*vlan_pcp_p)((_ifp), (_pcp)) : EINVAL)
 #define	VLAN_COOKIE(_ifp)					\
-	(_ifp)->if_type == IFT_L2VLAN ? (*vlan_cookie_p)((_ifp)) : NULL
+	((_ifp)->if_type == IFT_L2VLAN ? (*vlan_cookie_p)((_ifp)) : NULL)
 #define	VLAN_SETCOOKIE(_ifp, _cookie)				\
-	(_ifp)->if_type == IFT_L2VLAN ?				\
-	    (*vlan_setcookie_p)((_ifp), (_cookie)) : EINVAL
+	((_ifp)->if_type == IFT_L2VLAN ?			\
+	    (*vlan_setcookie_p)((_ifp), (_cookie)) : EINVAL)
 #define	VLAN_DEVAT(_ifp, _vid)					\
-	(_ifp)->if_vlantrunk != NULL ? (*vlan_devat_p)((_ifp), (_vid)) : NULL
+	((_ifp)->if_vlantrunk != NULL ? (*vlan_devat_p)((_ifp), (_vid)) : NULL)
 
 extern	void (*vlan_trunk_cap_p)(struct ifnet *);
 extern	struct ifnet *(*vlan_trunkdev_p)(struct ifnet *);
 extern	struct ifnet *(*vlan_devat_p)(struct ifnet *, uint16_t);
 extern	int (*vlan_tag_p)(struct ifnet *, uint16_t *);
+extern	int (*vlan_pcp_p)(struct ifnet *, uint16_t *);
 extern	int (*vlan_setcookie_p)(struct ifnet *, void *);
 extern	void *(*vlan_cookie_p)(struct ifnet *);
 
-#ifdef _SYS_EVENTHANDLER_H_
+#include <sys/_eventhandler.h>
+
 /* VLAN state change events */
 typedef void (*vlan_config_fn)(void *, struct ifnet *, uint16_t);
 typedef void (*vlan_unconfig_fn)(void *, struct ifnet *, uint16_t);
 EVENTHANDLER_DECLARE(vlan_config, vlan_config_fn);
 EVENTHANDLER_DECLARE(vlan_unconfig, vlan_unconfig_fn);
-#endif /* _SYS_EVENTHANDLER_H_ */
 
 #endif /* _KERNEL */
 

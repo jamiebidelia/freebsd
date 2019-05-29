@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (C) 2010 Andreas Tobler
  * All rights reserved.
  *
@@ -56,8 +58,6 @@ __FBSDID("$FreeBSD$");
 #include "moea64_if.h"
 
 #include "phyp-hvcall.h"
-
-extern int n_slbs;
 
 static struct rmlock mphyp_eviction_lock;
 
@@ -142,11 +142,11 @@ mphyp_bootstrap(mmu_t mmup, vm_offset_t kernelstart, vm_offset_t kernelend)
                 node = OF_peer(node);
         }
 
-	res = OF_getprop(node, "ibm,pft-size", prop, sizeof(prop));
+	res = OF_getencprop(node, "ibm,pft-size", prop, sizeof(prop));
 	if (res <= 0)
 		panic("mmu_phyp: unknown PFT size");
 	final_pteg_count = 1 << prop[1];
-	res = OF_getprop(node, "ibm,slb-size", prop, sizeof(prop[0]));
+	res = OF_getencprop(node, "ibm,slb-size", prop, sizeof(prop[0]));
 	if (res > 0)
 		n_slbs = prop[0];
 
@@ -221,7 +221,7 @@ mphyp_bootstrap(mmu_t mmup, vm_offset_t kernelstart, vm_offset_t kernelend)
 static void
 mphyp_cpu_bootstrap(mmu_t mmup, int ap)
 {
-	struct slb *slb = PCPU_GET(slb);
+	struct slb *slb = PCPU_GET(aim.slb);
 	register_t seg0;
 	int i;
 
@@ -403,7 +403,7 @@ mphyp_pte_insert(mmu_t mmu, struct pvo_entry *pvo)
 		return (0);
 	}
 	KASSERT(result == H_PTEG_FULL, ("Page insertion error: %ld "
-	    "(ptegidx: %#zx/%#x, PTE %#lx/%#lx", result, pvo->pvo_pte.slot,
+	    "(ptegidx: %#zx/%#lx, PTE %#lx/%#lx", result, pvo->pvo_pte.slot,
 	    moea64_pteg_count, pte.pte_hi, pte.pte_lo));
 
 	/*
@@ -453,7 +453,7 @@ mphyp_pte_insert(mmu_t mmu, struct pvo_entry *pvo)
 		    evicted.pte_hi & LPTE_AVPN_MASK, 0, &junk, &lastptelo,
 		    &junk);
 		moea64_pte_overflow++;
-		KASSERT(result == H_SUCCESS,
+		KASSERT(result == H_SUCCESS || result == H_NOT_FOUND,
 		    ("Error evicting page: %d", (int)result));
 	}
 

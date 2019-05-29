@@ -23,7 +23,7 @@
  * -C option added in 1998, original code by Marc Espie, based on FreeBSD
  * behaviour
  *
- * $OpenBSD: inp.c,v 1.36 2012/04/10 14:46:34 ajacoutot Exp $
+ * $OpenBSD: inp.c,v 1.44 2015/07/26 14:32:19 millert Exp $
  * $FreeBSD$
  */
 
@@ -31,9 +31,13 @@
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
 
 #include <ctype.h>
+#include <errno.h>
 #include <libgen.h>
+#include <paths.h>
+#include <spawn.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -114,7 +118,7 @@ reallocate_lines(size_t *lines_allocated)
 	size_t	new_size;
 
 	new_size = *lines_allocated * 3 / 2;
-	p = realloc(i_ptr, (new_size + 2) * sizeof(char *));
+	p = reallocarray(i_ptr, new_size + 2, sizeof(char *));
 	if (p == NULL) {	/* shucks, it was a near thing */
 		munmap(i_womp, i_size);
 		i_womp = NULL;
@@ -134,7 +138,7 @@ static bool
 plan_a(const char *filename)
 {
 	int		ifd, statfailed;
-	char		*p, *s, lbuf[INITLINELEN];
+	char		*p, *s;
 	struct stat	filestat;
 	ptrdiff_t	sz;
 	size_t		i;
@@ -164,81 +168,8 @@ plan_a(const char *filename)
 		close(creat(filename, 0666));
 		statfailed = stat(filename, &filestat);
 	}
-	if (statfailed && check_only)
-		fatal("%s not found, -C mode, can't probe further\n", filename);
-	/* For nonexistent or read-only files, look for RCS or SCCS versions.  */
-	if (statfailed ||
-	    /* No one can write to it.  */
-	    (filestat.st_mode & 0222) == 0 ||
-	    /* I can't write to it.  */
-	    ((filestat.st_mode & 0022) == 0 && filestat.st_uid != getuid())) {
-		const char	*cs = NULL, *filebase, *filedir;
-		struct stat	cstat;
-		char *tmp_filename1, *tmp_filename2;
-
-		tmp_filename1 = strdup(filename);
-		tmp_filename2 = strdup(filename);
-		if (tmp_filename1 == NULL || tmp_filename2 == NULL)
-			fatal("strdupping filename");
-		filebase = basename(tmp_filename1);
-		filedir = dirname(tmp_filename2);
-
-		/* Leave room in lbuf for the diff command.  */
-		s = lbuf + 20;
-
-#define try(f, a1, a2, a3) \
-	(snprintf(s, buf_size - 20, f, a1, a2, a3), stat(s, &cstat) == 0)
-
-		if (try("%s/RCS/%s%s", filedir, filebase, RCSSUFFIX) ||
-		    try("%s/RCS/%s%s", filedir, filebase, "") ||
-		    try("%s/%s%s", filedir, filebase, RCSSUFFIX)) {
-			snprintf(buf, buf_size, CHECKOUT, filename);
-			snprintf(lbuf, sizeof lbuf, RCSDIFF, filename);
-			cs = "RCS";
-		} else if (try("%s/SCCS/%s%s", filedir, SCCSPREFIX, filebase) ||
-		    try("%s/%s%s", filedir, SCCSPREFIX, filebase)) {
-			snprintf(buf, buf_size, GET, s);
-			snprintf(lbuf, sizeof lbuf, SCCSDIFF, s, filename);
-			cs = "SCCS";
-		} else if (statfailed)
-			fatal("can't find %s\n", filename);
-
-		free(tmp_filename1);
-		free(tmp_filename2);
-
-		/*
-		 * else we can't write to it but it's not under a version
-		 * control system, so just proceed.
-		 */
-		if (cs) {
-			if (!statfailed) {
-				if ((filestat.st_mode & 0222) != 0)
-					/* The owner can write to it.  */
-					fatal("file %s seems to be locked "
-					    "by somebody else under %s\n",
-					    filename, cs);
-				/*
-				 * It might be checked out unlocked.  See if
-				 * it's safe to check out the default version
-				 * locked.
-				 */
-				if (verbose)
-					say("Comparing file %s to default "
-					    "%s version...\n",
-					    filename, cs);
-				if (system(lbuf))
-					fatal("can't check out file %s: "
-					    "differs from default %s version\n",
-					    filename, cs);
-			}
-			if (verbose)
-				say("Checking out file %s from %s...\n",
-				    filename, cs);
-			if (system(buf) || stat(filename, &filestat))
-				fatal("can't check out file %s from %s\n",
-				    filename, cs);
-		}
-	}
+	if (statfailed)
+		fatal("can't find %s\n", filename);
 	filemode = filestat.st_mode;
 	if (!S_ISREG(filemode))
 		fatal("%s is not a normal file--can't patch\n", filename);
@@ -282,8 +213,11 @@ plan_a(const char *filename)
 	/* now scan the buffer and build pointer array */
 	iline = 1;
 	i_ptr[iline] = i_womp;
-	/* test for NUL too, to maintain the behavior of the original code */
-	for (s = i_womp, i = 0; i < i_size && *s != '\0'; s++, i++) {
+	/*
+	 * Testing for NUL here actively breaks files that innocently use NUL
+	 * for other reasons. mmap(2) succeeded, just scan the whole buffer.
+	 */
+	for (s = i_womp, i = 0; i < i_size; s++, i++) {
 		if (*s == '\n') {
 			if (iline == lines_allocated) {
 				if (!reallocate_lines(&lines_allocated))

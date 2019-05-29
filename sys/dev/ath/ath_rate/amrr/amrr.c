@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2004 INRIA
  * Copyright (c) 2002-2005 Sam Leffler, Errno Consulting
  * All rights reserved.
@@ -192,6 +194,11 @@ ath_rate_newassoc(struct ath_softc *sc, struct ath_node *an, int isnew)
 {
 	if (isnew)
 		ath_rate_ctl_start(sc, &an->an_node);
+}
+
+void
+ath_rate_update_rx_rssi(struct ath_softc *sc, struct ath_node *an, int rssi)
+{
 }
 
 static void 

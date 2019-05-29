@@ -112,7 +112,7 @@ extern	void ar9300_Stub_SetRxDP(struct ath_hal *ah, uint32_t rxdp,
 	    HAL_RX_QUEUE);
 extern	void ar9300_Stub_EnableReceive(struct ath_hal *ah);
 extern	HAL_BOOL ar9300_Stub_StopDmaReceive(struct ath_hal *ah);
-extern	void ar9300_Stub_StartPcuReceive(struct ath_hal *ah);
+extern	void ar9300_Stub_StartPcuReceive(struct ath_hal *ah, HAL_BOOL);
 extern	void ar9300_Stub_StopPcuReceive(struct ath_hal *ah);
 extern	void ar9300_Stub_SetMulticastFilter(struct ath_hal *ah,
 		uint32_t filter0, uint32_t filter1);
@@ -128,6 +128,7 @@ extern	HAL_STATUS ar9300_Stub_ProcRxDesc(struct ath_hal *ah, struct ath_desc *,
 
 extern	HAL_BOOL ar9300_Stub_Reset(struct ath_hal *ah, HAL_OPMODE opmode,
 		struct ieee80211_channel *chan, HAL_BOOL bChannelChange,
+		HAL_RESET_TYPE resetType,
 		HAL_STATUS *status);
 extern	HAL_BOOL ar9300_Stub_SetChannel(struct ath_hal *,
 		const struct ieee80211_channel *);

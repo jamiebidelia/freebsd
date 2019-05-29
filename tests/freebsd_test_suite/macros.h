@@ -31,6 +31,7 @@
 
 #include <sys/param.h>
 #include <sys/module.h>
+#include <sys/sysctl.h>
 #include <string.h>
 #include <errno.h>
 #include <stdio.h>
@@ -38,10 +39,36 @@
 
 #include <atf-c.h>
 
+#define	ATF_REQUIRE_FEATURE(_feature_name) do {				\
+	if (feature_present(_feature_name) == 0) {			\
+		atf_tc_skip("kernel feature (%s) not present",		\
+		    _feature_name);					\
+	}								\
+} while(0)
+
 #define	ATF_REQUIRE_KERNEL_MODULE(_mod_name) do {			\
 	if (modfind(_mod_name) == -1) {					\
 		atf_tc_skip("module %s could not be resolved: %s",	\
 		    _mod_name, strerror(errno));			\
+	}								\
+} while(0)
+
+#define ATF_REQUIRE_SYSCTL_INT(_mib_name, _required_value) do {		\
+	int value;							\
+	size_t size = sizeof(value);					\
+	if (sysctlbyname(_mib_name, &value, &size, NULL, 0) == -1) {	\
+		atf_tc_skip("sysctl for %s failed: %s", _mib_name,	\
+		    strerror(errno));					\
+	}								\
+	if (value != _required_value)					\
+		atf_tc_skip("requires %s=%d", _mib_name, _required_value); \
+} while(0)
+
+#define	PLAIN_REQUIRE_FEATURE(_feature_name, _exit_code) do {		\
+	if (feature_present(_feature_name) == 0) {			\
+		printf("kernel feature (%s) not present\n",		\
+		    _feature_name);					\
+		_exit(_exit_code);					\
 	}								\
 } while(0)
 

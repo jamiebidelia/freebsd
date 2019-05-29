@@ -1,4 +1,4 @@
-/*	$NetBSD: chartype.c,v 1.12 2015/02/22 02:16:19 christos Exp $	*/
+/*	$NetBSD: chartype.c,v 1.23 2016/02/28 23:02:24 christos Exp $	*/
 
 /*-
  * Copyright (c) 2009 The NetBSD Foundation, Inc.
@@ -31,13 +31,17 @@
  */
 #include "config.h"
 #if !defined(lint) && !defined(SCCSID)
-__RCSID("$NetBSD: chartype.c,v 1.12 2015/02/22 02:16:19 christos Exp $");
+__RCSID("$NetBSD: chartype.c,v 1.23 2016/02/28 23:02:24 christos Exp $");
 #endif /* not lint && not SCCSID */
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
-#include "el.h"
+#include <ctype.h>
+#include <limits.h>
 #include <stdlib.h>
+#include <string.h>
+
+#include "el.h"
 
 #define CT_BUFSIZ ((size_t)1024)
 
@@ -68,7 +72,7 @@ ct_conv_wbuff_resize(ct_buffer_t *conv, size_t wsize)
 {
 	void *p;
 
-	if (wsize <= conv->wsize) 
+	if (wsize <= conv->wsize)
 		return 0;
 
 	conv->wsize = wsize;
@@ -153,7 +157,7 @@ ct_decode_argv(int argc, const char *argv[], ct_buffer_t *conv)
 		if (ct_conv_wbuff_resize(conv, bufspace + CT_BUFSIZ) == -1)
 			return NULL;
 
-	wargv = el_malloc((size_t)argc * sizeof(*wargv));
+	wargv = el_malloc((size_t)(argc + 1) * sizeof(*wargv));
 
 	for (i = 0, p = conv->wbuff; i < argc; ++i) {
 		if (!argv[i]) {   /* don't pass null pointers to mbstowcs */
@@ -171,6 +175,7 @@ ct_decode_argv(int argc, const char *argv[], ct_buffer_t *conv)
 		bufspace -= (size_t)bytes;
 		p += bytes;
 	}
+	wargv[i] = NULL;
 
 	return wargv;
 }
@@ -179,17 +184,13 @@ ct_decode_argv(int argc, const char *argv[], ct_buffer_t *conv)
 protected size_t
 ct_enc_width(Char c)
 {
-	/* UTF-8 encoding specific values */
-	if (c < 0x80)
-		return 1;
-	else if (c < 0x0800)
-		return 2;
-	else if (c < 0x10000)
-		return 3;
-	else if (c < 0x110000)
-		return 4;
-	else
-		return 0; /* not a valid codepoint */
+	mbstate_t ps = (mbstate_t){{0}};
+	size_t len;
+	char cbuf[MB_LEN_MAX];
+	len = ct_wcrtomb(cbuf, c, &ps);
+	if (len == (size_t)-1)
+		return (0);
+	return (len);
 }
 
 protected ssize_t
@@ -205,6 +206,29 @@ ct_encode_char(char *dst, size_t len, Char c)
 		l = 0;
 	}
 	return l;
+}
+
+size_t
+ct_mbrtowc(wchar_t *wc, const char *s, size_t n)
+{
+	mbstate_t mbs;
+	/* This only works because UTF-8 is stateless */
+	memset(&mbs, 0, sizeof(mbs));
+	return mbrtowc(wc, s, n, &mbs);
+}
+
+#else
+
+size_t
+ct_mbrtowc(wchar_t *wc, const char *s, size_t n)
+{
+	if (s == NULL)
+		return 0;
+	if (n == 0)
+		return (size_t)-2;
+	if (wc != NULL)
+		*wc = *s;
+	return *s != '\0';
 }
 #endif
 
@@ -329,7 +353,7 @@ ct_visual_char(Char *dst, size_t len, Char c)
 		return c > 0xffff ? 8 : 7;
 #else
 		*dst++ = '\\';
-#define tooctaldigit(v) ((v) + '0')
+#define tooctaldigit(v) (Char)((v) + '0')
 		*dst++ = tooctaldigit(((unsigned int) c >> 6) & 0x7);
 		*dst++ = tooctaldigit(((unsigned int) c >> 3) & 0x7);
 		*dst++ = tooctaldigit(((unsigned int) c     ) & 0x7);

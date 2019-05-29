@@ -1,7 +1,5 @@
 /*-
- * Copyright (c) 2012-2015 LSI Corp.
- * Copyright (c) 2013-2015 Avago Technologies
- * All rights reserved.
+ *  Copyright 2000-2020 Broadcom Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -27,21 +25,20 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * Avago Technologies (LSI) MPT-Fusion Host Adapter FreeBSD
+ * Broadcom Inc. (LSI) MPT-Fusion Host Adapter FreeBSD
  *
  * $FreeBSD$
  */
 
 /*
- *  Copyright (c) 2012-2015 LSI Corporation.
- *  Copyright (c) 2013-2015 Avago Technologies
+ *  Copyright 2000-2020 Broadcom Inc. All rights reserved.
  *
  *
  *           Name:  mpi2_ra.h
  *          Title:  MPI RAID Accelerator messages and structures
  *  Creation Date:  April 13, 2009
  *
- *  mpi2_ra.h Version:  02.00.00
+ *  mpi2_ra.h Version:  02.00.01
  *
  *  Version History
  *  ---------------
@@ -49,6 +46,7 @@
  *  Date      Version   Description
  *  --------  --------  ------------------------------------------------------
  *  05-06-09  02.00.00  Initial version.
+ *  11-18-14  02.00.01  Updated copyright information.
  *  --------------------------------------------------------------------------
  */
 

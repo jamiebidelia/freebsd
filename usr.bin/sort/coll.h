@@ -1,6 +1,8 @@
 /*	$FreeBSD$	*/
 
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (C) 2009 Gabor Kovesdan <gabor@FreeBSD.org>
  * Copyright (C) 2012 Oleg Moskalenko <mom040267@gmail.com>
  * All rights reserved.
@@ -63,6 +65,17 @@ struct M_hint
 };
 
 /*
+ * Sort hint data for -R
+ *
+ * This stores the first 12 bytes of the digest rather than the full output to
+ * avoid increasing the size of the 'key_hint' object via the 'v' union.
+ */
+struct R_hint
+{
+	unsigned char		 cached[12];
+};
+
+/*
  * Status of a sort hint object
  */
 typedef enum
@@ -81,6 +94,7 @@ struct key_hint
 		struct n_hint		nh;
 		struct g_hint		gh;
 		struct M_hint		Mh;
+		struct R_hint		Rh;
 	}			v;
 };
 
@@ -91,7 +105,7 @@ struct key_value
 {
 	struct bwstring		*k; /* key string */
 	struct key_hint		 hint[0]; /* key sort hint */
-};
+} __packed;
 
 /*
  * Set of keys container object.
@@ -146,6 +160,7 @@ cmpcoll_t get_sort_func(struct sort_mods *sm);
 
 struct keys_array *keys_array_alloc(void);
 size_t keys_array_size(void);
+struct key_value *get_key_from_keys_array(struct keys_array *ka, size_t ind);
 void set_key_on_keys_array(struct keys_array *ka, struct bwstring *s, size_t ind);
 void clean_keys_array(const struct bwstring *s, struct keys_array *ka);
 

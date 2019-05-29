@@ -50,6 +50,7 @@
 #include <sys/proc.h>
 #include <sys/selinfo.h>
 #include <sys/smp.h>
+#include <sys/sysctl.h>
 #include <sys/uio.h>
 #include <sys/unistd.h>
 #include <machine/cpu.h>
@@ -134,9 +135,16 @@ struct profile_probe_percpu;
 #endif
 
 #ifdef __arm__
-/*
- * At least on ARMv7, this appears to work quite well.
- */
+#define	PROF_ARTIFICIAL_FRAMES	3
+#endif
+
+#ifdef __aarch64__
+/* TODO: verify */
+#define	PROF_ARTIFICIAL_FRAMES	10
+#endif
+
+#ifdef __riscv
+/* TODO: verify */
 #define	PROF_ARTIFICIAL_FRAMES	10
 #endif
 
@@ -213,22 +221,27 @@ static dtrace_pattr_t profile_attr = {
 };
 
 static dtrace_pops_t profile_pops = {
-	profile_provide,
-	NULL,
-	profile_enable,
-	profile_disable,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	profile_destroy
+	.dtps_provide =		profile_provide,
+	.dtps_provide_module =	NULL,
+	.dtps_enable =		profile_enable,
+	.dtps_disable =		profile_disable,
+	.dtps_suspend =		NULL,
+	.dtps_resume =		NULL,
+	.dtps_getargdesc =	NULL,
+	.dtps_getargval =	NULL,
+	.dtps_usermode =	NULL,
+	.dtps_destroy =		profile_destroy
 };
 
 static struct cdev		*profile_cdev;
 static dtrace_provider_id_t	profile_id;
 static hrtime_t			profile_interval_min = NANOSEC / 5000;	/* 5000 hz */
-static int			profile_aframes = 0;			/* override */
+static int			profile_aframes = PROF_ARTIFICIAL_FRAMES;
+
+SYSCTL_DECL(_kern_dtrace);
+SYSCTL_NODE(_kern_dtrace, OID_AUTO, profile, CTLFLAG_RD, 0, "DTrace profile parameters");
+SYSCTL_INT(_kern_dtrace_profile, OID_AUTO, aframes, CTLFLAG_RW, &profile_aframes,
+    0, "Skipped frames for profile provider");
 
 static sbintime_t
 nsec_to_sbt(hrtime_t nsec)
@@ -253,37 +266,43 @@ sbt_to_nsec(sbintime_t sbt)
 }
 
 static void
-profile_fire(void *arg)
+profile_probe(profile_probe_t *prof, hrtime_t late)
 {
-	profile_probe_percpu_t *pcpu = arg;
-	profile_probe_t *prof = pcpu->profc_probe;
-	hrtime_t late;
+	struct thread *td;
 	struct trapframe *frame;
 	uintfptr_t pc, upc;
 
-#ifdef illumos
-	late = gethrtime() - pcpu->profc_expected;
-#else
-	late = sbt_to_nsec(sbinuptime() - pcpu->profc_expected);
-#endif
-
-	pc = 0;
-	upc = 0;
+	td = curthread;
+	pc = upc = 0;
 
 	/*
-	 * td_intr_frame can be unset if this is a catch up event
-	 * after waking up from idle sleep.
-	 * This can only happen on a CPU idle thread.
+	 * td_intr_frame can be unset if this is a catch-up event upon waking up
+	 * from idle sleep. This can only happen on a CPU idle thread. Use a
+	 * representative arg0 value in this case so that one of the probe
+	 * arguments is non-zero.
 	 */
-	frame = curthread->td_intr_frame;
+	frame = td->td_intr_frame;
 	if (frame != NULL) {
 		if (TRAPF_USERMODE(frame))
 			upc = TRAPF_PC(frame);
 		else
 			pc = TRAPF_PC(frame);
-	}
-	dtrace_probe(prof->prof_id, pc, upc, late, 0, 0);
+	} else if (TD_IS_IDLETHREAD(td))
+		pc = (uintfptr_t)&cpu_idle;
 
+	dtrace_probe(prof->prof_id, pc, upc, late, 0, 0);
+}
+
+static void
+profile_fire(void *arg)
+{
+	profile_probe_percpu_t *pcpu = arg;
+	profile_probe_t *prof = pcpu->profc_probe;
+	hrtime_t late;
+
+	late = sbt_to_nsec(sbinuptime() - pcpu->profc_expected);
+
+	profile_probe(prof, late);
 	pcpu->profc_expected += pcpu->profc_interval;
 	callout_schedule_sbt_curcpu(&pcpu->profc_cyclic,
 	    pcpu->profc_expected, 0, C_DIRECT_EXEC | C_ABSOLUTE);
@@ -293,26 +312,8 @@ static void
 profile_tick(void *arg)
 {
 	profile_probe_t *prof = arg;
-	struct trapframe *frame;
-	uintfptr_t pc, upc;
 
-	pc = 0;
-	upc = 0;
-
-	/*
-	 * td_intr_frame can be unset if this is a catch up event
-	 * after waking up from idle sleep.
-	 * This can only happen on a CPU idle thread.
-	 */
-	frame = curthread->td_intr_frame;
-	if (frame != NULL) {
-		if (TRAPF_USERMODE(frame))
-			upc = TRAPF_PC(frame);
-		else
-			pc = TRAPF_PC(frame);
-	}
-	dtrace_probe(prof->prof_id, pc, upc, 0, 0, 0);
-
+	profile_probe(prof, 0);
 	prof->prof_expected += prof->prof_interval;
 	callout_schedule_sbt(&prof->prof_cyclic,
 	    prof->prof_expected, 0, C_DIRECT_EXEC | C_ABSOLUTE);
@@ -347,7 +348,7 @@ profile_create(hrtime_t interval, char *name, int kind)
 	prof->prof_kind = kind;
 	prof->prof_id = dtrace_probe_create(profile_id,
 	    NULL, NULL, name,
-	    profile_aframes ? profile_aframes : PROF_ARTIFICIAL_FRAMES, prof);
+	    profile_aframes, prof);
 }
 
 /*ARGSUSED*/

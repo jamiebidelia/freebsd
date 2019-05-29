@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2012 Sandvine, Inc.
  * Copyright (c) 2012 NetApp, Inc.
  * All rights reserved.
@@ -74,6 +76,8 @@ enum {
 	VIE_OP_TYPE_GROUP1,
 	VIE_OP_TYPE_STOS,
 	VIE_OP_TYPE_BITTEST,
+	VIE_OP_TYPE_TWOB_GRP15,
+	VIE_OP_TYPE_ADD,
 	VIE_OP_TYPE_LAST
 };
 
@@ -85,6 +89,10 @@ enum {
 #define	VIE_OP_F_NO_GLA_VERIFICATION (1 << 4)
 
 static const struct vie_op two_byte_opcodes[256] = {
+	[0xAE] = {
+		  .op_byte = 0xAE,
+		  .op_type = VIE_OP_TYPE_TWOB_GRP15,
+	},
 	[0xB6] = {
 		.op_byte = 0xB6,
 		.op_type = VIE_OP_TYPE_MOVZX,
@@ -105,9 +113,17 @@ static const struct vie_op two_byte_opcodes[256] = {
 };
 
 static const struct vie_op one_byte_opcodes[256] = {
+	[0x03] = {
+		.op_byte = 0x03,
+		.op_type = VIE_OP_TYPE_ADD,
+	},
 	[0x0F] = {
 		.op_byte = 0x0F,
 		.op_type = VIE_OP_TYPE_TWO_BYTE
+	},
+	[0x0B] = {
+		.op_byte = 0x0B,
+		.op_type = VIE_OP_TYPE_OR,
 	},
 	[0x2B] = {
 		.op_byte = 0x2B,
@@ -397,6 +413,41 @@ getcc(int opsize, uint64_t x, uint64_t y)
 		return (getcc32(x, y));
 	else
 		return (getcc64(x, y));
+}
+
+/*
+ * Macro creation of functions getaddflags{8,16,32,64}
+ */
+#define	GETADDFLAGS(sz)							\
+static u_long								\
+getaddflags##sz(uint##sz##_t x, uint##sz##_t y)				\
+{									\
+	u_long rflags;							\
+									\
+	__asm __volatile("add %2,%1; pushfq; popq %0" :			\
+	    "=r" (rflags), "+r" (x) : "m" (y));				\
+	return (rflags);						\
+} struct __hack
+
+GETADDFLAGS(8);
+GETADDFLAGS(16);
+GETADDFLAGS(32);
+GETADDFLAGS(64);
+
+static u_long
+getaddflags(int opsize, uint64_t x, uint64_t y)
+{
+	KASSERT(opsize == 1 || opsize == 2 || opsize == 4 || opsize == 8,
+	    ("getaddflags: invalid operand size %d", opsize));
+
+	if (opsize == 1)
+		return (getaddflags8(x, y));
+	else if (opsize == 2)
+		return (getaddflags16(x, y));
+	else if (opsize == 4)
+		return (getaddflags32(x, y));
+	else
+		return (getaddflags64(x, y));
 }
 
 static int
@@ -992,12 +1043,38 @@ emulate_or(void *vm, int vcpuid, uint64_t gpa, struct vie *vie,
 	    mem_region_read_t memread, mem_region_write_t memwrite, void *arg)
 {
 	int error, size;
-	uint64_t val1, result, rflags, rflags2;
+	enum vm_reg_name reg;
+	uint64_t result, rflags, rflags2, val1, val2;
 
 	size = vie->opsize;
 	error = EINVAL;
 
 	switch (vie->op.op_byte) {
+	case 0x0B:
+		/*
+		 * OR reg (ModRM:reg) and mem (ModRM:r/m) and store the
+		 * result in reg.
+		 *
+		 * 0b/r         or r16, r/m16
+		 * 0b/r         or r32, r/m32
+		 * REX.W + 0b/r or r64, r/m64
+		 */
+
+		/* get the first operand */
+		reg = gpr_map[vie->reg];
+		error = vie_read_register(vm, vcpuid, reg, &val1);
+		if (error)
+			break;
+		
+		/* get the second operand */
+		error = memread(vm, vcpuid, gpa, &val2, size, arg);
+		if (error)
+			break;
+
+		/* perform the operation and write the result */
+		result = val1 | val2;
+		error = vie_update_register(vm, vcpuid, reg, result, size);
+		break;
 	case 0x81:
 	case 0x83:
 		/*
@@ -1142,6 +1219,62 @@ emulate_cmp(void *vm, int vcpuid, uint64_t gpa, struct vie *vie,
 }
 
 static int
+emulate_add(void *vm, int vcpuid, uint64_t gpa, struct vie *vie,
+	    mem_region_read_t memread, mem_region_write_t memwrite, void *arg)
+{
+	int error, size;
+	uint64_t nval, rflags, rflags2, val1, val2;
+	enum vm_reg_name reg;
+
+	size = vie->opsize;
+	error = EINVAL;
+
+	switch (vie->op.op_byte) {
+	case 0x03:
+		/*
+		 * ADD r/m to r and store the result in r
+		 *
+		 * 03/r            ADD r16, r/m16
+		 * 03/r            ADD r32, r/m32
+		 * REX.W + 03/r    ADD r64, r/m64
+		 */
+
+		/* get the first operand */
+		reg = gpr_map[vie->reg];
+		error = vie_read_register(vm, vcpuid, reg, &val1);
+		if (error)
+			break;
+
+		/* get the second operand */
+		error = memread(vm, vcpuid, gpa, &val2, size, arg);
+		if (error)
+			break;
+
+		/* perform the operation and write the result */
+		nval = val1 + val2;
+		error = vie_update_register(vm, vcpuid, reg, nval, size);
+		break;
+	default:
+		break;
+	}
+
+	if (!error) {
+		rflags2 = getaddflags(size, val1, val2);
+		error = vie_read_register(vm, vcpuid, VM_REG_GUEST_RFLAGS,
+		    &rflags);
+		if (error)
+			return (error);
+
+		rflags &= ~RFLAGS_STATUS_BITS;
+		rflags |= rflags2 & RFLAGS_STATUS_BITS;
+		error = vie_update_register(vm, vcpuid, VM_REG_GUEST_RFLAGS,
+		    rflags, 8);
+	}
+
+	return (error);
+}
+
+static int
 emulate_sub(void *vm, int vcpuid, uint64_t gpa, struct vie *vie,
 	    mem_region_read_t memread, mem_region_write_t memwrite, void *arg)
 {
@@ -1232,7 +1365,7 @@ emulate_stack_op(void *vm, int vcpuid, uint64_t mmio_gpa, struct vie *vie,
 		size = vie->opsize_override ? 2 : 8;
 	} else {
 		/*
-		 * In protected or compability mode the 'B' flag in the
+		 * In protected or compatibility mode the 'B' flag in the
 		 * stack-segment descriptor determines the size of the
 		 * stack pointer.
 		 */
@@ -1411,6 +1544,37 @@ emulate_bittest(void *vm, int vcpuid, uint64_t gpa, struct vie *vie,
 	return (0);
 }
 
+static int
+emulate_twob_group15(void *vm, int vcpuid, uint64_t gpa, struct vie *vie,
+    mem_region_read_t memread, mem_region_write_t memwrite, void *memarg)
+{
+	int error;
+	uint64_t buf;
+
+	switch (vie->reg & 7) {
+	case 0x7:	/* CLFLUSH, CLFLUSHOPT, and SFENCE */
+		if (vie->mod == 0x3) {
+			/*
+			 * SFENCE.  Ignore it, VM exit provides enough
+			 * barriers on its own.
+			 */
+			error = 0;
+		} else {
+			/*
+			 * CLFLUSH, CLFLUSHOPT.  Only check for access
+			 * rights.
+			 */
+			error = memread(vm, vcpuid, gpa, &buf, 1, memarg);
+		}
+		break;
+	default:
+		error = EINVAL;
+		break;
+	}
+
+	return (error);
+}
+
 int
 vmm_emulate_instruction(void *vm, int vcpuid, uint64_t gpa, struct vie *vie,
     struct vm_guest_paging *paging, mem_region_read_t memread,
@@ -1470,6 +1634,14 @@ vmm_emulate_instruction(void *vm, int vcpuid, uint64_t gpa, struct vie *vie,
 	case VIE_OP_TYPE_BITTEST:
 		error = emulate_bittest(vm, vcpuid, gpa, vie,
 		    memread, memwrite, memarg);
+		break;
+	case VIE_OP_TYPE_TWOB_GRP15:
+		error = emulate_twob_group15(vm, vcpuid, gpa, vie,
+		    memread, memwrite, memarg);
+		break;
+	case VIE_OP_TYPE_ADD:
+		error = emulate_add(vm, vcpuid, gpa, vie, memread,
+		    memwrite, memarg);
 		break;
 	default:
 		error = EINVAL;
@@ -1677,18 +1849,18 @@ ptp_release(void **cookie)
 }
 
 static void *
-ptp_hold(struct vm *vm, vm_paddr_t ptpphys, size_t len, void **cookie)
+ptp_hold(struct vm *vm, int vcpu, vm_paddr_t ptpphys, size_t len, void **cookie)
 {
 	void *ptr;
 
 	ptp_release(cookie);
-	ptr = vm_gpa_hold(vm, ptpphys, len, VM_PROT_RW, cookie);
+	ptr = vm_gpa_hold(vm, vcpu, ptpphys, len, VM_PROT_RW, cookie);
 	return (ptr);
 }
 
-int
-vm_gla2gpa(struct vm *vm, int vcpuid, struct vm_guest_paging *paging,
-    uint64_t gla, int prot, uint64_t *gpa, int *guest_fault)
+static int
+_vm_gla2gpa(struct vm *vm, int vcpuid, struct vm_guest_paging *paging,
+    uint64_t gla, int prot, uint64_t *gpa, int *guest_fault, bool check_only)
 {
 	int nlevels, pfcode, ptpshift, ptpindex, retval, usermode, writable;
 	u_int retries;
@@ -1714,7 +1886,8 @@ restart:
 		 * XXX assuming a non-stack reference otherwise a stack fault
 		 * should be generated.
 		 */
-		vm_inject_gp(vm, vcpuid);
+		if (!check_only)
+			vm_inject_gp(vm, vcpuid);
 		goto fault;
 	}
 
@@ -1729,7 +1902,8 @@ restart:
 			/* Zero out the lower 12 bits. */
 			ptpphys &= ~0xfff;
 
-			ptpbase32 = ptp_hold(vm, ptpphys, PAGE_SIZE, &cookie);
+			ptpbase32 = ptp_hold(vm, vcpuid, ptpphys, PAGE_SIZE,
+			    &cookie);
 
 			if (ptpbase32 == NULL)
 				goto error;
@@ -1743,9 +1917,11 @@ restart:
 			if ((pte32 & PG_V) == 0 ||
 			    (usermode && (pte32 & PG_U) == 0) ||
 			    (writable && (pte32 & PG_RW) == 0)) {
-				pfcode = pf_error_code(usermode, prot, 0,
-				    pte32);
-				vm_inject_pf(vm, vcpuid, pfcode, gla);
+				if (!check_only) {
+					pfcode = pf_error_code(usermode, prot, 0,
+					    pte32);
+					vm_inject_pf(vm, vcpuid, pfcode, gla);
+				}
 				goto fault;
 			}
 
@@ -1756,7 +1932,7 @@ restart:
 			 * is only set at the last level providing the guest
 			 * physical address.
 			 */
-			if ((pte32 & PG_A) == 0) {
+			if (!check_only && (pte32 & PG_A) == 0) {
 				if (atomic_cmpset_32(&ptpbase32[ptpindex],
 				    pte32, pte32 | PG_A) == 0) {
 					goto restart;
@@ -1771,7 +1947,7 @@ restart:
 		}
 
 		/* Set the dirty bit in the page table entry if necessary */
-		if (writable && (pte32 & PG_M) == 0) {
+		if (!check_only && writable && (pte32 & PG_M) == 0) {
 			if (atomic_cmpset_32(&ptpbase32[ptpindex],
 			    pte32, pte32 | PG_M) == 0) {
 				goto restart;
@@ -1788,7 +1964,8 @@ restart:
 		/* Zero out the lower 5 bits and the upper 32 bits */
 		ptpphys &= 0xffffffe0UL;
 
-		ptpbase = ptp_hold(vm, ptpphys, sizeof(*ptpbase) * 4, &cookie);
+		ptpbase = ptp_hold(vm, vcpuid, ptpphys, sizeof(*ptpbase) * 4,
+		    &cookie);
 		if (ptpbase == NULL)
 			goto error;
 
@@ -1797,8 +1974,10 @@ restart:
 		pte = ptpbase[ptpindex];
 
 		if ((pte & PG_V) == 0) {
-			pfcode = pf_error_code(usermode, prot, 0, pte);
-			vm_inject_pf(vm, vcpuid, pfcode, gla);
+			if (!check_only) {
+				pfcode = pf_error_code(usermode, prot, 0, pte);
+				vm_inject_pf(vm, vcpuid, pfcode, gla);
+			}
 			goto fault;
 		}
 
@@ -1811,7 +1990,7 @@ restart:
 		/* Zero out the lower 12 bits and the upper 12 bits */
 		ptpphys >>= 12; ptpphys <<= 24; ptpphys >>= 12;
 
-		ptpbase = ptp_hold(vm, ptpphys, PAGE_SIZE, &cookie);
+		ptpbase = ptp_hold(vm, vcpuid, ptpphys, PAGE_SIZE, &cookie);
 		if (ptpbase == NULL)
 			goto error;
 
@@ -1824,13 +2003,15 @@ restart:
 		if ((pte & PG_V) == 0 ||
 		    (usermode && (pte & PG_U) == 0) ||
 		    (writable && (pte & PG_RW) == 0)) {
-			pfcode = pf_error_code(usermode, prot, 0, pte);
-			vm_inject_pf(vm, vcpuid, pfcode, gla);
+			if (!check_only) {
+				pfcode = pf_error_code(usermode, prot, 0, pte);
+				vm_inject_pf(vm, vcpuid, pfcode, gla);
+			}
 			goto fault;
 		}
 
 		/* Set the accessed bit in the page table entry */
-		if ((pte & PG_A) == 0) {
+		if (!check_only && (pte & PG_A) == 0) {
 			if (atomic_cmpset_64(&ptpbase[ptpindex],
 			    pte, pte | PG_A) == 0) {
 				goto restart;
@@ -1839,8 +2020,11 @@ restart:
 
 		if (nlevels > 0 && (pte & PG_PS) != 0) {
 			if (pgsize > 1 * GB) {
-				pfcode = pf_error_code(usermode, prot, 1, pte);
-				vm_inject_pf(vm, vcpuid, pfcode, gla);
+				if (!check_only) {
+					pfcode = pf_error_code(usermode, prot, 1,
+					    pte);
+					vm_inject_pf(vm, vcpuid, pfcode, gla);
+				}
 				goto fault;
 			}
 			break;
@@ -1850,7 +2034,7 @@ restart:
 	}
 
 	/* Set the dirty bit in the page table entry if necessary */
-	if (writable && (pte & PG_M) == 0) {
+	if (!check_only && writable && (pte & PG_M) == 0) {
 		if (atomic_cmpset_64(&ptpbase[ptpindex], pte, pte | PG_M) == 0)
 			goto restart;
 	}
@@ -1869,6 +2053,24 @@ error:
 fault:
 	*guest_fault = 1;
 	goto done;
+}
+
+int
+vm_gla2gpa(struct vm *vm, int vcpuid, struct vm_guest_paging *paging,
+    uint64_t gla, int prot, uint64_t *gpa, int *guest_fault)
+{
+
+	return (_vm_gla2gpa(vm, vcpuid, paging, gla, prot, gpa, guest_fault,
+	    false));
+}
+
+int
+vm_gla2gpa_nofault(struct vm *vm, int vcpuid, struct vm_guest_paging *paging,
+    uint64_t gla, int prot, uint64_t *gpa, int *guest_fault)
+{
+
+	return (_vm_gla2gpa(vm, vcpuid, paging, gla, prot, gpa, guest_fault,
+	    true));
 }
 
 int
@@ -2319,10 +2521,13 @@ decode_moffset(struct vie *vie)
  * page table fault matches with our instruction decoding.
  */
 static int
-verify_gla(struct vm *vm, int cpuid, uint64_t gla, struct vie *vie)
+verify_gla(struct vm *vm, int cpuid, uint64_t gla, struct vie *vie,
+    enum vm_cpu_mode cpu_mode)
 {
 	int error;
-	uint64_t base, idx, gla2;
+	uint64_t base, segbase, idx, gla2;
+	enum vm_reg_name seg;
+	struct seg_desc desc;
 
 	/* Skip 'gla' verification */
 	if (gla == VIE_INVALID_GLA)
@@ -2342,7 +2547,7 @@ verify_gla(struct vm *vm, int cpuid, uint64_t gla, struct vie *vie)
 		 * instruction
 		 */
 		if (vie->base_register == VM_REG_GUEST_RIP)
-			base += vie->num_valid;
+			base += vie->num_processed;
 	}
 
 	idx = 0;
@@ -2355,14 +2560,48 @@ verify_gla(struct vm *vm, int cpuid, uint64_t gla, struct vie *vie)
 		}
 	}
 
-	/* XXX assuming that the base address of the segment is 0 */
-	gla2 = base + vie->scale * idx + vie->displacement;
+	/*
+	 * From "Specifying a Segment Selector", Intel SDM, Vol 1
+	 *
+	 * In 64-bit mode, segmentation is generally (but not
+	 * completely) disabled.  The exceptions are the FS and GS
+	 * segments.
+	 *
+	 * In legacy IA-32 mode, when the ESP or EBP register is used
+	 * as the base, the SS segment is the default segment.  For
+	 * other data references, except when relative to stack or
+	 * string destination the DS segment is the default.  These
+	 * can be overridden to allow other segments to be accessed.
+	 */
+	if (vie->segment_override)
+		seg = vie->segment_register;
+	else if (vie->base_register == VM_REG_GUEST_RSP ||
+	    vie->base_register == VM_REG_GUEST_RBP)
+		seg = VM_REG_GUEST_SS;
+	else
+		seg = VM_REG_GUEST_DS;
+	if (cpu_mode == CPU_MODE_64BIT && seg != VM_REG_GUEST_FS &&
+	    seg != VM_REG_GUEST_GS) {
+		segbase = 0;
+	} else {
+		error = vm_get_seg_desc(vm, cpuid, seg, &desc);
+		if (error) {
+			printf("verify_gla: error %d getting segment"
+			       " descriptor %d", error,
+			       vie->segment_register);
+			return (-1);
+		}
+		segbase = desc.base;
+	}
+
+	gla2 = segbase + base + vie->scale * idx + vie->displacement;
 	gla2 &= size2mask[vie->addrsize];
 	if (gla != gla2) {
-		printf("verify_gla mismatch: "
+		printf("verify_gla mismatch: segbase(0x%0lx)"
 		       "base(0x%0lx), scale(%d), index(0x%0lx), "
 		       "disp(0x%0lx), gla(0x%0lx), gla2(0x%0lx)\n",
-		       base, vie->scale, idx, vie->displacement, gla, gla2);
+		       segbase, base, vie->scale, idx, vie->displacement,
+		       gla, gla2);
 		return (-1);
 	}
 
@@ -2396,7 +2635,7 @@ vmm_decode_instruction(struct vm *vm, int cpuid, uint64_t gla,
 		return (-1);
 
 	if ((vie->op.op_flags & VIE_OP_F_NO_GLA_VERIFICATION) == 0) {
-		if (verify_gla(vm, cpuid, gla, vie))
+		if (verify_gla(vm, cpuid, gla, vie, cpu_mode))
 			return (-1);
 	}
 

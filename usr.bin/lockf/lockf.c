@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (C) 1997 John D. Polstra.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -172,6 +174,8 @@ acquire_lock(const char *name, int flags)
 	if ((fd = open(name, O_RDONLY|O_EXLOCK|flags, 0666)) == -1) {
 		if (errno == EAGAIN || errno == EINTR)
 			return (-1);
+		else if (errno == ENOENT && (flags & O_CREAT) == 0)
+			err(EX_UNAVAILABLE, "%s", name);
 		err(EX_CANTCREAT, "cannot open %s", name);
 	}
 	return (fd);

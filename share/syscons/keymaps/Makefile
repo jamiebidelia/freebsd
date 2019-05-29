@@ -6,6 +6,7 @@ FILES=	INDEX.keymaps \
 	br275.iso.kbd br275.iso.acc.kbd br275.cp850.kbd \
 	by.cp1131.kbd by.cp1251.kbd by.iso5.kbd \
 	ce.iso2.kbd \
+	colemak-dh.iso15.acc.kbd \
 	colemak.iso15.acc.kbd \
 	cs.latin2.qwertz.kbd \
 	cz.iso2.kbd \
@@ -26,7 +27,7 @@ FILES=	INDEX.keymaps \
 	icelandic.iso.kbd icelandic.iso.acc.kbd \
 	it.iso.kbd \
 	iw.iso8.kbd \
-	jp.106.kbd jp.106x.kbd jp.pc98.kbd jp.pc98.iso.kbd \
+	jp.106.kbd jp.106x.kbd \
 	kk.pt154.kst.kbd kk.pt154.io.kbd \
 	latinamerican.kbd latinamerican.iso.acc.kbd \
 	lt.iso4.kbd \
@@ -48,10 +49,9 @@ FILES=	INDEX.keymaps \
 	uk.iso.kbd uk.iso-ctrl.kbd uk.cp850.kbd uk.cp850-ctrl.kbd \
 	uk.dvorak.kbd \
 	us.iso.kbd us.dvorak.kbd us.dvorakl.kbd us.dvorakr.kbd us.dvorakp.kbd \
-	us.dvorakx.kbd us.emacs.kbd us.pc-ctrl.kbd us.unix.kbd us.iso.acc.kbd
+	us.dvorakx.kbd us.emacs.kbd us.pc-ctrl.kbd us.unix.kbd us.iso.acc.kbd \
+	us.iso.macbook.kbd
 
 FILESDIR= ${SHAREDIR}/syscons/keymaps
-
-NO_OBJ=
 
 .include <bsd.prog.mk>

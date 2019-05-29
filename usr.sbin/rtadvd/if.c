@@ -1,7 +1,9 @@
 /*	$FreeBSD$	*/
 /*	$KAME: if.c,v 1.17 2001/01/21 15:27:30 itojun Exp $	*/
 
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (C) 1995, 1996, 1997, and 1998 WIDE Project.
  * Copyright (C) 2011 Hiroki Sato <hrs@FreeBSD.org>
  * All rights reserved.
@@ -114,6 +116,8 @@ lladdropt_length(struct sockaddr_dl *sdl)
 {
 	switch (sdl->sdl_type) {
 	case IFT_ETHER:
+	case IFT_L2VLAN:
+	case IFT_BRIDGE:
 		return (ROUNDUP8(ETHER_ADDR_LEN + 2));
 	default:
 		return (0);
@@ -129,6 +133,8 @@ lladdropt_fill(struct sockaddr_dl *sdl, struct nd_opt_hdr *ndopt)
 
 	switch (sdl->sdl_type) {
 	case IFT_ETHER:
+	case IFT_L2VLAN:
+	case IFT_BRIDGE:
 		ndopt->nd_opt_len = (ROUNDUP8(ETHER_ADDR_LEN + 2)) >> 3;
 		addr = (char *)(ndopt + 1);
 		memcpy(addr, LLADDR(sdl), ETHER_ADDR_LEN);
@@ -358,8 +364,7 @@ update_persist_ifinfo(struct ifilist_head_t *ifi_head, const char *ifname)
 
 		ELM_MALLOC(ifi, exit(1));
 		ifi->ifi_ifindex = 0;
-		strncpy(ifi->ifi_ifname, ifname, sizeof(ifi->ifi_ifname)-1);
-		ifi->ifi_ifname[sizeof(ifi->ifi_ifname)-1] = '\0';
+		strlcpy(ifi->ifi_ifname, ifname, sizeof(ifi->ifi_ifname));
 		ifi->ifi_rainfo = NULL;
 		ifi->ifi_state = IFI_STATE_UNCONFIGURED;
 		TAILQ_INSERT_TAIL(ifi_head, ifi, ifi_next);
@@ -388,7 +393,7 @@ update_ifinfo_nd_flags(struct ifinfo *ifi)
 	}
 	/* ND flags */
 	memset(&nd, 0, sizeof(nd));
-	strncpy(nd.ifname, ifi->ifi_ifname,
+	strlcpy(nd.ifname, ifi->ifi_ifname,
 	    sizeof(nd.ifname));
 	error = ioctl(s, SIOCGIFINFO_IN6, (caddr_t)&nd);
 	if (error) {
@@ -403,6 +408,8 @@ update_ifinfo_nd_flags(struct ifinfo *ifi)
 	return (0);
 }
 
+#define MAX_SYSCTL_TRY 5
+
 struct ifinfo *
 update_ifinfo(struct ifilist_head_t *ifi_head, int ifindex)
 {
@@ -414,26 +421,43 @@ update_ifinfo(struct ifilist_head_t *ifi_head, int ifindex)
 	size_t len;
 	char *lim;
 	int mib[] = { CTL_NET, PF_ROUTE, 0, AF_INET6, NET_RT_IFLIST, 0 };
-	int error;
+	int error, ntry;
 
 	syslog(LOG_DEBUG, "<%s> enter", __func__);
 
-	if (sysctl(mib, sizeof(mib)/sizeof(mib[0]), NULL, &len, NULL, 0) <
-	    0) {
-		syslog(LOG_ERR,
-		    "<%s> sysctl: NET_RT_IFLIST size get failed", __func__);
-		exit(1);
-	}
-	if ((msg = malloc(len)) == NULL) {
-		syslog(LOG_ERR, "<%s> malloc failed", __func__);
-		exit(1);
-	}
-	if (sysctl(mib, sizeof(mib)/sizeof(mib[0]), msg, &len, NULL, 0) <
-	    0) {
-		syslog(LOG_ERR,
-		    "<%s> sysctl: NET_RT_IFLIST get failed", __func__);
-		exit(1);
-	}
+	ntry = 0;
+	do {
+		/*
+		 * We'll try to get addresses several times in case that
+		 * the number of addresses is unexpectedly increased during
+		 * the two sysctl calls.  This should rarely happen.
+		 * Portability note: since FreeBSD does not add margin of
+		 * memory at the first sysctl, the possibility of failure on
+		 * the second sysctl call is a bit higher.
+		 */
+
+		if (sysctl(mib, nitems(mib), NULL, &len, NULL, 0) < 0) {
+			syslog(LOG_ERR,
+			    "<%s> sysctl: NET_RT_IFLIST size get failed",
+			    __func__);
+			exit(1);
+		}
+		if ((msg = malloc(len)) == NULL) {
+			syslog(LOG_ERR, "<%s> malloc failed", __func__);
+			exit(1);
+		}
+		if (sysctl(mib, nitems(mib), msg, &len, NULL, 0) < 0) {
+			if (errno != ENOMEM || ++ntry >= MAX_SYSCTL_TRY) {
+				free(msg);
+				syslog(LOG_ERR,
+				    "<%s> sysctl: NET_RT_IFLIST get failed",
+				    __func__);
+				exit(1);
+			}
+			free(msg);
+			msg = NULL;
+		}
+	} while (msg == NULL);
 
 	lim = msg + len;
 	for (ifm = (struct if_msghdr *)msg;
@@ -471,11 +495,18 @@ update_ifinfo(struct ifilist_head_t *ifi_head, int ifindex)
 			    ifindex != ifm->ifm_index)
 				continue;
 
+			/* ifname */
+			if (if_indextoname(ifm->ifm_index, ifname) == NULL) {
+				syslog(LOG_WARNING,
+				    "<%s> ifname not found (idx=%d)",
+				    __func__, ifm->ifm_index);
+				continue;
+			}
+
 			/* lookup an entry with the same ifindex */
 			TAILQ_FOREACH(ifi, ifi_head, ifi_next) {
 				if (ifm->ifm_index == ifi->ifi_ifindex)
 					break;
-				if_indextoname(ifm->ifm_index, ifname);
 				if (strncmp(ifname, ifi->ifi_ifname,
 					sizeof(ifname)) == 0)
 					break;
@@ -494,15 +525,7 @@ update_ifinfo(struct ifilist_head_t *ifi_head, int ifindex)
 			ifi->ifi_ifindex = ifm->ifm_index;
 
 			/* ifname */
-			if_indextoname(ifm->ifm_index, ifi->ifi_ifname);
-			if (ifi->ifi_ifname == NULL) {
-				syslog(LOG_WARNING,
-				    "<%s> ifname not found (idx=%d)",
-				    __func__, ifm->ifm_index);
-				if (ifi_new)
-					free(ifi);
-				continue;
-			}
+			strlcpy(ifi->ifi_ifname, ifname, IFNAMSIZ);
 
 			if ((s = socket(AF_INET6, SOCK_DGRAM, 0)) < 0) {
 				syslog(LOG_ERR,
@@ -517,7 +540,7 @@ update_ifinfo(struct ifilist_head_t *ifi_head, int ifindex)
 			if (ifi->ifi_phymtu == 0) {
 				memset(&ifr, 0, sizeof(ifr));
 				ifr.ifr_addr.sa_family = AF_INET6;
-				strncpy(ifr.ifr_name, ifi->ifi_ifname,
+				strlcpy(ifr.ifr_name, ifi->ifi_ifname,
 				    sizeof(ifr.ifr_name));
 				error = ioctl(s, SIOCGIFMTU, (caddr_t)&ifr);
 				if (error) {

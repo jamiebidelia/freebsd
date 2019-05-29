@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2000-2001 Boris Popov
  * All rights reserved.
  *
@@ -62,7 +64,7 @@ void m_dumpm(struct mbuf *m);
 	 SIGISMEMBER(set, SIGHUP) || SIGISMEMBER(set, SIGKILL) ||	\
 	 SIGISMEMBER(set, SIGQUIT))
 
-#define	smb_suser(cred)	priv_check_cred(cred, PRIV_NETSMB, 0)
+#define	smb_suser(cred)	priv_check_cred(cred, PRIV_NETSMB)
 
 /*
  * Compatibility wrappers for simple locks

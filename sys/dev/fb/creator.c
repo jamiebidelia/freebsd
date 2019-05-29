@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2003 Jake Burkholder.
  * Copyright (c) 2005 - 2006 Marius Strobl <marius@FreeBSD.org>
  * All rights reserved.
@@ -33,6 +35,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/bus.h>
 #include <sys/conf.h>
 #include <sys/consio.h>
+#include <sys/eventhandler.h>
 #include <sys/fbio.h>
 #include <sys/kernel.h>
 #include <sys/module.h>
@@ -151,8 +154,7 @@ static const struct {
 	{ FFB_VIRT_EXP,		FFB_PHYS_EXP,		FFB_SIZE_EXP },
 };
 
-#define	CREATOR_FB_MAP_SIZE						\
-	(sizeof(creator_fb_map) / sizeof(creator_fb_map[0]))
+#define	CREATOR_FB_MAP_SIZE	nitems(creator_fb_map)
 
 extern const struct gfb_font gallant12x22;
 

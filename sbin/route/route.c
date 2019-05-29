@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1983, 1989, 1991, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -10,7 +12,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 4. Neither the name of the University nor the names of its contributors
+ * 3. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -62,6 +64,7 @@ __FBSDID("$FreeBSD$");
 #include <err.h>
 #include <errno.h>
 #include <paths.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -143,6 +146,16 @@ static int	fiboptlist_csv(const char *, struct fibl_head_t *);
 static int	fiboptlist_range(const char *, struct fibl_head_t *);
 
 static void usage(const char *) __dead2;
+
+#define	READ_TIMEOUT	10
+static volatile sig_atomic_t stop_read;
+
+static void
+stopit(int sig __unused)
+{
+
+	stop_read = 1;
+}
 
 static void
 usage(const char *cp)
@@ -277,7 +290,7 @@ fiboptlist_range(const char *arg, struct fibl_head_t *flh)
 			if (errno == 0) {
 				if (*endptr != '\0' ||
 				    fib[i] < 0 ||
-				    (numfibs != -1 && fib[i] > numfibs - 1)) 
+				    (numfibs != -1 && fib[i] > numfibs - 1))
 					errno = EINVAL;
 			}
 			if (errno)
@@ -510,6 +523,7 @@ retry:
 			printf("done\n");
 		}
 	}
+	free(buf);
 	return (error);
 }
 
@@ -776,6 +790,7 @@ set_metric(char *value, int key)
 static void
 newroute(int argc, char **argv)
 {
+	struct sigaction sa;
 	struct hostent *hp;
 	struct fibl *fl;
 	char *cmd;
@@ -790,6 +805,12 @@ newroute(int argc, char **argv)
 	nrflags = 0;
 	hp = NULL;
 	TAILQ_INIT(&fibl_head);
+
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = 0;
+	sa.sa_handler = stopit;
+	if (sigaction(SIGALRM, &sa, 0) == -1)
+		warn("sigaction SIGALRM");
 
 	cmd = argv[0];
 	if (*cmd != 'g' && *cmd != 's')
@@ -1029,10 +1050,13 @@ newroute(int argc, char **argv)
 			}
 			printf("\n");
 		}
+	}
 
-		fibnum = 0;
-		TAILQ_FOREACH(fl, &fibl_head, fl_next) {
-			if (fl->fl_error != 0) {
+	fibnum = 0;
+	TAILQ_FOREACH(fl, &fibl_head, fl_next) {
+		if (fl->fl_error != 0) {
+			error = 1;
+			if (!qflag) {
 				printf("%s %s %s", cmd, (nrflags & F_ISHOST)
 				    ? "host" : "net", dest);
 				if (*gateway)
@@ -1066,7 +1090,6 @@ newroute(int argc, char **argv)
 					break;
 				}
 				printf(": %s\n", errmsg);
-				error = 1;
 			}
 		}
 	}
@@ -1118,7 +1141,7 @@ inet_makenetandmask(u_long net, struct sockaddr_in *sin,
 			j <<= 8;
 		}
 		/* i holds the first non zero bit */
-		bits = 32 - (i*8);	
+		bits = 32 - (i*8);
 	}
 	if (bits != 0)
 		mask = 0xffffffff << (32 - bits);
@@ -1222,6 +1245,9 @@ getaddr(int idx, char *str, struct hostent **hpp, int nrflags)
 			freeifaddrs(ifap);
 			if (sdl != NULL)
 				return(1);
+			else
+				errx(EX_DATAERR,
+				    "interface '%s' does not exist", str);
 		}
 		break;
 	case RTAX_IFP:
@@ -1335,7 +1361,7 @@ prefixlen(const char *str)
 	int max;
 	char *p;
 
-	rtm_addrs |= RTA_NETMASK;	
+	rtm_addrs |= RTA_NETMASK;
 	switch (af) {
 #ifdef INET6
 	case AF_INET6:
@@ -1369,7 +1395,7 @@ prefixlen(const char *str)
 
 	if (len < 0 || max < len)
 		errx(EX_USAGE, "%s: invalid prefixlen", str);
-	
+
 	q = len >> 3;
 	r = len & 7;
 	memset((void *)p, 0, max / 8);
@@ -1416,6 +1442,7 @@ retry2:
 		rtm = (struct rt_msghdr *)(void *)next;
 		print_rtmsg(rtm, rtm->rtm_msglen);
 	}
+	free(buf);
 }
 
 static void
@@ -1476,10 +1503,7 @@ rtmsg(int cmd, int flags, int fib)
 
 #define NEXTADDR(w, u)							\
 	if (rtm_addrs & (w)) {						\
-		l = (((struct sockaddr *)&(u))->sa_len == 0) ?		\
-		    sizeof(long) :					\
-		    1 + ((((struct sockaddr *)&(u))->sa_len - 1)	\
-			| (sizeof(long) - 1));				\
+		l = SA_SIZE(&(u));					\
 		memmove(cp, (char *)&(u), l);				\
 		cp += l;						\
 		if (verbose)						\
@@ -1499,8 +1523,10 @@ rtmsg(int cmd, int flags, int fib)
 			so[RTAX_IFP].ss_len = sizeof(struct sockaddr_dl);
 			rtm_addrs |= RTA_IFP;
 		}
-	} else
+	} else {
 		cmd = RTM_DELETE;
+		flags |= RTF_PINNED;
+	}
 #define rtm m_rtmsg.m_rtm
 	rtm.rtm_type = cmd;
 	rtm.rtm_flags = flags;
@@ -1538,9 +1564,18 @@ rtmsg(int cmd, int flags, int fib)
 		return (-1);
 	}
 	if (cmd == RTM_GET) {
+		stop_read = 0;
+		alarm(READ_TIMEOUT);
 		do {
 			l = read(s, (char *)&m_rtmsg, sizeof(m_rtmsg));
-		} while (l > 0 && (rtm.rtm_seq != rtm_seq || rtm.rtm_pid != pid));
+		} while (l > 0 && stop_read == 0 &&
+		    (rtm.rtm_type != RTM_GET || rtm.rtm_seq != rtm_seq ||
+			rtm.rtm_pid != pid));
+		if (stop_read != 0) {
+			warnx("read from routing socket timed out");
+			return (-1);
+		} else
+			alarm(0);
 		if (l < 0)
 			warn("read from routing socket");
 		else
@@ -1677,10 +1712,13 @@ print_rtmsg(struct rt_msghdr *rtm, size_t msglen)
 		break;
 
 	default:
-		printf("pid: %ld, seq %d, errno %d, flags:",
-			(long)rtm->rtm_pid, rtm->rtm_seq, rtm->rtm_errno);
-		printb(rtm->rtm_flags, routeflags);
-		pmsg_common(rtm, msglen);
+		if (rtm->rtm_type <= RTM_RESOLVE) {
+			printf("pid: %ld, seq %d, errno %d, flags:",
+			    (long)rtm->rtm_pid, rtm->rtm_seq, rtm->rtm_errno);
+			printb(rtm->rtm_flags, routeflags);
+			pmsg_common(rtm, msglen);
+		} else
+			printf("type: %u, len: %zu\n", rtm->rtm_type, msglen);
 	}
 
 	return;

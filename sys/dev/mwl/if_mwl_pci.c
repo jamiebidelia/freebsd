@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2007-2009 Sam Leffler, Errno Consulting
  * Copyright (c) 2007-2009 Marvell Semiconductor, Inc.
  * All rights reserved.
@@ -43,6 +45,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/kernel.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
+#include <sys/mbuf.h>
 #include <sys/mutex.h>
 #include <sys/errno.h>
 

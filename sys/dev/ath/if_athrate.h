@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2004-2008 Sam Leffler, Errno Consulting
  * Copyright (c) 2004 Video54 Technologies, Inc.
  * All rights reserved.
@@ -153,6 +155,12 @@ struct ath_buf;
 void	ath_rate_tx_complete(struct ath_softc *, struct ath_node *,
 		const struct ath_rc_series *, const struct ath_tx_status *,
 		int pktlen, int nframes, int nbad);
+
+/*
+ * Update rate control with a per-packet receive RSSI value.
+ */
+void	ath_rate_update_rx_rssi(struct ath_softc *, struct ath_node *,
+		int rssi);
 
 /*
  * Fetch the global rate control statistics.

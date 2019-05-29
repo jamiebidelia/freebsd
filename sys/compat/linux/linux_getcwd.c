@@ -1,6 +1,8 @@
 /* $OpenBSD: linux_getcwd.c,v 1.2 2001/05/16 12:50:21 ho Exp $ */
 /* $NetBSD: vfs_getcwd.c,v 1.3.2.3 1999/07/11 10:24:09 sommerfeld Exp $ */
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-NetBSD
+ *
  * Copyright (c) 1999 The NetBSD Foundation, Inc.
  * Copyright (c) 2015 The FreeBSD Foundation
  * All rights reserved.
@@ -62,11 +64,6 @@ linux_getcwd(struct thread *td, struct linux_getcwd_args *args)
 {
 	char *path;
 	int error, lenused;
-
-#ifdef DEBUG
-	if (ldebug(getcwd))
-		printf(ARGS(getcwd, "%p, %ld"), args->buf, (long)args->bufsize);
-#endif
 
 	/*
 	 * Linux returns ERANGE instead of EINVAL.

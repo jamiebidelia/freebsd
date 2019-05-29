@@ -3,6 +3,8 @@
  */
 
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) Maksim Yevmenkin <m_evmenkin@yahoo.com>
  * All rights reserved.
  *
@@ -417,7 +419,6 @@ le_advertizing_report(ng_hci_unit_p unit, struct mbuf *event)
 		} else
 			getmicrotime(&n->updated);
 		
-#if 0
 		{
 			/* 
 			 * TODO: Make these information 
@@ -425,21 +426,36 @@ le_advertizing_report(ng_hci_unit_p unit, struct mbuf *event)
 			 */
 			u_int8_t length_data;
 			
-			char *rssi;
-			
-			NG_HCI_M_PULLUP(event, sizeof(u_int8_t));
+			event = m_pullup(event, sizeof(u_int8_t));
+			if(event == NULL){
+				NG_HCI_WARN("%s: Event datasize Pullup Failed\n", __func__);
+				goto out;
+			}
 			length_data = *mtod(event, u_int8_t *);
 			m_adj(event, sizeof(u_int8_t));
+			n->extinq_size = (length_data < NG_HCI_EXTINQ_MAX)?
+				length_data : NG_HCI_EXTINQ_MAX;
+			
 			/*Advertizement data*/
-			NG_HCI_M_PULLUP(event, length_data);
-			m_adj(event, length_data);
-			NG_HCI_M_PULLUP(event, sizeof(char ));
+			event = m_pullup(event, n->extinq_size);
+			if(event == NULL){
+				NG_HCI_WARN("%s: Event data pullup Failed\n", __func__);
+				goto out;
+			}
+			m_copydata(event, 0, n->extinq_size, n->extinq_data);
+			m_adj(event, n->extinq_size);
+			event = m_pullup(event, sizeof(char ));
 			/*Get RSSI*/
-			rssi = mtod(event, char *);
+			if(event == NULL){
+				NG_HCI_WARN("%s: Event rssi pull up Failed\n", __func__);
+				
+				goto out;
+			}				
+			n->page_scan_mode = *mtod(event, char *);
 			m_adj(event, sizeof(u_int8_t));
 		}
-#endif
 	}
+ out:
 	NG_FREE_M(event);
 
 	return (error);
@@ -913,23 +929,23 @@ encryption_change(ng_hci_unit_p unit, struct mbuf *event)
 	ng_hci_encryption_change_ep	*ep = NULL;
 	ng_hci_unit_con_p		 con = NULL;
 	int				 error = 0;
+	u_int16_t	h;
 
 	NG_HCI_M_PULLUP(event, sizeof(*ep));
 	if (event == NULL)
 		return (ENOBUFS);
 
 	ep = mtod(event, ng_hci_encryption_change_ep *);
+	h = NG_HCI_CON_HANDLE(le16toh(ep->con_handle));
+	con = ng_hci_con_by_handle(unit, h);
 
 	if (ep->status == 0) {
-		u_int16_t	h = NG_HCI_CON_HANDLE(le16toh(ep->con_handle));
-
-		con = ng_hci_con_by_handle(unit, h);
 		if (con == NULL) {
 			NG_HCI_ALERT(
 "%s: %s - invalid connection handle=%d\n",
 				__func__, NG_NODE_NAME(unit->node), h);
 			error = ENOENT;
-		} else if (con->link_type != NG_HCI_LINK_ACL) {
+		} else if (con->link_type == NG_HCI_LINK_SCO) {
 			NG_HCI_ALERT(
 "%s: %s - invalid link type=%d\n",
 				__func__, NG_NODE_NAME(unit->node), 
@@ -944,6 +960,9 @@ encryption_change(ng_hci_unit_p unit, struct mbuf *event)
 		NG_HCI_ERR(
 "%s: %s - failed to change encryption mode, status=%d\n",
 			__func__, NG_NODE_NAME(unit->node), ep->status);
+
+	/*Anyway, propagete encryption status to upper layer*/
+	ng_hci_lp_enc_change(con, con->encryption_mode);
 
 	NG_FREE_M(event);
 

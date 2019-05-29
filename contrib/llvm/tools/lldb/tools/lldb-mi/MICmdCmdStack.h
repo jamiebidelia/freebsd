@@ -7,177 +7,251 @@
 //
 //===----------------------------------------------------------------------===//
 
-//++
-// File:        MICmdCmdStack.h
-//
 // Overview:    CMICmdCmdStackInfoDepth         interface.
+//              CMICmdCmdStackInfoFrame         interface.
 //              CMICmdCmdStackListFrames        interface.
 //              CMICmdCmdStackListArguments     interface.
 //              CMICmdCmdStackListLocals        interface.
+//              CMICmdCmdStackSelectFrame       interface.
 //
-//              To implement new MI commands derive a new command class from the command base
-//              class. To enable the new command for interpretation add the new command class
+//              To implement new MI commands derive a new command class from the
+//              command base
+//              class. To enable the new command for interpretation add the new
+//              command class
 //              to the command factory. The files of relevance are:
 //                  MICmdCommands.cpp
 //                  MICmdBase.h / .cpp
 //                  MICmdCmd.h / .cpp
-//              For an introduction to adding a new command see CMICmdCmdSupportInfoMiCmdQuery
+//              For an introduction to adding a new command see
+//              CMICmdCmdSupportInfoMiCmdQuery
 //              command class as an example.
-//
-// Environment: Compilers:  Visual C++ 12.
-//                          gcc (Ubuntu/Linaro 4.8.1-10ubuntu9) 4.8.1
-//              Libraries:  See MIReadmetxt.
-//
-// Copyright:   None.
-//--
 
 #pragma once
 
 // In-house headers:
 #include "MICmdBase.h"
 #include "MICmnMIValueList.h"
+#include "MICmnMIValueTuple.h"
 
-//++ ============================================================================
+//++
+//============================================================================
 // Details: MI command class. MI commands derived from the command base class.
 //          *this class implements MI command "stack-info-depth".
-// Gotchas: None.
-// Authors: Illya Rudkin 21/03/2014.
-// Changes: None.
 //--
-class CMICmdCmdStackInfoDepth : public CMICmdBase
-{
-    // Statics:
-  public:
-    // Required by the CMICmdFactory when registering *this command
-    static CMICmdBase *CreateSelf(void);
+class CMICmdCmdStackInfoDepth : public CMICmdBase {
+  // Statics:
+public:
+  // Required by the CMICmdFactory when registering *this command
+  static CMICmdBase *CreateSelf();
 
-    // Methods:
-  public:
-    /* ctor */ CMICmdCmdStackInfoDepth(void);
+  // Methods:
+public:
+  /* ctor */ CMICmdCmdStackInfoDepth();
 
-    // Overridden:
-  public:
-    // From CMICmdInvoker::ICmd
-    virtual bool Execute(void);
-    virtual bool Acknowledge(void);
-    virtual bool ParseArgs(void);
-    // From CMICmnBase
-    /* dtor */ virtual ~CMICmdCmdStackInfoDepth(void);
+  // Overridden:
+public:
+  // From CMICmdInvoker::ICmd
+  bool Execute() override;
+  bool Acknowledge() override;
+  bool ParseArgs() override;
+  // From CMICmnBase
+  /* dtor */ ~CMICmdCmdStackInfoDepth() override;
 
-    // Attributes:
-  private:
-    MIuint m_nThreadFrames;
-    const CMIUtilString m_constStrArgThread;   // Not specified in MI spec but Eclipse gives this option
-    const CMIUtilString m_constStrArgMaxDepth; // Not handled by *this command
+  // Attributes:
+private:
+  MIuint m_nThreadFrames;
+  const CMIUtilString m_constStrArgMaxDepth; // Not handled by *this command
 };
 
-//++ ============================================================================
+//++
+//============================================================================
+// Details: MI command class. MI commands derived from the command base class.
+//          *this class implements MI command "stack-info-frame".
+//--
+class CMICmdCmdStackInfoFrame : public CMICmdBase {
+  // Statics:
+public:
+  // Required by the CMICmdFactory when registering *this command
+  static CMICmdBase *CreateSelf();
+
+  // Methods:
+public:
+  /* ctor */ CMICmdCmdStackInfoFrame();
+
+  // Overridden:
+public:
+  // From CMICmdInvoker::ICmd
+  bool Execute() override;
+  bool Acknowledge() override;
+  bool ParseArgs() override;
+  // From CMICmnBase
+  /* dtor */ ~CMICmdCmdStackInfoFrame() override;
+
+  // Attributes:
+private:
+  CMICmnMIValueTuple m_miValueTuple;
+};
+
+//++
+//============================================================================
 // Details: MI command class. MI commands derived from the command base class.
 //          *this class implements MI command "stack-list-frames".
-// Gotchas: None.
-// Authors: Illya Rudkin 21/03/2014.
-// Changes: None.
 //--
-class CMICmdCmdStackListFrames : public CMICmdBase
-{
-    // Statics:
-  public:
-    // Required by the CMICmdFactory when registering *this command
-    static CMICmdBase *CreateSelf(void);
+class CMICmdCmdStackListFrames : public CMICmdBase {
+  // Statics:
+public:
+  // Required by the CMICmdFactory when registering *this command
+  static CMICmdBase *CreateSelf();
 
-    // Methods:
-  public:
-    /* ctor */ CMICmdCmdStackListFrames(void);
+  // Methods:
+public:
+  /* ctor */ CMICmdCmdStackListFrames();
 
-    // Overridden:
-  public:
-    // From CMICmdInvoker::ICmd
-    virtual bool Execute(void);
-    virtual bool Acknowledge(void);
-    virtual bool ParseArgs(void);
-    // From CMICmnBase
-    /* dtor */ virtual ~CMICmdCmdStackListFrames(void);
+  // Overridden:
+public:
+  // From CMICmdInvoker::ICmd
+  bool Execute() override;
+  bool Acknowledge() override;
+  bool ParseArgs() override;
+  // From CMICmnBase
+  /* dtor */ ~CMICmdCmdStackListFrames() override;
 
-    // Typedefs:
-  private:
-    typedef std::vector<CMICmnMIValueResult> VecMIValueResult_t;
+  // Typedefs:
+private:
+  typedef std::vector<CMICmnMIValueResult> VecMIValueResult_t;
 
-    // Attributes:
-  private:
-    MIuint m_nThreadFrames;
-    VecMIValueResult_t m_vecMIValueResult;
-    const CMIUtilString m_constStrArgThread; // Not specified in MI spec but Eclipse gives this option
-    const CMIUtilString m_constStrArgFrameLow;
-    const CMIUtilString m_constStrArgFrameHigh;
+  // Attributes:
+private:
+  MIuint m_nThreadFrames;
+  VecMIValueResult_t m_vecMIValueResult;
+  const CMIUtilString m_constStrArgFrameLow;
+  const CMIUtilString m_constStrArgFrameHigh;
 };
 
-//++ ============================================================================
+//++
+//============================================================================
 // Details: MI command class. MI commands derived from the command base class.
 //          *this class implements MI command "stack-list-arguments".
-// Gotchas: None.
-// Authors: Illya Rudkin 24/03/2014.
-// Changes: None.
 //--
-class CMICmdCmdStackListArguments : public CMICmdBase
-{
-    // Statics:
-  public:
-    // Required by the CMICmdFactory when registering *this command
-    static CMICmdBase *CreateSelf(void);
+class CMICmdCmdStackListArguments : public CMICmdBase {
+  // Statics:
+public:
+  // Required by the CMICmdFactory when registering *this command
+  static CMICmdBase *CreateSelf();
 
-    // Methods:
-  public:
-    /* ctor */ CMICmdCmdStackListArguments(void);
+  // Methods:
+public:
+  /* ctor */ CMICmdCmdStackListArguments();
 
-    // Overridden:
-  public:
-    // From CMICmdInvoker::ICmd
-    virtual bool Execute(void);
-    virtual bool Acknowledge(void);
-    virtual bool ParseArgs(void);
-    // From CMICmnBase
-    /* dtor */ virtual ~CMICmdCmdStackListArguments(void);
+  // Overridden:
+public:
+  // From CMICmdInvoker::ICmd
+  bool Execute() override;
+  bool Acknowledge() override;
+  bool ParseArgs() override;
+  // From CMICmnBase
+  /* dtor */ ~CMICmdCmdStackListArguments() override;
 
-    // Attributes:
-  private:
-    bool m_bThreadInvalid; // True = yes invalid thread, false = thread object valid
-    CMICmnMIValueList m_miValueList;
-    const CMIUtilString m_constStrArgThread;      // Not specified in MI spec but Eclipse gives this option
-    const CMIUtilString m_constStrArgPrintValues; // Not handled by *this command
+  // Attributes:
+private:
+  bool m_bThreadInvalid; // True = yes invalid thread, false = thread object
+                         // valid
+  CMICmnMIValueList m_miValueList;
+  const CMIUtilString m_constStrArgPrintValues;
+  const CMIUtilString m_constStrArgFrameLow;
+  const CMIUtilString m_constStrArgFrameHigh;
 };
 
-//++ ============================================================================
+//++
+//============================================================================
 // Details: MI command class. MI commands derived from the command base class.
 //          *this class implements MI command "stack-list-locals".
-// Gotchas: None.
-// Authors: Illya Rudkin 24/03/2014.
-// Changes: None.
 //--
-class CMICmdCmdStackListLocals : public CMICmdBase
-{
-    // Statics:
-  public:
-    // Required by the CMICmdFactory when registering *this command
-    static CMICmdBase *CreateSelf(void);
+class CMICmdCmdStackListLocals : public CMICmdBase {
+  // Statics:
+public:
+  // Required by the CMICmdFactory when registering *this command
+  static CMICmdBase *CreateSelf();
 
-    // Methods:
-  public:
-    /* ctor */ CMICmdCmdStackListLocals(void);
+  // Methods:
+public:
+  /* ctor */ CMICmdCmdStackListLocals();
 
-    // Overridden:
-  public:
-    // From CMICmdInvoker::ICmd
-    virtual bool Execute(void);
-    virtual bool Acknowledge(void);
-    virtual bool ParseArgs(void);
-    // From CMICmnBase
-    /* dtor */ virtual ~CMICmdCmdStackListLocals(void);
+  // Overridden:
+public:
+  // From CMICmdInvoker::ICmd
+  bool Execute() override;
+  bool Acknowledge() override;
+  bool ParseArgs() override;
+  // From CMICmnBase
+  /* dtor */ ~CMICmdCmdStackListLocals() override;
 
-    // Attributes:
-  private:
-    bool m_bThreadInvalid; // True = yes invalid thread, false = thread object valid
-    CMICmnMIValueList m_miValueList;
-    const CMIUtilString m_constStrArgThread;      // Not specified in MI spec but Eclipse gives this option
-    const CMIUtilString m_constStrArgFrame;       // Not specified in MI spec but Eclipse gives this option
-    const CMIUtilString m_constStrArgPrintValues; // Not handled by *this command
+  // Attributes:
+private:
+  bool m_bThreadInvalid; // True = yes invalid thread, false = thread object
+                         // valid
+  CMICmnMIValueList m_miValueList;
+  const CMIUtilString m_constStrArgPrintValues;
+};
+
+//++
+//============================================================================
+// Details: MI command class. MI commands derived from the command base class.
+//          *this class implements MI command "stack-list-variables".
+//--
+class CMICmdCmdStackListVariables : public CMICmdBase {
+  // Statics:
+public:
+  // Required by the CMICmdFactory when registering *this command
+  static CMICmdBase *CreateSelf();
+
+  // Methods:
+public:
+  /* ctor */ CMICmdCmdStackListVariables();
+
+  // Overridden:
+public:
+  // From CMICmdInvoker::ICmd
+  bool Execute() override;
+  bool Acknowledge() override;
+  bool ParseArgs() override;
+  // From CMICmnBase
+  /* dtor */ ~CMICmdCmdStackListVariables() override;
+
+  // Attributes
+private:
+  bool m_bThreadInvalid; // True = yes invalid thread, false = thread object
+                         // valid
+  CMICmnMIValueList m_miValueList;
+  const CMIUtilString m_constStrArgPrintValues;
+};
+
+//++
+//============================================================================
+// Details: MI command class. MI commands derived from the command base class.
+//          *this class implements MI command "stack-select-frame".
+//--
+class CMICmdCmdStackSelectFrame : public CMICmdBase {
+  // Statics:
+public:
+  // Required by the CMICmdFactory when registering *this command
+  static CMICmdBase *CreateSelf();
+
+  // Methods:
+public:
+  /* ctor */ CMICmdCmdStackSelectFrame();
+
+  // Overridden:
+public:
+  // From CMICmdInvoker::ICmd
+  bool Execute() override;
+  bool Acknowledge() override;
+  bool ParseArgs() override;
+  // From CMICmnBase
+  /* dtor */ ~CMICmdCmdStackSelectFrame() override;
+
+  // Attributes:
+private:
+  bool m_bFrameInvalid; // True = yes invalid frame, false = ok
+  const CMIUtilString m_constStrArgFrameId;
 };

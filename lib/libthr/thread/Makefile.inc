@@ -31,11 +31,13 @@ SRCS+= \
 	thr_kern.c \
 	thr_kill.c \
 	thr_main_np.c \
+	thr_malloc.c \
 	thr_multi_np.c \
 	thr_mutex.c \
 	thr_mutexattr.c \
 	thr_once.c \
 	thr_printf.c \
+	thr_pshared.c \
 	thr_pspinlock.c \
 	thr_resume_np.c \
 	thr_rtld.c \

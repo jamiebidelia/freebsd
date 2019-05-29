@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1995 John Birrell <jb@cimlogic.com.au>.
  * All rights reserved.
  *
@@ -25,9 +27,10 @@
  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
- *
- * $FreeBSD$
  */
+
+#include <sys/cdefs.h>
+__FBSDID("$FreeBSD$");
 
 #include "namespace.h"
 #include <sys/mman.h>
@@ -41,6 +44,7 @@
 
 #include "thr_private.h"
 
+/* Used in symbol lookup of libthread_db */
 struct pthread_key _thread_keytable[PTHREAD_KEYS_MAX];
 
 __weak_reference(_pthread_key_create, pthread_key_create);
@@ -151,8 +155,7 @@ _thread_cleanupspecific(void)
 		}
 	}
 	THR_LOCK_RELEASE(curthread, &_keytable_lock);
-	munmap(curthread->specific, PTHREAD_KEYS_MAX * sizeof(struct
-	    pthread_specific_elem));
+	__thr_free(curthread->specific);
 	curthread->specific = NULL;
 	if (curthread->specific_data_count > 0) {
 		stderr_debug("Thread %p has exited with leftover "
@@ -175,10 +178,9 @@ _pthread_setspecific(pthread_key_t userkey, const void *value)
 
 	pthread = _get_curthread();
 	if (pthread->specific == NULL) {
-		tmp = mmap(NULL, PTHREAD_KEYS_MAX *
-		    sizeof(struct pthread_specific_elem),
-		    PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-		if (tmp == MAP_FAILED)
+		tmp = __thr_calloc(PTHREAD_KEYS_MAX,
+		    sizeof(struct pthread_specific_elem));
+		if (tmp == NULL)
 			return (ENOMEM);
 		pthread->specific = tmp;
 	}

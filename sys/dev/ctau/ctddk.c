@@ -104,7 +104,7 @@ int ct_open_board (ct_board_t *b, int num, port_t port, int irq, int dma)
 	case B_TAU2_E1D:
 		fw = ctau2_fw_data;
 		flen = 0;
-		ft = 0;
+		ft = NULL;
 		break;
 #ifndef CT_DDK_NO_G703
 	case B_TAU_G703:
@@ -237,7 +237,7 @@ int ct_set_clk (ct_chan_t *c, int clk)
 	if (c->mode == M_E1) {
 		ct_setup_e1 (c->board);
 		return 0;
-	} if (c->mode == M_G703) {
+	} else if (c->mode == M_G703) {
 		ct_setup_g703 (c->board);
 		return 0;
 	} else

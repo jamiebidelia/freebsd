@@ -26,7 +26,7 @@ struct wpi_rx_radiotap_header {
 	int8_t		wr_dbm_antsignal;
 	int8_t		wr_dbm_antnoise;
 	uint8_t		wr_antenna;
-} __packed;
+} __packed __aligned(8);
 
 #define WPI_RX_RADIOTAP_PRESENT						\
 	((1 << IEEE80211_RADIOTAP_TSFT) |				\
@@ -63,6 +63,7 @@ struct wpi_tx_data {
 	bus_addr_t		cmd_paddr;
 	struct mbuf		*m;
 	struct ieee80211_node	*ni;
+	int			hdrlen;
 };
 
 struct wpi_tx_ring {
@@ -72,10 +73,11 @@ struct wpi_tx_ring {
 	struct wpi_tx_cmd	*cmd;
 	struct wpi_tx_data	data[WPI_TX_RING_COUNT];
 	bus_dma_tag_t		data_dmat;
-	int			qid;
-	int			queued;
-	int			cur;
-	int			update;
+	uint8_t			qid;
+	uint8_t			cur;
+	uint8_t			pending;
+	int16_t			queued;
+	int			update:1;
 };
 
 struct wpi_rx_data {
@@ -88,7 +90,7 @@ struct wpi_rx_ring {
 	uint32_t		*desc;
 	struct wpi_rx_data	data[WPI_RX_RING_COUNT];
 	bus_dma_tag_t		data_dmat;
-	int			cur;
+	uint16_t		cur;
 	int			update;
 };
 
@@ -116,18 +118,17 @@ struct wpi_buf {
 	struct ieee80211_node	*ni;
 	struct mbuf		*m;
 	size_t			size;
-	int			code;
-	int			ac;
+	uint8_t			code;
+	uint16_t		ac;
 };
 
 struct wpi_vap {
 	struct ieee80211vap	wv_vap;
 
 	struct wpi_buf		wv_bcbuf;
-	struct ieee80211_beacon_offsets wv_boff;
 	struct mtx		wv_mtx;
 
-	uint32_t		wv_gtk;
+	uint8_t			wv_gtk;
 #define WPI_VAP_KEY(kid)	(1 << kid)
 
 	int			(*wv_newstate)(struct ieee80211vap *,
@@ -164,31 +165,29 @@ struct wpi_fw_info {
 
 struct wpi_softc {
 	device_t		sc_dev;
-
-	struct ifnet		*sc_ifp;
 	int			sc_debug;
 
-	int			sc_flags;
-#define WPI_PS_PATH		(1 << 0)
+	int			sc_running;
 
 	struct mtx		sc_mtx;
+	struct ieee80211com	sc_ic;
+	struct ieee80211_ratectl_tx_status sc_txs;
+
 	struct mtx		tx_mtx;
 
 	/* Shared area. */
 	struct wpi_dma_info	shared_dma;
 	struct wpi_shared	*shared;
 
-	struct wpi_tx_ring	txq[WPI_NTXQUEUES];
+	struct wpi_tx_ring	txq[WPI_DRV_NTXQUEUES];
 	struct mtx		txq_mtx;
 	struct mtx		txq_state_mtx;
-	uint32_t		txq_active;
 
 	struct wpi_rx_ring	rxq;
 	uint64_t		rx_tstamp;
 
 	/* TX Thermal Callibration. */
 	struct callout		calib_to;
-	int			calib_cnt;
 
 	struct callout		scan_timeout;
 	struct callout		tx_timeout;
@@ -212,7 +211,6 @@ struct wpi_softc {
 	struct mtx		rxon_mtx;
 
 	int			temp;
-	uint32_t		qfullmsk;
 
 	uint32_t		nodesmsk;
 	struct mtx		nt_mtx;
@@ -232,13 +230,8 @@ struct wpi_softc {
 	struct wpi_dma_info	fw_dma;
 
 	/* Tasks used by the driver. */
-	struct task		sc_reinittask;
 	struct task		sc_radiooff_task;
 	struct task		sc_radioon_task;
-	struct task		sc_start_task;
-
-	/* Taskqueue */
-	struct taskqueue	*sc_tq;
 
 	/* Eeprom info. */
 	uint8_t			cap;

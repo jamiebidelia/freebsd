@@ -57,7 +57,6 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
-#include "opt_compat.h"
 #include "opt_ddb.h"
 #include "opt_kstack_pages.h"
 #include "opt_platform.h"
@@ -128,6 +127,7 @@ __FBSDID("$FreeBSD$");
 #include <ddb/ddb.h>
 
 #include <dev/ofw/openfirm.h>
+#include <dev/ofw/ofw_subr.h>
 
 int cold = 1;
 #ifdef __powerpc64__
@@ -137,9 +137,14 @@ int cacheline_size = 32;
 #endif
 int hw_direct_map = 1;
 
+#ifdef BOOKE
+extern vm_paddr_t kernload;
+#endif
+
 extern void *ap_pcpu;
 
 struct pcpu __pcpu[MAXCPU];
+static char init_kenv[2048];
 
 static struct trapframe frame0;
 
@@ -152,10 +157,19 @@ SYSINIT(cpu, SI_SUB_CPU, SI_ORDER_FIRST, cpu_startup, NULL);
 SYSCTL_INT(_machdep, CPU_CACHELINE, cacheline_size,
 	   CTLFLAG_RD, &cacheline_size, 0, "");
 
-uintptr_t	powerpc_init(vm_offset_t, vm_offset_t, vm_offset_t, void *);
+uintptr_t	powerpc_init(vm_offset_t, vm_offset_t, vm_offset_t, void *,
+		    uint32_t);
 
 long		Maxmem = 0;
 long		realmem = 0;
+
+/* Default MSR values set in the AIM/Book-E early startup code */
+register_t	psl_kernset;
+register_t	psl_userset;
+register_t	psl_userstatic;
+#ifdef __powerpc64__
+register_t	psl_userset32;
+#endif
 
 struct kva_md_info kmi;
 
@@ -176,12 +190,12 @@ cpu_startup(void *dummy)
 #ifdef PERFMON
 	perfmon_init();
 #endif
-	printf("real memory  = %ld (%ld MB)\n", ptoa(physmem),
-	    ptoa(physmem) / 1048576);
+	printf("real memory  = %ju (%ju MB)\n", ptoa((uintmax_t)physmem),
+	    ptoa((uintmax_t)physmem) / 1048576);
 	realmem = physmem;
 
 	if (bootverbose)
-		printf("available KVA = %zd (%zd MB)\n",
+		printf("available KVA = %zu (%zu MB)\n",
 		    virtual_end - virtual_avail,
 		    (virtual_end - virtual_avail) / 1048576);
 
@@ -193,23 +207,25 @@ cpu_startup(void *dummy)
 
 		printf("Physical memory chunk(s):\n");
 		for (indx = 0; phys_avail[indx + 1] != 0; indx += 2) {
-			vm_offset_t size1 =
+			vm_paddr_t size1 =
 			    phys_avail[indx + 1] - phys_avail[indx];
 
 			#ifdef __powerpc64__
-			printf("0x%016lx - 0x%016lx, %ld bytes (%ld pages)\n",
+			printf("0x%016jx - 0x%016jx, %ju bytes (%ju pages)\n",
 			#else
-			printf("0x%08x - 0x%08x, %d bytes (%ld pages)\n",
+			printf("0x%09jx - 0x%09jx, %ju bytes (%ju pages)\n",
 			#endif
-			    phys_avail[indx], phys_avail[indx + 1] - 1, size1,
-			    size1 / PAGE_SIZE);
+			    (uintmax_t)phys_avail[indx],
+			    (uintmax_t)phys_avail[indx + 1] - 1,
+			    (uintmax_t)size1, (uintmax_t)size1 / PAGE_SIZE);
 		}
 	}
 
 	vm_ksubmap_init(&kmi);
 
-	printf("avail memory = %ld (%ld MB)\n", ptoa(vm_cnt.v_free_count),
-	    ptoa(vm_cnt.v_free_count) / 1048576);
+	printf("avail memory = %ju (%ju MB)\n",
+	    ptoa((uintmax_t)vm_free_count()),
+	    ptoa((uintmax_t)vm_free_count()) / 1048576);
 
 	/*
 	 * Set up buffers, so they can be used to read disk labels.
@@ -224,30 +240,50 @@ extern unsigned char	__sbss_start[];
 extern unsigned char	__sbss_end[];
 extern unsigned char	_end[];
 
+void aim_early_init(vm_offset_t fdt, vm_offset_t toc, vm_offset_t ofentry,
+    void *mdp, uint32_t mdp_cookie);
 void aim_cpu_init(vm_offset_t toc);
 void booke_cpu_init(void);
 
 uintptr_t
-powerpc_init(vm_offset_t fdt, vm_offset_t toc, vm_offset_t ofentry, void *mdp)
+powerpc_init(vm_offset_t fdt, vm_offset_t toc, vm_offset_t ofentry, void *mdp,
+    uint32_t mdp_cookie)
 {
 	struct		pcpu *pc;
+	struct cpuref	bsp;
 	vm_offset_t	startkernel, endkernel;
-	void		*kmdp;
-        char		*env;
+	char		*env;
+        bool		ofw_bootargs = false;
 #ifdef DDB
 	vm_offset_t ksym_start;
 	vm_offset_t ksym_end;
 #endif
 
-	kmdp = NULL;
-
 	/* First guess at start/end kernel positions */
 	startkernel = __startkernel;
 	endkernel = __endkernel;
 
-	/* Check for ePAPR loader, which puts a magic value into r6 */
-	if (mdp == (void *)0x65504150)
+	/*
+	 * If the metadata pointer cookie is not set to the magic value,
+	 * the number in mdp should be treated as nonsense.
+	 */
+	if (mdp_cookie != 0xfb5d104d)
 		mdp = NULL;
+
+#if !defined(BOOKE)
+	/*
+	 * On BOOKE the BSS is already cleared and some variables
+	 * initialized.  Do not wipe them out.
+	 */
+	bzero(__sbss_start, __sbss_end - __sbss_start);
+	bzero(__bss_start, _end - __bss_start);
+#endif
+
+	cpu_feature_setup();
+
+#ifdef AIM
+	aim_early_init(fdt, toc, ofentry, mdp, mdp_cookie);
+#endif
 
 	/*
 	 * Parse metadata if present and fetch parameters.  Must be done
@@ -255,13 +291,40 @@ powerpc_init(vm_offset_t fdt, vm_offset_t toc, vm_offset_t ofentry, void *mdp)
 	 * boothowto.
 	 */
 	if (mdp != NULL) {
+		void *kmdp = NULL;
+		char *envp = NULL;
+		uintptr_t md_offset = 0;
+		vm_paddr_t kernelendphys;
+
+#ifdef AIM
+		if ((uintptr_t)&powerpc_init > DMAP_BASE_ADDRESS)
+			md_offset = DMAP_BASE_ADDRESS;
+#else /* BOOKE */
+		md_offset = VM_MIN_KERNEL_ADDRESS - kernload;
+#endif
+
 		preload_metadata = mdp;
+		if (md_offset > 0) {
+			preload_metadata += md_offset;
+			preload_bootstrap_relocate(md_offset);
+		}
 		kmdp = preload_search_by_type("elf kernel");
 		if (kmdp != NULL) {
 			boothowto = MD_FETCH(kmdp, MODINFOMD_HOWTO, int);
-			kern_envp = MD_FETCH(kmdp, MODINFOMD_ENVP, char *);
-			endkernel = ulmax(endkernel, MD_FETCH(kmdp,
-			    MODINFOMD_KERNEND, vm_offset_t));
+			envp = MD_FETCH(kmdp, MODINFOMD_ENVP, char *);
+			if (envp != NULL)
+				envp += md_offset;
+			init_static_kenv(envp, 0);
+			if (fdt == 0) {
+				fdt = MD_FETCH(kmdp, MODINFOMD_DTBP, uintptr_t);
+				if (fdt != 0)
+					fdt += md_offset;
+			}
+			kernelendphys = MD_FETCH(kmdp, MODINFOMD_KERNEND,
+			    vm_offset_t);
+			if (kernelendphys != 0)
+				kernelendphys += md_offset;
+			endkernel = ulmax(endkernel, kernelendphys);
 #ifdef DDB
 			ksym_start = MD_FETCH(kmdp, MODINFOMD_SSYM, uintptr_t);
 			ksym_end = MD_FETCH(kmdp, MODINFOMD_ESYM, uintptr_t);
@@ -269,13 +332,9 @@ powerpc_init(vm_offset_t fdt, vm_offset_t toc, vm_offset_t ofentry, void *mdp)
 #endif
 		}
 	} else {
-		bzero(__sbss_start, __sbss_end - __sbss_start);
-		bzero(__bss_start, _end - __bss_start);
+		init_static_kenv(init_kenv, sizeof(init_kenv));
+		ofw_bootargs = true;
 	}
-#ifdef BOOKE
-	tlb1_init();
-#endif
-
 	/* Store boot environment state */
 	OF_initial_setup((void *)fdt, NULL, (int (*)(void *))ofentry);
 
@@ -289,51 +348,29 @@ powerpc_init(vm_offset_t fdt, vm_offset_t toc, vm_offset_t ofentry, void *mdp)
 	 */
 	proc_linkup0(&proc0, &thread0);
 	thread0.td_frame = &frame0;
-
-	/*
-	 * Set up per-cpu data.
-	 */
-	pc = __pcpu;
-	pcpu_init(pc, 0, sizeof(struct pcpu));
-	pc->pc_curthread = &thread0;
 #ifdef __powerpc64__
-	__asm __volatile("mr 13,%0" :: "r"(pc->pc_curthread));
+	__asm __volatile("mr 13,%0" :: "r"(&thread0));
 #else
-	__asm __volatile("mr 2,%0" :: "r"(pc->pc_curthread));
+	__asm __volatile("mr 2,%0" :: "r"(&thread0));
 #endif
-	pc->pc_cpuid = 0;
-
-	__asm __volatile("mtsprg 0, %0" :: "r"(pc));
 
 	/*
 	 * Init mutexes, which we use heavily in PMAP
 	 */
-
 	mutex_init();
 
 	/*
 	 * Install the OF client interface
 	 */
-
 	OF_bootstrap();
+
+	if (ofw_bootargs)
+		ofw_parse_bootargs();
 
 	/*
 	 * Initialize the console before printing anything.
 	 */
 	cninit();
-
-	/*
-	 * Complain if there is no metadata.
-	 */
-	if (mdp == NULL || kmdp == NULL) {
-		printf("powerpc_init: no loader metadata.\n");
-	}
-
-	/*
-	 * Init KDB
-	 */
-
-	kdb_init();
 
 #ifdef AIM
 	aim_cpu_init(toc);
@@ -351,10 +388,29 @@ powerpc_init(vm_offset_t fdt, vm_offset_t toc, vm_offset_t ofentry, void *mdp)
 	platform_probe_and_attach();
 
 	/*
+	 * Set up per-cpu data for the BSP now that the platform can tell
+	 * us which that is.
+	 */
+	if (platform_smp_get_bsp(&bsp) != 0)
+		bsp.cr_cpuid = 0;
+	pc = &__pcpu[bsp.cr_cpuid];
+	__asm __volatile("mtsprg 0, %0" :: "r"(pc));
+	pcpu_init(pc, bsp.cr_cpuid, sizeof(struct pcpu));
+	pc->pc_curthread = &thread0;
+	thread0.td_oncpu = bsp.cr_cpuid;
+	pc->pc_cpuid = bsp.cr_cpuid;
+	pc->pc_hwref = bsp.cr_hwref;
+
+	/*
+	 * Init KDB
+	 */
+	kdb_init();
+
+	/*
 	 * Bring up MMU
 	 */
 	pmap_bootstrap(startkernel, endkernel);
-	mtmsr(PSL_KERNSET & ~PSL_EE);
+	mtmsr(psl_kernset & ~PSL_EE);
 
 	/*
 	 * Initialize params/tunables that are derived from memsize
@@ -392,6 +448,117 @@ powerpc_init(vm_offset_t fdt, vm_offset_t toc, vm_offset_t ofentry, void *mdp)
 	    (sizeof(struct callframe) - 3*sizeof(register_t))) & ~15UL);
 }
 
+/*
+ * Flush the D-cache for non-DMA I/O so that the I-cache can
+ * be made coherent later.
+ */
+void
+cpu_flush_dcache(void *ptr, size_t len)
+{
+	register_t addr, off;
+
+	/*
+	 * Align the address to a cacheline and adjust the length
+	 * accordingly. Then round the length to a multiple of the
+	 * cacheline for easy looping.
+	 */
+	addr = (uintptr_t)ptr;
+	off = addr & (cacheline_size - 1);
+	addr -= off;
+	len = roundup2(len + off, cacheline_size);
+
+	while (len > 0) {
+		__asm __volatile ("dcbf 0,%0" :: "r"(addr));
+		__asm __volatile ("sync");
+		addr += cacheline_size;
+		len -= cacheline_size;
+	}
+}
+
+int
+ptrace_set_pc(struct thread *td, unsigned long addr)
+{
+	struct trapframe *tf;
+
+	tf = td->td_frame;
+	tf->srr0 = (register_t)addr;
+
+	return (0);
+}
+
+void
+spinlock_enter(void)
+{
+	struct thread *td;
+	register_t msr;
+
+	td = curthread;
+	if (td->td_md.md_spinlock_count == 0) {
+		nop_prio_mhigh();
+		msr = intr_disable();
+		td->td_md.md_spinlock_count = 1;
+		td->td_md.md_saved_msr = msr;
+	} else
+		td->td_md.md_spinlock_count++;
+	critical_enter();
+}
+
+void
+spinlock_exit(void)
+{
+	struct thread *td;
+	register_t msr;
+
+	td = curthread;
+	critical_exit();
+	msr = td->td_md.md_saved_msr;
+	td->td_md.md_spinlock_count--;
+	if (td->td_md.md_spinlock_count == 0) {
+		intr_restore(msr);
+		nop_prio_medium();
+	}
+}
+
+/*
+ * Simple ddb(4) command/hack to view any SPR on the running CPU.
+ * Uses a trivial asm function to perform the mfspr, and rewrites the mfspr
+ * instruction each time.
+ * XXX: Since it uses code modification, it won't work if the kernel code pages
+ * are marked RO.
+ */
+extern register_t get_spr(int);
+
+#ifdef DDB
+DB_SHOW_COMMAND(spr, db_show_spr)
+{
+	register_t spr;
+	volatile uint32_t *p;
+	int sprno, saved_sprno;
+
+	if (!have_addr)
+		return;
+
+	saved_sprno = sprno = (intptr_t) addr;
+	sprno = ((sprno & 0x3e0) >> 5) | ((sprno & 0x1f) << 5);
+	p = (uint32_t *)(void *)&get_spr;
+#ifdef __powerpc64__
+#if defined(_CALL_ELF) && _CALL_ELF == 2
+	/* Account for ELFv2 function prologue. */
+	p += 2;
+#else
+	p = *(volatile uint32_t * volatile *)p;
+#endif
+#endif
+	*p = (*p & ~0x001ff800) | (sprno << 11);
+	__syncicache(__DEVOLATILE(uint32_t *, p), cacheline_size);
+	spr = get_spr(sprno);
+
+	db_printf("SPR %d(%x): %lx\n", saved_sprno, saved_sprno,
+	    (unsigned long)spr);
+}
+#endif
+
+#undef bzero
 void
 bzero(void *buf, size_t len)
 {
@@ -428,75 +595,3 @@ bzero(void *buf, size_t len)
 		len--;
 	}
 }
-
-/*
- * Flush the D-cache for non-DMA I/O so that the I-cache can
- * be made coherent later.
- */
-void
-cpu_flush_dcache(void *ptr, size_t len)
-{
-	register_t addr, off;
-
-	/*
-	 * Align the address to a cacheline and adjust the length
-	 * accordingly. Then round the length to a multiple of the
-	 * cacheline for easy looping.
-	 */
-	addr = (uintptr_t)ptr;
-	off = addr & (cacheline_size - 1);
-	addr -= off;
-	len = (len + off + cacheline_size - 1) & ~(cacheline_size - 1);
-
-	while (len > 0) {
-		__asm __volatile ("dcbf 0,%0" :: "r"(addr));
-		__asm __volatile ("sync");
-		addr += cacheline_size;
-		len -= cacheline_size;
-	}
-}
-
-int
-ptrace_set_pc(struct thread *td, unsigned long addr)
-{
-	struct trapframe *tf;
-
-	tf = td->td_frame;
-	tf->srr0 = (register_t)addr;
-
-	return (0);
-}
-
-void
-spinlock_enter(void)
-{
-	struct thread *td;
-	register_t msr;
-
-	td = curthread;
-	if (td->td_md.md_spinlock_count == 0) {
-		__asm __volatile("or 2,2,2"); /* Set high thread priority */
-		msr = intr_disable();
-		td->td_md.md_spinlock_count = 1;
-		td->td_md.md_saved_msr = msr;
-	} else
-		td->td_md.md_spinlock_count++;
-	critical_enter();
-}
-
-void
-spinlock_exit(void)
-{
-	struct thread *td;
-	register_t msr;
-
-	td = curthread;
-	critical_exit();
-	msr = td->td_md.md_saved_msr;
-	td->td_md.md_spinlock_count--;
-	if (td->td_md.md_spinlock_count == 0) {
-		intr_restore(msr);
-		__asm __volatile("or 6,6,6"); /* Set normal thread priority */
-	}
-}
-

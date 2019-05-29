@@ -1,11 +1,11 @@
 # $FreeBSD$
 
-TESTSDIR=	${TESTSBASE}/usr.bin/col
+PACKAGE=	tests
 
-ATF_TESTS_SH=	col
+ATF_TESTS_SH=	col_test
 
-FILES=		rlf.in \
+${PACKAGE}FILES+=	\
+		rlf.in \
 		rlf2.in
-FILESDIR=	${TESTSDIR}
 
 .include <bsd.test.mk>

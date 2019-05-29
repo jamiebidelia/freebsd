@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2014 The FreeBSD Foundation
  * All rights reserved.
  *
@@ -51,6 +53,7 @@ __FBSDID("$FreeBSD$");
 #include <errno.h>
 #include <fcntl.h>
 #include <libgen.h>
+#include <libutil.h>
 #include <netdb.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -59,8 +62,6 @@ __FBSDID("$FreeBSD$");
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-
-#include <libutil.h>
 
 #include "common.h"
 
@@ -226,7 +227,7 @@ defined_add(const char *name, const char *value)
 
 	log_debugx("defining variable %s=%s", name, value);
 
-	d = calloc(sizeof(*d), 1);
+	d = calloc(1, sizeof(*d));
 	if (d == NULL)
 		log_err(1, "calloc");
 	d->d_name = checked_strdup(name);
@@ -265,6 +266,7 @@ defined_init(void)
 
 	defined_add("ARCH", name.machine);
 	defined_add("CPU", name.machine);
+	defined_add("DOLLAR", "$");
 	defined_add("HOST", name.nodename);
 	defined_add("OSNAME", name.sysname);
 	defined_add("OSREL", name.release);

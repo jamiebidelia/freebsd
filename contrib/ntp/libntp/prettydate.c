@@ -141,7 +141,7 @@ get_struct_tm(
 			return NULL; /* That's truly pathological! */
 
 	/* 'tm' surely not NULL here! */
-	NTP_INSIST(tm != NULL);
+	INSIST(tm != NULL);
 	if (folds != 0) {
 		tm->tm_year += folds * SOLAR_CYCLE_YEARS;
 		if (tm->tm_year <= 0 || tm->tm_year >= 200)
@@ -169,6 +169,11 @@ common_prettydate(
 	vint64	     sec;
 
 	LIB_GETBUF(bp);
+
+	if (ts->l_ui == 0 && ts->l_uf == 0) {
+		strlcpy (bp, "(no time)", LIB_BUFLENGTH);
+		return (bp);
+	}
 
 	/* get & fix milliseconds */
 	ntps = ts->l_ui;

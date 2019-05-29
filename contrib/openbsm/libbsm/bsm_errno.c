@@ -25,8 +25,6 @@
  * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
  * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE. 
- *
- * $P4: //depot/projects/trustedbsd/openbsm/libbsm/bsm_errno.c#22 $
  */
 
 #include <sys/types.h>
@@ -241,6 +239,13 @@ static const struct bsm_errno bsm_errnos[] = {
 	ERRNO_NO_LOCAL_MAPPING,
 #endif
 	ES("Process died with the lock") },
+	{ BSM_ERRNO_EINTEGRITY,
+#ifdef EINTEGRITY
+	EINTEGRITY,
+#else
+	ERRNO_NO_LOCAL_MAPPING,
+#endif
+	ES("Integrity check failed") },
 	{ BSM_ERRNO_ENOTRECOVERABLE,
 #ifdef ENOTRECOVERABLE
 	ENOTRECOVERABLE,

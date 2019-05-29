@@ -13,21 +13,27 @@
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/Passes.h"
-#include "llvm/Target/TargetInstrInfo.h"
+#include "llvm/CodeGen/TargetInstrInfo.h"
+#include "llvm/CodeGen/TargetRegisterInfo.h"
+#include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/Target/TargetMachine.h"
-#include "llvm/Target/TargetRegisterInfo.h"
-#include "llvm/Target/TargetSubtargetInfo.h"
+#include <utility>
 using namespace llvm;
 
 namespace {
   class UnpackMachineBundles : public MachineFunctionPass {
   public:
     static char ID; // Pass identification
-    UnpackMachineBundles() : MachineFunctionPass(ID) {
+    UnpackMachineBundles(
+        std::function<bool(const MachineFunction &)> Ftor = nullptr)
+        : MachineFunctionPass(ID), PredicateFtor(std::move(Ftor)) {
       initializeUnpackMachineBundlesPass(*PassRegistry::getPassRegistry());
     }
 
     bool runOnMachineFunction(MachineFunction &MF) override;
+
+  private:
+    std::function<bool(const MachineFunction &)> PredicateFtor;
   };
 } // end anonymous namespace
 
@@ -37,6 +43,9 @@ INITIALIZE_PASS(UnpackMachineBundles, "unpack-mi-bundles",
                 "Unpack machine instruction bundles", false, false)
 
 bool UnpackMachineBundles::runOnMachineFunction(MachineFunction &MF) {
+  if (PredicateFtor && !PredicateFtor(MF))
+    return false;
+
   bool Changed = false;
   for (MachineFunction::iterator I = MF.begin(), E = MF.end(); I != E; ++I) {
     MachineBasicBlock *MBB = &*I;
@@ -69,6 +78,11 @@ bool UnpackMachineBundles::runOnMachineFunction(MachineFunction &MF) {
   return Changed;
 }
 
+FunctionPass *
+llvm::createUnpackMachineBundles(
+    std::function<bool(const MachineFunction &)> Ftor) {
+  return new UnpackMachineBundles(std::move(Ftor));
+}
 
 namespace {
   class FinalizeMachineBundles : public MachineFunctionPass {
@@ -91,6 +105,16 @@ bool FinalizeMachineBundles::runOnMachineFunction(MachineFunction &MF) {
   return llvm::finalizeBundles(MF);
 }
 
+/// Return the first found DebugLoc that has a DILocation, given a range of
+/// instructions. The search range is from FirstMI to LastMI (exclusive). If no
+/// DILocation is found, then an empty location is returned.
+static DebugLoc getDebugLoc(MachineBasicBlock::instr_iterator FirstMI,
+                            MachineBasicBlock::instr_iterator LastMI) {
+  for (auto MII = FirstMI; MII != LastMI; ++MII)
+    if (MII->getDebugLoc().get())
+      return MII->getDebugLoc();
+  return DebugLoc();
+}
 
 /// finalizeBundle - Finalize a machine instruction bundle which includes
 /// a sequence of instructions starting from FirstMI to LastMI (exclusive).
@@ -109,7 +133,7 @@ void llvm::finalizeBundle(MachineBasicBlock &MBB,
   const TargetRegisterInfo *TRI = MF.getSubtarget().getRegisterInfo();
 
   MachineInstrBuilder MIB =
-      BuildMI(MF, FirstMI->getDebugLoc(), TII->get(TargetOpcode::BUNDLE));
+      BuildMI(MF, getDebugLoc(FirstMI, LastMI), TII->get(TargetOpcode::BUNDLE));
   Bundle.prepend(MIB);
 
   SmallVector<unsigned, 32> LocalDefs;
@@ -121,9 +145,9 @@ void llvm::finalizeBundle(MachineBasicBlock &MBB,
   SmallSet<unsigned, 8> KilledUseSet;
   SmallSet<unsigned, 8> UndefUseSet;
   SmallVector<MachineOperand*, 4> Defs;
-  for (; FirstMI != LastMI; ++FirstMI) {
-    for (unsigned i = 0, e = FirstMI->getNumOperands(); i != e; ++i) {
-      MachineOperand &MO = FirstMI->getOperand(i);
+  for (auto MII = FirstMI; MII != LastMI; ++MII) {
+    for (unsigned i = 0, e = MII->getNumOperands(); i != e; ++i) {
+      MachineOperand &MO = MII->getOperand(i);
       if (!MO.isReg())
         continue;
       if (MO.isDef()) {
@@ -200,6 +224,15 @@ void llvm::finalizeBundle(MachineBasicBlock &MBB,
     bool isUndef = UndefUseSet.count(Reg);
     MIB.addReg(Reg, getKillRegState(isKill) | getUndefRegState(isUndef) |
                getImplRegState(true));
+  }
+
+  // Set FrameSetup/FrameDestroy for the bundle. If any of the instructions got
+  // the property, then also set it on the bundle.
+  for (auto MII = FirstMI; MII != LastMI; ++MII) {
+    if (MII->getFlag(MachineInstr::FrameSetup))
+      MIB.setMIFlag(MachineInstr::FrameSetup);
+    if (MII->getFlag(MachineInstr::FrameDestroy))
+      MIB.setMIFlag(MachineInstr::FrameDestroy);
   }
 }
 
@@ -282,15 +315,17 @@ MachineOperandIteratorBase::PhysRegInfo
 MachineOperandIteratorBase::analyzePhysReg(unsigned Reg,
                                            const TargetRegisterInfo *TRI) {
   bool AllDefsDead = true;
-  PhysRegInfo PRI = {false, false, false, false, false, false};
+  PhysRegInfo PRI = {false, false, false, false, false, false, false, false};
 
   assert(TargetRegisterInfo::isPhysicalRegister(Reg) &&
          "analyzePhysReg not given a physical register!");
   for (; isValid(); ++*this) {
     MachineOperand &MO = deref();
 
-    if (MO.isRegMask() && MO.clobbersPhysReg(Reg))
-      PRI.Clobbers = true;    // Regmask clobbers Reg.
+    if (MO.isRegMask() && MO.clobbersPhysReg(Reg)) {
+      PRI.Clobbered = true;
+      continue;
+    }
 
     if (!MO.isReg())
       continue;
@@ -299,33 +334,32 @@ MachineOperandIteratorBase::analyzePhysReg(unsigned Reg,
     if (!MOReg || !TargetRegisterInfo::isPhysicalRegister(MOReg))
       continue;
 
-    bool IsRegOrSuperReg = MOReg == Reg || TRI->isSubRegister(MOReg, Reg);
-    bool IsRegOrOverlapping = MOReg == Reg || TRI->regsOverlap(MOReg, Reg);
-
-    if (IsRegOrSuperReg && MO.readsReg()) {
-      // Reg or a super-reg is read, and perhaps killed also.
-      PRI.Reads = true;
-      PRI.Kills = MO.isKill();
-    }
-
-    if (IsRegOrOverlapping && MO.readsReg()) {
-      PRI.ReadsOverlap = true;// Reg or an overlapping register is read.
-    }
-
-    if (!MO.isDef())
+    if (!TRI->regsOverlap(MOReg, Reg))
       continue;
 
-    if (IsRegOrSuperReg) {
-      PRI.Defines = true;     // Reg or a super-register is defined.
+    bool Covered = TRI->isSuperRegisterEq(Reg, MOReg);
+    if (MO.readsReg()) {
+      PRI.Read = true;
+      if (Covered) {
+        PRI.FullyRead = true;
+        if (MO.isKill())
+          PRI.Killed = true;
+      }
+    } else if (MO.isDef()) {
+      PRI.Defined = true;
+      if (Covered)
+        PRI.FullyDefined = true;
       if (!MO.isDead())
         AllDefsDead = false;
     }
-    if (IsRegOrOverlapping)
-      PRI.Clobbers = true;    // Reg or an overlapping reg is defined.
   }
 
-  if (AllDefsDead && PRI.Defines)
-    PRI.DefinesDead = true;   // Reg or super-register was defined and was dead.
+  if (AllDefsDead) {
+    if (PRI.FullyDefined || PRI.Clobbered)
+      PRI.DeadDef = true;
+    else if (PRI.Defined)
+      PRI.PartialDeadDef = true;
+  }
 
   return PRI;
 }

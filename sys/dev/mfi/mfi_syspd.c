@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
  * are met:
@@ -37,9 +39,11 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
-#include <sys/selinfo.h>
+#include <sys/lock.h>
 #include <sys/module.h>
 #include <sys/malloc.h>
+#include <sys/mutex.h>
+#include <sys/selinfo.h>
 #include <sys/sysctl.h>
 #include <sys/uio.h>
 

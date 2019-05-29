@@ -296,14 +296,26 @@
 /* use old autokey session key behavior? */
 #undef DISABLE_BUG1243_FIX
 
+/* use old autokey session key behavior? */
+#undef DISABLE_BUG3527_FIX
+
 /* synch TODR hourly? */
 #undef DOSYNCTODR
 
 /* The number of minutes in a DST adjustment */
 #undef DSTMINUTES
 
+/* support dynamic interleave? */
+#undef DYNAMIC_INTERLEAVE
+
 /* number of args to el_init() */
 #undef EL_INIT_ARGS
+
+/* Provide the explicit 127.0.0.0/8 martian filter? */
+#undef ENABLE_BUG3020_FIX
+
+/* Enable CMAC support? */
+#undef ENABLE_CMAC
 
 /* nls support in libopts */
 #undef ENABLE_NLS
@@ -332,6 +344,9 @@
 
 /* Define to 1 if you have the <arpa/nameser.h> header file. */
 #undef HAVE_ARPA_NAMESER_H
+
+/* Define to 1 if you have the `atomic_thread_fence' function. */
+#undef HAVE_ATOMIC_THREAD_FENCE
 
 /* Do we have audio support? */
 #undef HAVE_AUDIO
@@ -363,6 +378,14 @@
 /* Define to 1 if you have the `daemon' function. */
 #undef HAVE_DAEMON
 
+/* Define to 1 if you have the declaration of `siglongjmp', and to 0 if you
+   don't. */
+#undef HAVE_DECL_SIGLONGJMP
+
+/* Define to 1 if you have the declaration of `sigsetjmp', and to 0 if you
+   don't. */
+#undef HAVE_DECL_SIGSETJMP
+
 /* Define to 1 if you have the declaration of `strerror_r', and to 0 if you
    don't. */
 #undef HAVE_DECL_STRERROR_R
@@ -385,6 +408,9 @@
 
 /* Define to 1 if you have the <errno.h> header file. */
 #undef HAVE_ERRNO_H
+
+/* Define to 1 if you have the `EVP_MD_do_all_sorted' function. */
+#undef HAVE_EVP_MD_DO_ALL_SORTED
 
 /* Define to 1 if you have the `fchmod' function. */
 #undef HAVE_FCHMOD
@@ -527,7 +553,7 @@
 /* Define to 1 if the system has the type `long long'. */
 #undef HAVE_LONG_LONG
 
-/* Define to 1 if the system has the type `long long int'. */
+/* Define to 1 if the system has the type 'long long int'. */
 #undef HAVE_LONG_LONG_INT
 
 /* if you have SunOS LWP package */
@@ -640,6 +666,12 @@
 
 /* if you have NT Threads */
 #undef HAVE_NT_THREADS
+
+/* Define to 1 if you have the <openssl/cmac.h> header file. */
+#undef HAVE_OPENSSL_CMAC_H
+
+/* Define to 1 if you have the <openssl/hmac.h> header file. */
+#undef HAVE_OPENSSL_HMAC_H
 
 /* Define to 1 if the system has the type `pid_t'. */
 #undef HAVE_PID_T
@@ -821,7 +853,10 @@
 /* Define to 1 if you have the <stdarg.h> header file. */
 #undef HAVE_STDARG_H
 
-/* Define to 1 if you have the <stdbool.h> header file. */
+/* Define to 1 if you have the <stdatomic.h> header file. */
+#undef HAVE_STDATOMIC_H
+
+/* Define to 1 if stdbool.h conforms to C99. */
 #undef HAVE_STDBOOL_H
 
 /* Define to 1 if you have the <stddef.h> header file. */
@@ -941,6 +976,9 @@
 
 /* Define to 1 if you have the <sys/lock.h> header file. */
 #undef HAVE_SYS_LOCK_H
+
+/* Define to 1 if you have the <sys/mac.h> header file. */
+#undef HAVE_SYS_MAC_H
 
 /* Define to 1 if you have the <sys/mman.h> header file. */
 #undef HAVE_SYS_MMAN_H
@@ -1102,6 +1140,9 @@
 /* Do we have the TIO serial stuff? */
 #undef HAVE_TIO_SERIAL_STUFF
 
+/* Are TrustedBSD MAC policy privileges available? */
+#undef HAVE_TRUSTEDBSD_MAC
+
 /* Define to 1 if the system has the type `uint16_t'. */
 #undef HAVE_UINT16_T
 
@@ -1132,7 +1173,7 @@
 /* deviant sigwait? */
 #undef HAVE_UNIXWARE_SIGWAIT
 
-/* Define to 1 if the system has the type `unsigned long long int'. */
+/* Define to 1 if the system has the type 'unsigned long long int'. */
 #undef HAVE_UNSIGNED_LONG_LONG_INT
 
 /* Define to 1 if you have the `updwtmp' function. */
@@ -1191,6 +1232,9 @@
 
 /* define if select implicitly yields */
 #undef HAVE_YIELDING_SELECT
+
+/* Define to 1 if the system has the type `_Bool'. */
+#undef HAVE__BOOL
 
 /* Define to 1 if you have the `_exit' function. */
 #undef HAVE__EXIT
@@ -1315,14 +1359,16 @@
 /* define to 1 if library is thread safe */
 #undef LDAP_API_FEATURE_X_OPENLDAP_THREAD_SAFE
 
+/* leap smear mechanism */
+#undef LEAP_SMEAR
+
 /* Define to any value to include libseccomp sandboxing. */
 #undef LIBSECCOMP
 
 /* Should we align with the NIST lockclock scheme? */
 #undef LOCKCLOCK
 
-/* Define to the sub-directory in which libtool stores uninstalled libraries.
-   */
+/* Define to the sub-directory where libtool stores uninstalled libraries. */
 #undef LT_OBJDIR
 
 /* Does the target support multicast IP? */
@@ -1334,6 +1380,9 @@
 /* Define to 1 if the compiler does not support C99's structure
    initialization. */
 #undef MISSING_C99_STRUCT_INIT
+
+/* having to fork the DNS worker early when doing chroot? */
+#undef NEED_EARLY_FORK
 
 /* Do we need HPUX adjtime() library support? */
 #undef NEED_HPUX_ADJTIME
@@ -1370,9 +1419,6 @@
 
 /* Should we NOT read /dev/kmem? */
 #undef NOKMEM
-
-/* Define to 1 if your C compiler doesn't accept -c and -o together. */
-#undef NO_MINUS_C_MINUS_O
 
 /* Should we avoid #warning on option name collisions? */
 #undef NO_OPTION_NAME_WARNINGS
@@ -1473,8 +1519,8 @@
 /* Do we want the SCO clock hacks? */
 #undef SCO5_CLOCK
 
-/* The size of `char*', as computed by sizeof. */
-#undef SIZEOF_CHARP
+/* The size of `char *', as computed by sizeof. */
+#undef SIZEOF_CHAR_P
 
 /* The size of `int', as computed by sizeof. */
 #undef SIZEOF_INT
@@ -1568,6 +1614,28 @@ typedef unsigned int	uintptr_t;
 /* OK to use snprintb()? */
 #undef USE_SNPRINTB
 
+/* Enable extensions on AIX 3, Interix.  */
+#ifndef _ALL_SOURCE
+# undef _ALL_SOURCE
+#endif
+/* Enable GNU extensions on systems that have them.  */
+#ifndef _GNU_SOURCE
+# undef _GNU_SOURCE
+#endif
+/* Enable threading extensions on Solaris.  */
+#ifndef _POSIX_PTHREAD_SEMANTICS
+# undef _POSIX_PTHREAD_SEMANTICS
+#endif
+/* Enable extensions on HP NonStop.  */
+#ifndef _TANDEM_SOURCE
+# undef _TANDEM_SOURCE
+#endif
+/* Enable general extensions on Solaris.  */
+#ifndef __EXTENSIONS__
+# undef __EXTENSIONS__
+#endif
+
+
 /* Can we use SIGPOLL for tty IO? */
 #undef USE_TTY_SIGPOLL
 
@@ -1620,9 +1688,6 @@ typedef unsigned int	uintptr_t;
 /* enable thread safety */
 #undef _THREAD_SAFE
 
-/* Define to 500 only on HP-UX. */
-#undef _XOPEN_SOURCE
-
 /* Are we _special_? */
 #undef __APPLE_USE_RFC_3542
 
@@ -1630,28 +1695,6 @@ typedef unsigned int	uintptr_t;
 #ifndef __CHAR_UNSIGNED__
 # undef __CHAR_UNSIGNED__
 #endif
-
-/* Enable extensions on AIX 3, Interix.  */
-#ifndef _ALL_SOURCE
-# undef _ALL_SOURCE
-#endif
-/* Enable GNU extensions on systems that have them.  */
-#ifndef _GNU_SOURCE
-# undef _GNU_SOURCE
-#endif
-/* Enable threading extensions on Solaris.  */
-#ifndef _POSIX_PTHREAD_SEMANTICS
-# undef _POSIX_PTHREAD_SEMANTICS
-#endif
-/* Enable extensions on HP NonStop.  */
-#ifndef _TANDEM_SOURCE
-# undef _TANDEM_SOURCE
-#endif
-/* Enable general extensions on Solaris.  */
-#ifndef __EXTENSIONS__
-# undef __EXTENSIONS__
-#endif
-
 
 /* deviant */
 #undef adjtimex

@@ -89,6 +89,11 @@
 /* Unix timestamp for the GPS epoch: January 6, 1980 */
 #define GPS_EPOCH 315964800
 
+/* Rata Die Number of first day of GPS epoch. This is the number of days
+ * since 0000-12-31 to 1980-01-06 in the proleptic Gregorian Calendar.
+ */
+#define RDN_GPS_EPOCH (4*146097 + 138431 + 1)
+
 /* Double short to unsigned int */
 #define DS2UI(p) ((getshort((p)[1]) << 16) | getshort((p)[0]))
 
@@ -134,8 +139,7 @@ static	void	jupiter_canmsg	(struct instance *, u_int);
 static	u_short	jupiter_cksum	(u_short *, u_int);
 static	int	jupiter_config	(struct instance *);
 static	void	jupiter_debug	(struct peer *, const char *,
-				 const char *, ...)
-			__attribute__ ((format (printf, 3, 4)));
+				 const char *, ...) NTP_PRINTF(3, 4);
 static	const char *	jupiter_parse_t	(struct instance *, u_short *);
 static	const char *	jupiter_parse_gpos	(struct instance *, u_short *);
 static	void	jupiter_platform	(struct instance *, u_int);
@@ -846,8 +850,13 @@ jupiter_parse_gpos(struct instance *instance, u_short *sp)
 		return ("Navigation solution not valid");
 	}
 
-	instance->gpos_gweek = jg->gweek;
 	instance->gpos_sweek = DS2UI(jg->sweek);
+	instance->gpos_gweek = basedate_expand_gpsweek(getshort(jg->gweek));
+
+	/* according to the protocol spec, the seconds-in-week cannot
+	 * exceed the nominal value: Is it really necessary to normalise
+	 * the seconds???
+	 */
 	while(instance->gpos_sweek >= WEEKSECS) {
 		instance->gpos_sweek -= WEEKSECS;
 		++instance->gpos_gweek;

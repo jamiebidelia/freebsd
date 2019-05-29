@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2006-2007, by Cisco Systems, Inc. All rights reserved.
  * Copyright (c) 2008-2012, by Randall Stewart. All rights reserved.
  * Copyright (c) 2008-2012, by Michael Tuexen. All rights reserved.
@@ -38,8 +40,6 @@ __FBSDID("$FreeBSD$");
 /*
  * includes
  */
-#include "opt_ipsec.h"
-#include "opt_compat.h"
 #include "opt_inet6.h"
 #include "opt_inet.h"
 #include "opt_sctp.h"
@@ -82,30 +82,20 @@ __FBSDID("$FreeBSD$");
 #include <netinet/ip_icmp.h>
 #include <netinet/icmp_var.h>
 
-#ifdef IPSEC
-#include <netipsec/ipsec.h>
-#include <netipsec/key.h>
-#endif				/* IPSEC */
-
 #ifdef INET6
 #include <sys/domain.h>
-#ifdef IPSEC
-#include <netipsec/ipsec6.h>
-#endif
 #include <netinet/ip6.h>
 #include <netinet6/ip6_var.h>
 #include <netinet6/in6_pcb.h>
-#include <netinet/icmp6.h>
 #include <netinet6/ip6protosw.h>
 #include <netinet6/nd6.h>
 #include <netinet6/scope6_var.h>
 #endif				/* INET6 */
 
-
 #include <netinet/ip_options.h>
 
 #include <crypto/sha1.h>
-#include <crypto/sha2/sha2.h>
+#include <crypto/sha2/sha256.h>
 
 #ifndef in6pcb
 #define in6pcb		inpcb
@@ -248,7 +238,6 @@ MALLOC_DECLARE(SCTP_M_MCORE);
 
 /* SCTP_ZONE_INIT: initialize the zone */
 typedef struct uma_zone *sctp_zone_t;
-
 #define SCTP_ZONE_INIT(zone, name, size, number) { \
 	zone = uma_zcreate(name, size, NULL, NULL, NULL, NULL, UMA_ALIGN_PTR,\
 		0); \
@@ -404,8 +393,8 @@ typedef struct callout sctp_os_timer_t;
 	(sb).sb_mb = NULL;	\
 	(sb).sb_mbcnt = 0;
 
-#define SCTP_SB_LIMIT_RCV(so) so->so_rcv.sb_hiwat
-#define SCTP_SB_LIMIT_SND(so) so->so_snd.sb_hiwat
+#define SCTP_SB_LIMIT_RCV(so) (SOLISTENING(so) ? so->sol_sbrcv_hiwat : so->so_rcv.sb_hiwat)
+#define SCTP_SB_LIMIT_SND(so) (SOLISTENING(so) ? so->sol_sbsnd_hiwat : so->so_snd.sb_hiwat)
 
 /*
  * routes, output, etc.
@@ -413,18 +402,8 @@ typedef struct callout sctp_os_timer_t;
 typedef struct route sctp_route_t;
 typedef struct rtentry sctp_rtentry_t;
 
-/*
- * XXX multi-FIB support was backed out in r179783 and it seems clear that the
- * VRF support as currently in FreeBSD is not ready to support multi-FIB.
- * It might be best to implement multi-FIB support for both v4 and v6 indepedent
- * of VRFs and leave those to a real MPLS stack.
- */
-#define SCTP_RTALLOC(ro, vrf_id) rtalloc_ign((struct route *)ro, 0UL)
-
-/* Future zero copy wakeup/send  function */
-#define SCTP_ZERO_COPY_EVENT(inp, so)
-/* This is re-pulse ourselves for sendbuf */
-#define SCTP_ZERO_COPY_SENDQ_EVENT(inp, so)
+#define SCTP_RTALLOC(ro, vrf_id, fibnum) \
+	rtalloc_ign_fib((struct route *)ro, 0UL, fibnum)
 
 /*
  * SCTP protocol specific mbuf flags.
@@ -466,7 +445,7 @@ sctp_get_mbuf_for_msg(unsigned int space_needed,
 /*
  * SCTP AUTH
  */
-#define SCTP_READ_RANDOM(buf, len)	read_random(buf, len)
+#define SCTP_READ_RANDOM(buf, len)	arc4rand(buf, len, 0)
 
 /* map standard crypto API names */
 #define SCTP_SHA1_CTX		SHA1_CTX
@@ -478,8 +457,6 @@ sctp_get_mbuf_for_msg(unsigned int space_needed,
 #define SCTP_SHA256_INIT	SHA256_Init
 #define SCTP_SHA256_UPDATE	SHA256_Update
 #define SCTP_SHA256_FINAL(x,y)	SHA256_Final((caddr_t)x, y)
-
-#endif
 
 #define SCTP_DECREMENT_AND_CHECK_REFCOUNT(addr) (atomic_fetchadd_int(addr, -1) == 1)
 #if defined(INVARIANTS)
@@ -500,4 +477,8 @@ sctp_get_mbuf_for_msg(unsigned int space_needed,
 		*addr = 0; \
 	} \
 }
+#endif
+
+#define SCTP_IS_LISTENING(inp) ((inp->sctp_flags & SCTP_PCB_FLAGS_ACCEPTING) != 0)
+
 #endif

@@ -2,11 +2,14 @@
 
 .include <bsd.own.mk>
 
-TESTSDIR=	${TESTSBASE}/cddl/usr.sbin/dtrace
 TESTS_SUBDIRS+=	common
 
-.PATH:		${.CURDIR:H:H:H:H}/tests
-KYUAFILE=	YES
+.if ${MACHINE_CPUARCH} == "i386"
+TESTS_SUBDIRS+= i386
+.endif
+
+.PATH:		${SRCTOP}/tests
+KYUAFILE=	yes
 
 .PATH:		${.CURDIR}/tools
 SCRIPTSDIR=	${TESTSDIR}

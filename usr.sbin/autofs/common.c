@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2014 The FreeBSD Foundation
  * All rights reserved.
  *
@@ -47,18 +49,16 @@ __FBSDID("$FreeBSD$");
 #include <errno.h>
 #include <fcntl.h>
 #include <libgen.h>
+#include <libutil.h>
 #include <netdb.h>
 #include <paths.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
-#define	_WITH_GETLINE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-
-#include <libutil.h>
 
 #include "autofs_ioctl.h"
 
@@ -365,7 +365,7 @@ expand_ampersand(char *string, const char *key)
 		 * of characters before the '&'.
 		 */
 		before_len = i;
-		//assert(i + 1 < (int)strlen(string));
+		//assert(i < (int)strlen(string));
 
 		ret = asprintf(&expanded, "%.*s%s%s",
 		    before_len, string, key, string + before_len + 1);
@@ -380,6 +380,8 @@ expand_ampersand(char *string, const char *key)
 		 */
 		string = expanded;
 		i = before_len + strlen(key);
+		if (i == (int)strlen(string))
+			break;
 		backslashed = false;
 		//assert(i < (int)strlen(string));
 	}

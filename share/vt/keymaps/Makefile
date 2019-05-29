@@ -18,6 +18,7 @@ FILES=	INDEX.keymaps \
 	ch.acc.kbd \
 	ch.kbd \
 	ch.macbook.acc.kbd \
+	colemak-dh.acc.kbd \
 	colemak.acc.kbd \
 	cz.kbd \
 	de.acc.kbd \
@@ -48,8 +49,6 @@ FILES=	INDEX.keymaps \
 	it.kbd \
 	jp.capsctrl.kbd \
 	jp.kbd \
-	jp.pc98.iso.kbd \
-	jp.pc98.kbd \
 	kz.io.kbd \
 	kz.kst.kbd \
 	latinamerican.acc.kbd \
@@ -69,12 +68,14 @@ FILES=	INDEX.keymaps \
 	se.kbd \
 	si.kbd \
 	sk.kbd \
+	tr.f.kbd \
 	tr.kbd \
 	ua.kbd \
 	ua.shift.alt.kbd \
 	uk.capsctrl.kbd \
 	uk.dvorak.kbd \
 	uk.kbd \
+	uk.macbook.kbd \
 	us.acc.kbd \
 	us.ctrl.kbd \
 	us.dvorak.kbd \
@@ -84,10 +85,9 @@ FILES=	INDEX.keymaps \
 	us.dvorakx.kbd \
 	us.emacs.kbd \
 	us.kbd \
+	us.macbook.kbd \
 	us.unix.kbd \
 
 FILESDIR= ${SHAREDIR}/vt/keymaps
-
-NO_OBJ=
 
 .include <bsd.prog.mk>

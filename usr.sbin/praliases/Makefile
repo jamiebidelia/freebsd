@@ -1,7 +1,7 @@
 #	@(#)Makefile	8.2 (Berkeley) 9/21/96
 # $FreeBSD$
 
-SENDMAIL_DIR=	${.CURDIR}/../../contrib/sendmail
+SENDMAIL_DIR=	${SRCTOP}/contrib/sendmail
 .PATH: ${SENDMAIL_DIR}/praliases
 
 PROG=	praliases
@@ -24,7 +24,7 @@ LDFLAGS+=${SENDMAIL_LDFLAGS}
 DPADD+=	${SENDMAIL_DPADD}
 LDADD+=	${SENDMAIL_LDADD}
 
-sm_os.h:
-	ln -sf ${SENDMAIL_DIR}/include/sm/os/sm_os_freebsd.h sm_os.h
+sm_os.h: ${SENDMAIL_DIR}/include/sm/os/sm_os_freebsd.h .NOMETA
+	ln -sf ${.ALLSRC} ${.TARGET}
 
 .include <bsd.prog.mk>

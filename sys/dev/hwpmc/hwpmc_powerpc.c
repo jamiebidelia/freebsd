@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2011,2013 Justin Hibbits
  * Copyright (c) 2005, Joseph Koshy
  * All rights reserved.
@@ -178,6 +180,7 @@ pmc_md_initialize()
 	case FSL_E500v1:
 	case FSL_E500v2:
 	case FSL_E500mc:
+	case FSL_E5500:
 		error = pmc_e500_initialize(pmc_mdep);
 		break;
 	default:

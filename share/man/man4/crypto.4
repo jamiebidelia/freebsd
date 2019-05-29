@@ -60,7 +60,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd December 12, 2014
+.Dd September 21, 2017
 .Dt CRYPTO 4
 .Os
 .Sh NAME
@@ -79,7 +79,7 @@ The
 .Nm
 driver gives user-mode applications access to hardware-accelerated
 cryptographic transforms, as implemented by the
-.Xr opencrypto 9
+.Xr crypto 9
 in-kernel interface.
 .Pp
 The
@@ -99,9 +99,6 @@ variables,
 .Ic kern.userasymcrypto
 and
 .Ic kern.cryptodevallowsoft .
-See
-.Xr sysctl 7
-for additional details.
 .Pp
 The
 .Nm
@@ -130,7 +127,9 @@ Asymmetric operations do not use sessions.
 .It
 Submit requests, synchronously with
 .Dv CIOCCRYPT
-(symmetric)
+(symmetric),
+.Dv CIOCCRYPTAEAD
+(symmetric),
 or
 .Dv CIOCKEY
 (asymmetric).
@@ -282,6 +281,16 @@ supplies the length of the input buffer; the fields
 .Fa cr_op-\*[Gt]iv
 supply the addresses of the input buffer, output buffer,
 one-way hash, and initialization vector, respectively.
+If a session is using both a privacy algorithm and a hash algorithm,
+the request will generate a hash of the input buffer before
+generating the output buffer by default.
+If the
+.Dv COP_F_CIPHER_FIRST
+flag is included in the
+.Fa cr_op-\*[Gt]flags
+field,
+then the request will generate a hash of the output buffer after
+executing the privacy algorithm.
 .It Dv CIOCCRYPTAEAD Fa struct crypt_aead *cr_aead
 .Bd -literal
 struct crypt_aead {

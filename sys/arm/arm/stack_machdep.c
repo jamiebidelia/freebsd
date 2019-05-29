@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2005 Antoine Brodin
  * All rights reserved.
  *
@@ -27,8 +29,8 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
-#include <sys/systm.h>
 #include <sys/param.h>
+#include <sys/systm.h>
 #include <sys/proc.h>
 #include <sys/stack.h>
 
@@ -69,6 +71,13 @@ stack_save_td(struct stack *st, struct thread *td)
 	frame = (u_int32_t *)td->td_pcb->pcb_regs.sf_r11;
 	stack_zero(st);
 	stack_capture(st, frame);
+}
+
+int
+stack_save_td_running(struct stack *st, struct thread *td)
+{
+
+	return (EOPNOTSUPP);
 }
 
 void

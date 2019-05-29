@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2005
+ * Copyright (c) 2004-2005,2018
  *	Hartmut Brandt.
  *	All rights reserved.
  * Copyright (c) 2001-2003
@@ -8,7 +8,7 @@
  *
  * Author: Harti Brandt <harti@freebsd.org>
  *         Kendy Kutzner
- * 
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
  * are met:
@@ -17,7 +17,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 
+ *
  * THIS SOFTWARE IS PROVIDED BY AUTHOR AND CONTRIBUTORS ``AS IS'' AND
  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
@@ -34,11 +34,13 @@
  *
  * Support functions for SNMP clients.
  */
-#include <sys/types.h>
+#include <sys/param.h>
 #include <sys/time.h>
 #include <sys/queue.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <net/if.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
@@ -58,17 +60,21 @@
 #include <err.h>
 #endif
 
+#include <arpa/inet.h>
+
 #include "support.h"
 #include "asn1.h"
 #include "snmp.h"
 #include "snmpclient.h"
 #include "snmppriv.h"
 
+#define	DEBUG_PARSE	0
+
 /* global context */
 struct snmp_client snmp_client;
 
 /* List of all outstanding requests */
-struct sent_pdu {	
+struct sent_pdu {
 	int		reqid;
 	struct snmp_pdu	*pdu;
 	struct timeval	time;
@@ -510,7 +516,7 @@ table_check_response(struct tabwork *work, const struct snmp_pdu *resp)
 				table_free(work, 1);
 				return (-2);
 			}
-					
+
 			continue;
 		}
 		if (!asn_is_suboid(&work->descr->table, &b->var) ||
@@ -728,8 +734,11 @@ snmp_table_fetch_async(const struct snmp_table *descr, void *list,
 	work->last_change = 0;
 	table_init_pdu(descr, &work->pdu);
 
-	if (snmp_pdu_send(&work->pdu, table_cb, work) == -1)
+	if (snmp_pdu_send(&work->pdu, table_cb, work) == -1) {
+		free(work);
+		work = NULL;
 		return (-1);
+	}
 	return (0);
 }
 
@@ -754,7 +763,7 @@ snmp_oid_append(struct asn_oid *oid, const char *fmt, ...)
 	ret = 0;
 	while (*fmt != '\0') {
 		switch (*fmt++) {
-		  case 'i': 
+		  case 'i':
 			/* just an integer more */
 			if (oid->len + 1 > ASN_MAXOIDLEN) {
 				warnx("%s: OID too long for integer", __func__);
@@ -804,7 +813,7 @@ snmp_oid_append(struct asn_oid *oid, const char *fmt, ...)
 			break;
 
 		  case 'b':
-			/* append `size` characters */ 
+			/* append `size` characters */
 			str = (const u_char *)va_arg(va, const char *);
 			if (oid->len + size > ASN_MAXOIDLEN) {
 				warnx("%s: OID too long for string", __func__);
@@ -852,7 +861,7 @@ snmp_client_init(struct snmp_client *c)
 
 	strcpy(c->read_community, "public");
 	strcpy(c->write_community, "private");
-	
+
 	c->security_model = SNMP_SECMODEL_USM;
 	strcpy(c->cname, "");
 
@@ -863,7 +872,7 @@ snmp_client_init(struct snmp_client *c)
 	c->txbuflen = c->rxbuflen = 10000;
 
 	c->fd = -1;
-	
+
 	c->max_reqid = INT32_MAX;
 	c->min_reqid = 0;
 	c->next_reqid = 0;
@@ -921,7 +930,8 @@ open_client_udp(const char *host, const char *port)
 	/* open connection */
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_flags = AI_CANONNAME;
-	hints.ai_family = AF_INET;
+	hints.ai_family = snmp_client.trans == SNMP_TRANS_UDP ? AF_INET:
+	    AF_INET6;
 	hints.ai_socktype = SOCK_DGRAM;
 	hints.ai_protocol = 0;
 	error = getaddrinfo(snmp_client.chost, snmp_client.cport, &hints, &res0);
@@ -944,6 +954,8 @@ open_client_udp(const char *host, const char *port)
 			if ((res = res->ai_next) == NULL) {
 				seterr(&snmp_client, "%s", strerror(errno));
 				freeaddrinfo(res0);
+				(void)close(snmp_client.fd);
+				snmp_client.fd = -1;
 				return (-1);
 			}
 		} else
@@ -1063,13 +1075,14 @@ snmp_open(const char *host, const char *port, const char *readcomm,
 	switch (snmp_client.trans) {
 
 	  case SNMP_TRANS_UDP:
-		if (open_client_udp(host, port))
+	  case SNMP_TRANS_UDP6:
+		if (open_client_udp(host, port) != 0)
 			return (-1);
 		break;
 
 	  case SNMP_TRANS_LOC_DGRAM:
 	  case SNMP_TRANS_LOC_STREAM:
-		if (open_client_local(host))
+		if (open_client_local(host) != 0)
 			return (-1);
 		break;
 
@@ -1214,7 +1227,7 @@ snmp_next_reqid(struct snmp_client * c)
 	int32_t i;
 
 	i = c->next_reqid;
-	if (c->next_reqid >= c->max_reqid)	
+	if (c->next_reqid >= c->max_reqid)
 		c->next_reqid = c->min_reqid;
 	else
 		c->next_reqid++;
@@ -1227,36 +1240,36 @@ snmp_next_reqid(struct snmp_client * c)
 static int32_t
 snmp_send_packet(struct snmp_pdu * pdu)
 {
-        u_char *buf;
-        struct asn_buf b;
-        ssize_t ret;
- 
-	if ((buf = malloc(snmp_client.txbuflen)) == NULL) {
+	u_char *buf;
+	struct asn_buf b;
+	ssize_t ret;
+
+	if ((buf = calloc(1, snmp_client.txbuflen)) == NULL) {
 		seterr(&snmp_client, "%s", strerror(errno));
 		return (-1);
 	}
 
-        pdu->request_id = snmp_next_reqid(&snmp_client);
+	pdu->request_id = snmp_next_reqid(&snmp_client);
 
-        b.asn_ptr = buf; 
-        b.asn_len = snmp_client.txbuflen;
-        if (snmp_pdu_encode(pdu, &b)) {
+	b.asn_ptr = buf;
+	b.asn_len = snmp_client.txbuflen;
+	if (snmp_pdu_encode(pdu, &b)) {
 		seterr(&snmp_client, "%s", strerror(errno));
 		free(buf);
 		return (-1);
 	}
 
-        if (snmp_client.dump_pdus)
-                snmp_pdu_dump(pdu);
+	if (snmp_client.dump_pdus)
+		snmp_pdu_dump(pdu);
 
-        if ((ret = send(snmp_client.fd, buf, b.asn_ptr - buf, 0)) == -1) {
+	if ((ret = send(snmp_client.fd, buf, b.asn_ptr - buf, 0)) == -1) {
 		seterr(&snmp_client, "%s", strerror(errno));
 		free(buf);
-                return (-1);
+		return (-1);
 	}
 	free(buf);
 
-	return pdu->request_id;
+	return (pdu->request_id);
 }
 
 /*
@@ -1269,7 +1282,7 @@ snmp_timeout(void * listentry_ptr)
 
 #if 0
 	warnx("snmp request %i timed out, attempt (%i/%i)",
-	    listentry->reqid, listentry->retrycount, snmp_client.retries); 
+	    listentry->reqid, listentry->retrycount, snmp_client.retries);
 #endif
 
 	listentry->retrycount++;
@@ -1314,7 +1327,7 @@ snmp_pdu_send(struct snmp_pdu *pdu, snmp_send_cb_f func, void *arg)
 	listentry->callback = func;
 	listentry->arg = arg;
 	listentry->retrycount=1;
-	listentry->timeout_id = 
+	listentry->timeout_id =
 	    snmp_client.timeout_start(&snmp_client.timeout, snmp_timeout,
 	    listentry);
 
@@ -1352,7 +1365,7 @@ snmp_receive_packet(struct snmp_pdu *pdu, struct timeval *tv)
 	socklen_t optlen;
 #endif
 
-	if ((buf = malloc(snmp_client.rxbuflen)) == NULL) {
+	if ((buf = calloc(1, snmp_client.rxbuflen)) == NULL) {
 		seterr(&snmp_client, "%s", strerror(errno));
 		return (-1);
 	}
@@ -1463,7 +1476,7 @@ snmp_receive_packet(struct snmp_pdu *pdu, struct timeval *tv)
 	return (+1);
 }
 
-static int 
+static int
 snmp_deliver_packet(struct snmp_pdu * resp)
 {
 	struct sent_pdu *listentry;
@@ -1548,7 +1561,7 @@ ok_getnext(const struct snmp_pdu * req, const struct snmp_pdu * resp)
 		    &resp->bindings[i].var)) {
 			if (i != 0)
 				warnx("SNMP GETNEXT: inconsistent table "
-				      "response");
+				    "response");
 			return (0);
 		}
 		if (resp->version != SNMP_V1 &&
@@ -1654,7 +1667,7 @@ ok_set(const struct snmp_pdu * req, const struct snmp_pdu * resp)
 
 /*
  * Simple checks for response PDUs against request PDUs. Return values: 1=ok,
- * 0=nosuchname or similar, -1=failure, -2=no response at all 
+ * 0=nosuchname or similar, -1=failure, -2=no response at all
  */
 int
 snmp_pdu_check(const struct snmp_pdu *req,
@@ -1681,12 +1694,12 @@ snmp_pdu_check(const struct snmp_pdu *req,
 int
 snmp_dialog(struct snmp_v1_pdu *req, struct snmp_v1_pdu *resp)
 {
-        u_int i;
-        int32_t reqid;
-	int ret;
-        struct timeval tv = snmp_client.timeout;
+	struct timeval tv = snmp_client.timeout;
 	struct timeval end;
 	struct snmp_pdu pdu;
+	int ret;
+	int32_t reqid;
+	u_int i;
 
 	/*
 	 * Make a copy of the request and replace the syntaxes by NULL
@@ -1698,11 +1711,11 @@ snmp_dialog(struct snmp_v1_pdu *req, struct snmp_v1_pdu *resp)
 		for (i = 0; i < pdu.nbindings; i++)
 			pdu.bindings[i].syntax = SNMP_SYNTAX_NULL;
 	}
-	
-        for (i = 0; i <= snmp_client.retries; i++) {
+
+	for (i = 0; i <= snmp_client.retries; i++) {
 		(void)gettimeofday(&end, NULL);
 		timeradd(&end, &snmp_client.timeout, &end);
-                if ((reqid = snmp_send_packet(&pdu)) == -1)
+		if ((reqid = snmp_send_packet(&pdu)) == -1)
 			return (-1);
 		for (;;) {
 			(void)gettimeofday(&tv, NULL);
@@ -1717,16 +1730,16 @@ snmp_dialog(struct snmp_v1_pdu *req, struct snmp_v1_pdu *resp)
 				if (reqid == resp->request_id)
 					return (0);
 				/* not for us */
-				(void)snmp_deliver_packet(resp);  
+				(void)snmp_deliver_packet(resp);
 			}
 			if (ret < 0 && errno == EPIPE)
 				/* stream closed */
 				return (-1);
 		}
-        }
+	}
 	errno = ETIMEDOUT;
 	seterr(&snmp_client, "retry count exceeded");
-        return (-1);
+	return (-1);
 }
 
 int
@@ -1793,12 +1806,14 @@ snmp_discover_engine(char *passwd)
 		return (0);
 	}
 
+	snmp_pdu_free(&req);
+
 	snmp_pdu_create(&req, SNMP_PDU_GET);
 	req.engine.engine_boots = 0;
 	req.engine.engine_time = 0;
 
 	if (snmp_dialog(&req, &resp) == -1)
-		 return (-1);
+		return (-1);
 
 	if (resp.version != req.version) {
 		seterr(&snmp_client, "wrong version");
@@ -1812,6 +1827,9 @@ snmp_discover_engine(char *passwd)
 
 	snmp_client.engine.engine_boots = resp.engine.engine_boots;
 	snmp_client.engine.engine_time = resp.engine.engine_time;
+
+	snmp_pdu_free(&req);
+	snmp_pdu_free(&resp);
 
 	return (0);
 }
@@ -1856,101 +1874,412 @@ snmp_client_set_port(struct snmp_client *cl, const char *p)
 	return (0);
 }
 
-/*
- * parse a server specification
+static const char *const trans_list[] = {
+	[SNMP_TRANS_UDP]	= "udp::",
+	[SNMP_TRANS_LOC_DGRAM]	= "dgram::",
+	[SNMP_TRANS_LOC_STREAM]	= "stream::",
+	[SNMP_TRANS_UDP6]	= "udp6::",
+};
+
+/**
+ * Try to get a transport identifier which is a leading alphanumeric string
+ * terminated by a double colon. The string may not be empty. The transport
+ * identifier is optional.
  *
- * [trans::][community@][server][:port]
+ * \param sc	client struct to set errors
+ * \param strp	possible start of transport; updated to point to
+ *		the next character to parse
+ *
+ * \return	transport identifier
+ */
+static inline int
+get_transp(struct snmp_client *sc, const char **strp)
+{
+	const char *p;
+	size_t i;
+
+	for (i = 0; i < nitems(trans_list); i++) {
+		if (trans_list[i] == NULL || *trans_list[i] == '\0')
+			continue;
+		p = strstr(*strp, trans_list[i]);
+		if (p == *strp) {
+			*strp += strlen(trans_list[i]);
+			return ((int)i);
+		}
+	}
+
+	p = *strp;
+	if (p[0] == ':' && p[1] == ':') {
+		seterr(sc, "empty transport specifier");
+		return (-1);
+	}
+	/* by default assume UDP */
+	return (SNMP_TRANS_UDP);
+}
+
+/**
+ * Try to get community string. Eat everything up to the last @ (if there is
+ * any) but only if it is not longer than SNMP_COMMUNITY_MAXLEN. Empty
+ * community strings are legal.
+ *
+ * \param sc	client struct to set errors
+ * \param strp	possible start of community; updated to the point to
+ *		the next character to parse
+ *
+ * \return	end of community; equals *strp if there is none; NULL if there
+ *		was an error
+ */
+static inline const char *
+get_comm(struct snmp_client *sc, const char **strp)
+{
+	const char *p = strrchr(*strp, '@');
+
+	if (p == NULL)
+		/* no community string */
+		return (*strp);
+
+	if (p - *strp > SNMP_COMMUNITY_MAXLEN) {
+		seterr(sc, "community string too long '%.*s'",
+		    p - *strp, *strp);
+		return (NULL);
+	}
+
+	*strp = p + 1;
+	return (p);
+}
+
+/**
+ * Try to get an IPv6 address. This starts with an [ and should end with an ]
+ * and everything between should be not longer than INET6_ADDRSTRLEN and
+ * parseable by inet_pton().
+ *
+ * \param sc	client struct to set errors
+ * \param strp	possible start of IPv6 address (the '['); updated to point to
+ *		the next character to parse (the one after the closing ']')
+ *
+ * \return	end of address (equals *strp + 1 if there is none) or NULL
+ *		on errors
+ */
+static inline const char *
+get_ipv6(struct snmp_client *sc, const char **strp)
+{
+	char str[INET6_ADDRSTRLEN + IF_NAMESIZE];
+	struct addrinfo hints, *res;
+	int error;
+
+	if (**strp != '[')
+		return (*strp + 1);
+
+	const char *p = *strp + 1;
+	while (*p != ']' ) {
+		if (*p == '\0') {
+			seterr(sc, "unterminated IPv6 address '%.*s'",
+			    p - *strp, *strp);
+			return (NULL);
+		}
+		p++;
+	}
+
+	if (p - *strp > INET6_ADDRSTRLEN + IF_NAMESIZE) {
+		seterr(sc, "IPv6 address too long '%.*s'", p - *strp, *strp);
+		return (NULL);
+	}
+
+	strncpy(str, *strp + 1, p - (*strp + 1));
+	str[p - (*strp + 1)] = '\0';
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_flags = AI_CANONNAME | AI_NUMERICHOST;
+	hints.ai_family = AF_INET6;
+	hints.ai_socktype = SOCK_DGRAM;
+	hints.ai_protocol = IPPROTO_UDP;
+	error = getaddrinfo(str, NULL, &hints, &res);
+	if (error != 0) {
+		seterr(sc, "%s: %s", str, gai_strerror(error));
+		return (NULL);
+	}
+	freeaddrinfo(res);
+	*strp = p + 1;
+	return (p);
+}
+
+/**
+ * Try to get an IPv4 address. This starts with a digit and consists of digits
+ * and dots, is not longer INET_ADDRSTRLEN and must be parseable by
+ * inet_aton().
+ *
+ * \param sc	client struct to set errors
+ * \param strp	possible start of IPv4 address; updated to point to the
+ *		next character to parse
+ *
+ * \return	end of address (equals *strp if there is none) or NULL
+ *		on errors
+ */
+static inline const char *
+get_ipv4(struct snmp_client *sc, const char **strp)
+{
+	const char *p = *strp;
+
+	while (isascii(*p) && (isdigit(*p) || *p == '.'))
+		p++;
+
+	if (p - *strp > INET_ADDRSTRLEN) {
+		seterr(sc, "IPv4 address too long '%.*s'", p - *strp, *strp);
+		return (NULL);
+	}
+	if (*strp == p)
+		return *strp;
+
+	char str[INET_ADDRSTRLEN + 1];
+	strncpy(str, *strp, p - *strp);
+	str[p - *strp] = '\0';
+
+	struct in_addr addr;
+	if (inet_aton(str, &addr) != 1) {
+		seterr(sc, "illegal IPv4 address '%s'", str);
+		return (NULL);
+	}
+
+	*strp = p;
+	return (p);
+}
+
+/**
+ * Try to get a hostname. This includes everything up to but not including
+ * the last colon (if any). There is no length restriction.
+ *
+ * \param sc	client struct to set errors
+ * \param strp	possible start of hostname; updated to point to the next
+ *		character to parse (the trailing NUL character or the last
+ *		colon)
+ *
+ * \return	end of address (equals *strp if there is none)
+ */
+static inline const char *
+get_host(struct snmp_client *sc __unused, const char **strp)
+{
+	const char *p = strrchr(*strp, ':');
+
+	if (p == NULL) {
+		*strp += strlen(*strp);
+		return (*strp);
+	}
+
+	*strp = p;
+	return (p);
+}
+
+/**
+ * Try to get a port number. This start with a colon and extends to the end
+ * of string. The port number must not be empty.
+ *
+ * \param sc	client struct to set errors
+ * \param strp	possible start of port specification; if this points to a
+ *		colon there is a port specification
+ *
+ * \return	end of port number (equals *strp if there is none); NULL
+ *		if there is no port number
+ */
+static inline const char *
+get_port(struct snmp_client *sc, const char **strp)
+{
+	if (**strp != ':')
+		return (*strp + 1);
+
+	if ((*strp)[1] == '\0') {
+		seterr(sc, "empty port name");
+		return (NULL);
+	}
+
+	*strp += strlen(*strp);
+	return (*strp);
+}
+
+/**
+ * Save the string in the range given by two pointers.
+ *
+ * \param sc	client struct to set errors
+ * \param s	begin and end pointers
+ *
+ * \return freshly allocated copy of the string between s[0] and s[1]
+ */
+static inline char *
+save_str(struct snmp_client *sc, const char *const s[2])
+{
+	char *m;
+
+	if ((m = malloc(s[1] - s[0] + 1)) == NULL) {
+		seterr(sc, "%s: %s", __func__, strerror(errno));
+		return (NULL);
+	}
+	strncpy(m, s[0], s[1] - s[0]);
+	m[s[1] - s[0]] = '\0';
+
+	return (m);
+}
+
+/**
+ * Parse a server specification. All parts are optional:
+ *
+ * [<trans>::][<comm>@][<host-or-ip>][:<port>]
+ *
+ * The transport string consists of letters, digits or '_' and starts with
+ * a letter or digit. It is terminated by two colons and may not be empty.
+ *
+ * The community string is terminated by the last '@' and does not exceed
+ * SNMP_COMMUNITY_MAXLEN. It may be empty.
+ *
+ * The host or ip is either an IPv4 address (as parsed by inet_pton()), an
+ * IPv6 address in '[' and ']' and parseable by inet_aton() or a hostname
+ * terminated by the last colon or by the NUL character.
+ *
+ * The port number may be specified numerically or symbolically and starts
+ * with the last colon.
+ *
+ * The functions sets the chost, cport, trans, read_community and
+ * write_community fields on success and the error field on errors.
+ * The chost and cport fields are allocated by malloc(3), their previous
+ * content is deallocated by free(3).
+ *
+ * The function explicitly allows mismatches between the transport and
+ * the address type in order to support IPv4 in IPv6 addresses.
+ *
+ * \param sc	client struct to fill
+ * \param str	string to parse
+ *
+ * \return 0 on success and -1 on errors
  */
 int
 snmp_parse_server(struct snmp_client *sc, const char *str)
 {
-	const char *p, *s = str;
+	const char *const orig = str;
+	/* parse input */
+	int i, trans = get_transp(sc, &str);
+	if (trans < 0)
+		return (-1);
+	/* choose automatically */
+	i = orig == str ? -1: trans;
 
-	/* look for a double colon */
-	for (p = s; *p != '\0'; p++) {
-		if (*p == '\\' && p[1] != '\0') {
-			p++;
-			continue;
-		}
-		if (*p == ':' && p[1] == ':')
-			break;
-	}
-	if (*p != '\0') {
-		if (p > s) {
-			if (p - s == 3 && strncmp(s, "udp", 3) == 0)
-				sc->trans = SNMP_TRANS_UDP;
-			else if (p - s == 6 && strncmp(s, "stream", 6) == 0)
-				sc->trans = SNMP_TRANS_LOC_STREAM;
-			else if (p - s == 5 && strncmp(s, "dgram", 5) == 0)
-				sc->trans = SNMP_TRANS_LOC_DGRAM;
-			else {
-				seterr(sc, "unknown SNMP transport '%.*s'",
-				    (int)(p - s), s);
-				return (-1);
-			}
-		}
-		s = p + 2;
+	const char *const comm[2] = {
+		str,
+		get_comm(sc, &str),
+	};
+	if (comm[1] == NULL)
+		return (-1);
+
+	const char *const ipv6[2] = {
+		str + 1,
+		get_ipv6(sc, &str),
+	};
+	if (ipv6[1] == NULL)
+		return (-1);
+
+	const char *ipv4[2] = {
+		str,
+		str,
+	};
+
+	const char *host[2] = {
+		str,
+		str,
+	};
+
+	if (ipv6[0] == ipv6[1]) {
+		ipv4[1] = get_ipv4(sc, &str);
+
+		if (ipv4[0] == ipv4[1])
+			host[1] = get_host(sc, &str);
 	}
 
-	/* look for a @ */
-	for (p = s; *p != '\0'; p++) {
-		if (*p == '\\' && p[1] != '\0') {
-			p++;
-			continue;
-		}
-		if (*p == '@')
-			break;
+	const char *port[2] = {
+		str + 1,
+		get_port(sc, &str),
+	};
+	if (port[1] == NULL)
+		return (-1);
+
+	if (*str != '\0') {
+		seterr(sc, "junk at end of server specification '%s'", str);
+		return (-1);
 	}
 
-	if (*p != '\0') {
-		if (p - s > SNMP_COMMUNITY_MAXLEN) {
-			seterr(sc, "community string too long");
+#if DEBUG_PARSE
+	printf("transp: %u\n", trans);
+	printf("comm:   %zu %zu\n", comm[0] - orig, comm[1] - orig);
+	printf("ipv6:   %zu %zu\n", ipv6[0] - orig, ipv6[1] - orig);
+	printf("ipv4:   %zu %zu\n", ipv4[0] - orig, ipv4[1] - orig);
+	printf("host:   %zu %zu\n", host[0] - orig, host[1] - orig);
+	printf("port:   %zu %zu\n", port[0] - orig, port[1] - orig);
+#endif
+
+	/* analyse and allocate */
+	char *chost;
+
+	if (ipv6[0] != ipv6[1]) {
+		if ((chost = save_str(sc, ipv6)) == NULL)
 			return (-1);
-		}
-		strncpy(sc->read_community, s, p - s);
-		sc->read_community[p - s] = '\0';
-		strncpy(sc->write_community, s, p - s);
-		sc->write_community[p - s] = '\0';
-		s = p + 1;
-	}
-
-	/* look for a colon */
-	for (p = s; *p != '\0'; p++) {
-		if (*p == '\\' && p[1] != '\0') {
-			p++;
-			continue;
-		}
-		if (*p == ':')
-			break;
-	}
-
-	if (*p == ':') {
-		if (p > s) {
-			/* host:port */
-			free(sc->chost);
-			if ((sc->chost = malloc(p - s + 1)) == NULL) {
-				seterr(sc, "%s", strerror(errno));
-				return (-1);
-			}
-			strncpy(sc->chost, s, p - s);
-			sc->chost[p - s] = '\0';
-		}
-		/* port */
-		free(sc->cport);
-		if ((sc->cport = malloc(strlen(p + 1) + 1)) == NULL) {
-			seterr(sc, "%s", strerror(errno));
+		if (i == -1 || trans == SNMP_TRANS_UDP)
+			trans = SNMP_TRANS_UDP6;
+	} else if (ipv4[0] != ipv4[1]) {
+		if ((chost = save_str(sc, ipv4)) == NULL)
 			return (-1);
-		}
-		strcpy(sc->cport, p + 1);
-
-	} else if (p > s) {
-		/* host */
-		free(sc->chost);
-		if ((sc->chost = malloc(strlen(s) + 1)) == NULL) {
-			seterr(sc, "%s", strerror(errno));
+		if (i == -1)
+			trans = SNMP_TRANS_UDP;
+	} else {
+		if ((chost = save_str(sc, host)) == NULL)
 			return (-1);
+
+		if (i == -1) {
+			/*
+			 * Default transport is UDP unless the host contains
+			 * a slash in which case we default to DGRAM.
+			 */
+			for (const char *p = host[0]; p < host[1]; p++)
+				if (*p == '/') {
+					trans = SNMP_TRANS_LOC_DGRAM;
+					break;
+				}
 		}
-		strcpy(sc->chost, s);
 	}
+
+	char *cport;
+
+	if (port[0] == port[1] && (
+	    trans == SNMP_TRANS_UDP || trans == SNMP_TRANS_UDP6)) {
+		/* If port was not specified, use "snmp" name by default */
+		cport = strdup("snmp");
+	} else
+		cport = save_str(sc, port);
+
+	if (cport == NULL) {
+		free(chost);
+		return (-1);
+	}
+
+	/* commit */
+	sc->trans = trans;
+	/*
+	 * If community string was specified and it is empty, overwrite it.
+	 * If it was not specified, use default.
+	 */
+	if (comm[0] != comm[1] || strrchr(comm[0], '@') != NULL) {
+		strncpy(sc->read_community, comm[0], comm[1] - comm[0]);
+		sc->read_community[comm[1] - comm[0]] = '\0';
+		strncpy(sc->write_community, comm[0], comm[1] - comm[0]);
+		sc->write_community[comm[1] - comm[0]] = '\0';
+	}
+
+	free(sc->chost);
+	sc->chost = chost;
+	free(sc->cport);
+	sc->cport = cport;
+
+#if DEBUG_PARSE
+	printf("Committed values:\n");
+	printf("trans:	%u\n", sc->trans);
+	printf("comm:   '%s'/'%s'\n", sc->read_community, sc->write_community);
+	printf("host:   '%s'\n", sc->chost);
+	printf("port:   '%s'\n", sc->cport);
+#endif
 	return (0);
 }

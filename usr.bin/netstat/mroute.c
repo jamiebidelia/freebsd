@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) 1989 Stephen Deering
  * Copyright (c) 1992, 1993
  *	The Regents of the University of California.  All rights reserved.
@@ -65,28 +67,14 @@ __FBSDID("$FreeBSD$");
 #undef _KERNEL
 
 #include <err.h>
-#include <nlist.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <string.h>
 #include <libxo/xo.h>
 #include "netstat.h"
-
-/*
- * kvm(3) bindings for every needed symbol
- */
-static struct nlist mrl[] = {
-#define	N_MRTSTAT	0
-	{ .n_name = "_mrtstat" },
-#define	N_MFCHASHTBL	1
-	{ .n_name = "_mfchashtbl" },
-#define	N_VIFTABLE	2
-	{ .n_name = "_viftable" },
-#define	N_MFCTABLESIZE	3
-	{ .n_name = "_mfctablesize" },
-	{ .n_name = NULL },
-};
+#include "nl_defs.h"
 
 static void	print_bw_meter(struct bw_meter *, int *);
 static void	print_mfc(struct mfc *, int, int *);
@@ -114,17 +102,19 @@ print_bw_meter(struct bw_meter *bw_meter, int *banner_printed)
 
 	/* The measured values */
 	if (bw_meter->bm_flags & BW_METER_UNIT_PACKETS) {
-		sprintf(s1, "%ju", (uintmax_t)bw_meter->bm_measured.b_packets);
+		snprintf(s1, sizeof(s1), "%ju",
+		    (uintmax_t)bw_meter->bm_measured.b_packets);
 		xo_emit("{e:measured-packets/%ju}",
 		    (uintmax_t)bw_meter->bm_measured.b_packets);
 	} else
-		sprintf(s1, "?");
+		strcpy(s1, "?");
 	if (bw_meter->bm_flags & BW_METER_UNIT_BYTES) {
-		sprintf(s2, "%ju", (uintmax_t)bw_meter->bm_measured.b_bytes);
+		snprintf(s2, sizeof(s2), "%ju",
+		    (uintmax_t)bw_meter->bm_measured.b_bytes);
 		xo_emit("{e:measured-bytes/%ju}",
 		    (uintmax_t)bw_meter->bm_measured.b_bytes);
 	} else
-		sprintf(s2, "?");
+		strcpy(s2, "?");
 	xo_emit("  {[:-30}{:start-time/%lu.%06lu}|{q:measured-packets/%s}"
 	    "|{q:measured-bytes%s}{]:}",
 	    (u_long)bw_meter->bm_start_time.tv_sec,
@@ -136,17 +126,19 @@ print_bw_meter(struct bw_meter *bw_meter, int *banner_printed)
 
 	/* The threshold values */
 	if (bw_meter->bm_flags & BW_METER_UNIT_PACKETS) {
-		sprintf(s1, "%ju", (uintmax_t)bw_meter->bm_threshold.b_packets);
+		snprintf(s1, sizeof(s1), "%ju",
+		    (uintmax_t)bw_meter->bm_threshold.b_packets);
 		xo_emit("{e:threshold-packets/%ju}",
 		    (uintmax_t)bw_meter->bm_threshold.b_packets);
 	} else
-		sprintf(s1, "?");
+		strcpy(s1, "?");
 	if (bw_meter->bm_flags & BW_METER_UNIT_BYTES) {
-		sprintf(s2, "%ju", (uintmax_t)bw_meter->bm_threshold.b_bytes);
+		snprintf(s2, sizeof(s2), "%ju",
+		    (uintmax_t)bw_meter->bm_threshold.b_bytes);
 		xo_emit("{e:threshold-bytes/%ju}",
 		    (uintmax_t)bw_meter->bm_threshold.b_bytes);
 	} else
-		sprintf(s2, "?");
+		strcpy(s2, "?");
 
 	xo_emit("  {[:-30}{:threshold-time/%lu.%06lu}|{q:threshold-packets/%s}"
 	    "|{q:threshold-bytes%s}{]:}",
@@ -158,13 +150,13 @@ print_bw_meter(struct bw_meter *bw_meter, int *banner_printed)
 		 &bw_meter->bm_threshold.b_time, &end);
 	if (timercmp(&now, &end, <=)) {
 		timersub(&end, &now, &delta);
-		sprintf(s3, "%lu.%06lu",
+		snprintf(s3, sizeof(s3), "%lu.%06lu",
 			(u_long)delta.tv_sec,
 			(u_long)delta.tv_usec);
 	} else {
 		/* Negative time */
 		timersub(&now, &end, &delta);
-		sprintf(s3, "-%lu.06%lu",
+		snprintf(s3, sizeof(s3), "-%lu.06%lu",
 			(u_long)delta.tv_sec,
 			(u_long)delta.tv_usec);
 	}
@@ -178,12 +170,17 @@ print_bw_meter(struct bw_meter *bw_meter, int *banner_printed)
 static void
 print_mfc(struct mfc *m, int maxvif, int *banner_printed)
 {
+	struct sockaddr_in sin;
+	struct sockaddr *sa = (struct sockaddr *)&sin;
 	struct bw_meter bw_meter, *bwm;
 	int bw_banner_printed;
 	int error;
 	vifi_t vifi;
 
 	bw_banner_printed = 0;
+	memset(&sin, 0, sizeof(sin));
+	sin.sin_len = sizeof(sin);
+	sin.sin_family = AF_INET;
 
 	if (! *banner_printed) {
 		xo_open_list("multicast-forwarding-entry");
@@ -193,9 +190,11 @@ print_mfc(struct mfc *m, int maxvif, int *banner_printed)
 		*banner_printed = 1;
 	}
 
-	xo_emit(" {:origin-address/%-15.15s}", routename(m->mfc_origin.s_addr));
+	memcpy(&sin.sin_addr, &m->mfc_origin, sizeof(sin.sin_addr));
+	xo_emit(" {:origin-address/%-15.15s}", routename(sa, numeric_addr));
+	memcpy(&sin.sin_addr, &m->mfc_mcastgrp, sizeof(sin.sin_addr));
 	xo_emit(" {:group-address/%-15.15s}",
-	    routename(m->mfc_mcastgrp.s_addr));
+	    routename(sa, numeric_addr));
 	xo_emit(" {:sent-packets/%9lu}", m->mfc_pkt_cnt);
 	xo_emit("  {:parent/%3d}   ", m->mfc_parent);
 	xo_open_list("vif-ttl");
@@ -230,6 +229,8 @@ print_mfc(struct mfc *m, int maxvif, int *banner_printed)
 void
 mroutepr()
 {
+	struct sockaddr_in sin;
+	struct sockaddr *sa = (struct sockaddr *)&sin;
 	struct vif viftable[MAXVIFS];
 	struct vif *v;
 	struct mfc *m;
@@ -241,6 +242,10 @@ mroutepr()
 
 	saved_numeric_addr = numeric_addr;
 	numeric_addr = 1;
+
+	memset(&sin, 0, sizeof(sin));
+	sin.sin_len = sizeof(sin);
+	sin.sin_family = AF_INET;
 
 	/*
 	 * TODO:
@@ -266,10 +271,9 @@ mroutepr()
 			return;
 		}
 	} else {
-		kresolve_list(mrl);
-		pmfchashtbl = mrl[N_MFCHASHTBL].n_value;
-		pmfctablesize = mrl[N_MFCTABLESIZE].n_value;
-		pviftbl = mrl[N_VIFTABLE].n_value;
+		pmfchashtbl = nl[N_MFCHASHTBL].n_value;
+		pmfctablesize = nl[N_MFCTABLESIZE].n_value;
+		pviftbl = nl[N_VIFTABLE].n_value;
 
 		if (pmfchashtbl == 0 || pmfctablesize == 0 || pviftbl == 0) {
 			xo_warnx("No IPv4 MROUTING kernel support.");
@@ -294,12 +298,14 @@ mroutepr()
 		}
 
 		xo_open_instance("vif");
+		memcpy(&sin.sin_addr, &v->v_lcl_addr, sizeof(sin.sin_addr));
 		xo_emit(" {:vif/%2u}    {:threshold/%6u}   {:route/%-15.15s}",
 					/* opposite math of add_vif() */
 		    vifi, v->v_threshold,
-		    routename(v->v_lcl_addr.s_addr));
+		    routename(sa, numeric_addr));
+		memcpy(&sin.sin_addr, &v->v_rmt_addr, sizeof(sin.sin_addr));
 		xo_emit(" {:source/%-15.15s}", (v->v_flags & VIFF_TUNNEL) ?
-		    routename(v->v_rmt_addr.s_addr) : "");
+		    routename(sa, numeric_addr) : "");
 
 		xo_emit(" {:received-packets/%9lu}  {:sent-packets/%9lu}\n",
 		    v->v_pkt_in, v->v_pkt_out);
@@ -400,24 +406,17 @@ mrt_stats()
 {
 	struct mrtstat mrtstat;
 	u_long mstaddr;
-	size_t len = sizeof(mrtstat);
 
-	kresolve_list(mrl);
-	mstaddr = mrl[N_MRTSTAT].n_value;
+	mstaddr = nl[N_MRTSTAT].n_value;
 
 	if (mstaddr == 0) {
 		fprintf(stderr, "No IPv4 MROUTING kernel support.\n");
 		return;
 	}
 
-	if (live) {
-		if (sysctlbyname("net.inet.ip.mrtstat", &mrtstat, &len, NULL,
-		    0) < 0) {
-			xo_warn("sysctl: net.inet.ip.mrtstat failed.");
-			return;
-		}
-	} else
-		kread_counters(mstaddr, &mrtstat, len);
+	if (fetch_stats("net.inet.ip.mrtstat", mstaddr, &mrtstat,
+	    sizeof(mrtstat), kread_counters) != 0)
+		return;
 
 	xo_emit("{T:IPv4 multicast forwarding}:\n");
 

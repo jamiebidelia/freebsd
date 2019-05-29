@@ -1,6 +1,8 @@
 /*	$NetBSD: inet.c,v 1.35.2.1 1999/04/29 14:57:08 perry Exp $	*/
 /*	$KAME: ipsec.c,v 1.25 2001/03/12 09:04:39 itojun Exp $	*/
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (C) 1995, 1996, 1997, 1998, and 1999 WIDE Project.
  * All rights reserved.
  *
@@ -40,7 +42,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 4. Neither the name of the University nor the names of its contributors
+ * 3. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -101,8 +103,7 @@ static const char *pfkey_msgtype_names (int);
 static const char *
 pfkey_msgtype_names(int x)
 {
-	const int max =
-	    sizeof(pfkey_msgtypenames)/sizeof(pfkey_msgtypenames[0]);
+	const int max = nitems(pfkey_msgtypenames);
 	static char buf[20];
 
 	if (x < max && pfkey_msgtypenames[x])
@@ -128,7 +129,7 @@ pfkey_stats(u_long off, const char *name, int family __unused,
 	xo_emit(m, (uintmax_t)pfkeystat.f, plural(pfkeystat.f))
 
 	/* userland -> kernel */
-	p(out_total, "\t{:sent-requests//%ju} "
+	p(out_total, "\t{:sent-requests/%ju} "
 	    "{N:/request%s sent from userland}\n");
 	p(out_bytes, "\t{:sent-bytes/%ju} "
 	    "{N:/byte%s sent from userland}\n");
@@ -165,7 +166,7 @@ pfkey_stats(u_long off, const char *name, int family __unused,
 	    "{N:/message%s with duplicate extension}\n");
 	p(out_invexttype, "\t{:dropped-bad-extension/%ju} "
 	    "{N:/message%s with invalid extension type}\n");
-	p(out_invsatype, "\t:dropped-bad-sa-type/%ju} "
+	p(out_invsatype, "\t{:dropped-bad-sa-type/%ju} "
 	    "{N:/message%s with invalid sa type}\n");
 	p(out_invaddr, "\t{:dropped-bad-address-extension/%ju} "
 	    "{N:/message%s with invalid address extension}\n");

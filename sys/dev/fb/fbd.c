@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2013 The FreeBSD Foundation
  * All rights reserved.
  *
@@ -40,6 +42,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/systm.h>
 #include <sys/bus.h>
 #include <sys/conf.h>
+#include <sys/eventhandler.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/module.h>
@@ -178,6 +181,8 @@ fb_mmap(struct cdev *dev, vm_ooffset_t offset, vm_paddr_t *paddr, int nprot,
 			*paddr = vtophys((uint8_t *)info->fb_vbase + offset);
 		else
 			*paddr = info->fb_pbase + offset;
+		if (info->fb_flags & FB_FLAG_MEMATTR)
+			*memattr = info->fb_memattr;
 		return (0);
 	}
 	return (EINVAL);

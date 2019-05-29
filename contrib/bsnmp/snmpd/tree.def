@@ -3,8 +3,12 @@
 #	Fraunhofer Institute for Open Communication Systems (FhG Fokus).
 #	All rights reserved.
 #
+# Copyright (c) 2018
+#	Hartmut Brandt.
+#	All rights reserved.
+#
 # Author: Harti Brandt <harti@freebsd.org>
-# 
+#
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
 # are met:
@@ -13,7 +17,7 @@
 # 2. Redistributions in binary form must reproduce the above copyright
 #    notice, this list of conditions and the following disclaimer in the
 #    documentation and/or other materials provided with the distribution.
-# 
+#
 # THIS SOFTWARE IS PROVIDED BY AUTHOR AND CONTRIBUTORS ``AS IS'' AND
 # ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
 # IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
@@ -31,15 +35,10 @@
 # System group and private Begemot SNMPd MIB.
 #
 
-#include "tc.def"
+include "tc.def"
 
-typedef RowStatus ENUM (
-	1 active
-	2 notInService
-	3 notReady
-	4 createAndGo
-	5 createAndWait
-	6 destroy
+typedef BegemotSnmpdTransportProto ENUM (
+	1 udp
 )
 
 (1 internet
@@ -48,7 +47,7 @@ typedef RowStatus ENUM (
       (1 system
 #
 # The standard System group
-#	
+#
         (1 sysDescr OCTETSTRING op_system_group GET)
         (2 sysObjectId OID op_system_group GET)
         (3 sysUpTime TIMETICKS op_system_group GET)
@@ -135,6 +134,7 @@ typedef RowStatus ENUM (
                   (2 begemotSnmpdCommunityIndex UNSIGNED32)
                   (3 begemotSnmpdCommunityString OCTETSTRING GET SET)
                   (4 begemotSnmpdCommunityDescr OCTETSTRING GET)
+                  (5 begemotSnmpdCommunityPermission INTEGER GET SET)
               ))
 #
 #	Module table
@@ -180,13 +180,24 @@ typedef RowStatus ENUM (
                 ))
                 (2 begemotSnmpdTransUdp OID op_transport_dummy)
                 (3 begemotSnmpdTransLsock OID op_transport_dummy)
+                (4 begemotSnmpdTransInet OID op_transport_dummy)
               )
+              (11 begemotSnmpdTransInetTable
+                (1 begemotSnmpdTransInetEntry : INTEGER OCTETSTRING INTEGER INTEGER op_snmp_trans_inet
+                  (1 begemotSnmpdTransInetAddressType InetAddressType)
+                  (2 begemotSnmpdTransInetAddress OCTETSTRING)
+                  (3 begemotSnmpdTransInetPort INTEGER)
+                  (4 begemotSnmpdTransInetProto BegemotSnmpdTransportProto)
+                  (5 begemotSnmpdTransInetStatus RowStatus GET SET)
+
+                ))
  	    )
             (2 begemotSnmpdDefs
               (1 begemotSnmpdAgent
                 (1 begemotSnmpdAgentFreeBSD OID op_dummy)
               )
             )
+	    (3 begemotSnmpdCompliance)
           )
       ))
     )

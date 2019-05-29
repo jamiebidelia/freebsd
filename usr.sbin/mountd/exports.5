@@ -9,7 +9,7 @@
 .\" 2. Redistributions in binary form must reproduce the above copyright
 .\"    notice, this list of conditions and the following disclaimer in the
 .\"    documentation and/or other materials provided with the distribution.
-.\" 4. Neither the name of the University nor the names of its contributors
+.\" 3. Neither the name of the University nor the names of its contributors
 .\"    may be used to endorse or promote products derived from this software
 .\"    without specific prior written permission.
 .\"
@@ -28,7 +28,7 @@
 .\"     @(#)exports.5	8.3 (Berkeley) 3/29/95
 .\" $FreeBSD$
 .\"
-.Dd August 14, 2014
+.Dd Feb 11, 2019
 .Dt EXPORTS 5
 .Os
 .Sh NAME
@@ -131,6 +131,7 @@ The credential includes all the groups to which the user is a member
 on the local machine (see
 .Xr id 1 ) .
 The user may be specified by name or number.
+The user string may be quoted, or use backslash escaping.
 .Pp
 .Sm off
 .Fl maproot Li = Sy user:group1:group2:...
@@ -140,6 +141,7 @@ to be used for remote access by root.
 The elements of the list may be either names or numbers.
 Note that user: should be used to distinguish a credential containing
 no groups from a complete credential for that user.
+The group names may be quoted, or use backslash escaping.
 .Pp
 .Sm off
 .Fl mapall Li = Sy user
@@ -162,12 +164,12 @@ In the absence of
 .Fl maproot
 and
 .Fl mapall
-options, remote accesses by root will result in using a credential of -2:-2.
+options, remote accesses by root will result in using a credential of 65534:65533.
 All other users will be mapped to their remote credential.
 If a
 .Fl maproot
 option is given,
-remote access by root will be mapped to that credential instead of -2:-2.
+remote access by root will be mapped to that credential instead of 65534:65533.
 If a
 .Fl mapall
 option is given,
@@ -496,6 +498,40 @@ and any client within the 131.104.48 subnet is permitted to perform NFSv4 state
 operations on the server, so long as valid Kerberos credentials are provided.
 The machine grumpy.cis.uoguelph.ca is permitted to perform NFSv4 state
 operations on the server using AUTH_SYS credentials, as well as Kerberos ones.
+.Pp
+In the following example some directories are exported as NFSv3 and NFSv4:
+.Bd -literal -offset indent
+V4: /wingsdl/nfsv4
+/wingsdl/nfsv4/usr-ports -maproot=root -network 172.16.0.0 -mask 255.255.0.0
+/wingsdl/nfsv4/clasper   -maproot=root clasper
+.Ed
+.Pp
+Only one V4: line is needed or allowed to declare where NFSv4 is
+rooted.  The other lines declare specific exported directories with
+their absolute paths given in /etc/exports.
+.Pp
+The exported directories' paths are used for both v3 and v4.
+However, they are interpreted differently for v3 and v4.  A client
+mount command for usr-ports would use the server-absolute name when
+using nfsv3:
+.Bd -literal -offset indent
+mount server:/wingsdl/nfsv4/usr-ports /mnt/tmp
+.Ed
+.Pp
+A mount command using NFSv4 would use the path relative to the NFSv4
+root:
+.Bd -literal -offset indent
+mount server:/usr-ports /mnt/tmp
+.Ed
+.Pp
+This also differentiates which version you want if the client can do
+both v3 and v4.  The former will only ever do a v3 mount and the
+latter will only ever do a v4 mount.
+.Pp
+Note that due to different mount behavior between NFSv3 and NFSv4 a
+NFSv4 mount request for a directory that the client does not have
+permission for will succeed and read/write access will fail
+afterwards, whereas NFSv3 rejects the mount request.
 .Sh SEE ALSO
 .Xr nfsv4 4 ,
 .Xr netgroup 5 ,

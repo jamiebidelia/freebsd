@@ -10,7 +10,7 @@
 // This checker can be used for testing how taint data is propagated.
 //
 //===----------------------------------------------------------------------===//
-#include "ClangSACheckers.h"
+#include "clang/StaticAnalyzer/Checkers/BuiltinCheckerRegistration.h"
 #include "clang/StaticAnalyzer/Core/BugReporter/BugType.h"
 #include "clang/StaticAnalyzer/Core/Checker.h"
 #include "clang/StaticAnalyzer/Core/CheckerManager.h"
@@ -48,11 +48,11 @@ void TaintTesterChecker::checkPostStmt(const Expr *E,
     return;
 
   if (State->isTainted(E, C.getLocationContext())) {
-    if (ExplodedNode *N = C.addTransition()) {
+    if (ExplodedNode *N = C.generateNonFatalErrorNode()) {
       initBugType();
-      BugReport *report = new BugReport(*BT, "tainted",N);
+      auto report = llvm::make_unique<BugReport>(*BT, "tainted",N);
       report->addRange(E->getSourceRange());
-      C.emitReport(report);
+      C.emitReport(std::move(report));
     }
   }
 }

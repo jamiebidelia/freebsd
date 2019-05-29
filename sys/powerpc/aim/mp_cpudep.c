@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2008 Marcel Moolenaar
  * All rights reserved.
  *
@@ -62,13 +64,14 @@ cpudep_ap_early_bootstrap(void)
 	register_t reg;
 #endif
 
-	__asm __volatile("mtsprg 0, %0" :: "r"(ap_pcpu));
-	powerpc_sync();
-
 	switch (mfpvr() >> 16) {
 	case IBM970:
 	case IBM970FX:
 	case IBM970MP:
+		/* Set HIOR to 0 */
+		__asm __volatile("mtspr 311,%0" :: "r"(0));
+		powerpc_sync();
+
 		/* Restore HID4 and HID5, which are necessary for the MMU */
 
 #ifdef __powerpc64__
@@ -77,14 +80,42 @@ cpudep_ap_early_bootstrap(void)
 #else
 		__asm __volatile("ld %0, 16(%2); sync; isync;	\
 		    mtspr %1, %0; sync; isync;"
-		    : "=r"(reg) : "K"(SPR_HID4), "r"(bsp_state));
+		    : "=r"(reg) : "K"(SPR_HID4), "b"(bsp_state));
 		__asm __volatile("ld %0, 24(%2); sync; isync;	\
 		    mtspr %1, %0; sync; isync;"
-		    : "=r"(reg) : "K"(SPR_HID5), "r"(bsp_state));
+		    : "=r"(reg) : "K"(SPR_HID5), "b"(bsp_state));
 #endif
 		powerpc_sync();
 		break;
+	case IBMPOWER8:
+	case IBMPOWER8E:
+	case IBMPOWER8NVL:
+	case IBMPOWER9:
+#ifdef __powerpc64__
+		if (mfmsr() & PSL_HV) {
+			isync();
+			/*
+			 * Direct interrupts to SRR instead of HSRR and
+			 * reset LPCR otherwise
+			 */
+			mtspr(SPR_LPID, 0);
+			isync();
+
+			mtspr(SPR_LPCR, lpcr);
+			isync();
+
+			/*
+			 * Nuke FSCR, to be managed on a per-process basis
+			 * later.
+			 */
+			mtspr(SPR_FSCR, 0);
+		}
+#endif
+		break;
 	}
+
+	__asm __volatile("mtsprg 0, %0" :: "r"(ap_pcpu));
+	powerpc_sync();
 }
 
 uintptr_t
@@ -92,7 +123,7 @@ cpudep_ap_bootstrap(void)
 {
 	register_t msr, sp;
 
-	msr = PSL_KERNSET & ~PSL_EE;
+	msr = psl_kernset & ~PSL_EE;
 	mtmsr(msr);
 
 	pcpup->pc_curthread = pcpup->pc_idlethread;
@@ -281,21 +312,12 @@ cpudep_ap_setup()
 	vers = mfpvr() >> 16;
 
 	/* The following is needed for restoring from sleep. */
-#ifdef __powerpc64__
-	/* Writing to the time base register is hypervisor-privileged */
-	if (mfmsr() & PSL_HV)
-		mttb(0);
-#else
-	mttb(0);
-#endif
+	platform_smp_timebase_sync(0, 1);
+
 	switch(vers) {
 	case IBM970:
 	case IBM970FX:
 	case IBM970MP:
-		/* Set HIOR to 0 */
-		__asm __volatile("mtspr 311,%0" :: "r"(0));
-		powerpc_sync();
-
 		/*
 		 * The 970 has strange rules about how to update HID registers.
 		 * See Table 2-3, 970MP manual
@@ -324,10 +346,10 @@ cpudep_ap_setup()
 			mfspr	%0, %1;	mfspr	%0, %1;	mfspr	%0, %1;	\
 			mfspr	%0, %1;	mfspr	%0, %1;	mfspr	%0, %1; \
 			sync; isync" 
-		    : "=r"(reg) : "K"(SPR_HID0), "r"(bsp_state));
+		    : "=r"(reg) : "K"(SPR_HID0), "b"(bsp_state));
 		__asm __volatile("ld %0, 8(%2); sync; isync;	\
 		    mtspr %1, %0; mtspr %1, %0; sync; isync"
-		    : "=r"(reg) : "K"(SPR_HID1), "r"(bsp_state));
+		    : "=r"(reg) : "K"(SPR_HID1), "b"(bsp_state));
 	#endif
 
 		powerpc_sync();
@@ -378,6 +400,20 @@ cpudep_ap_setup()
 		reg = mpc74xx_l1d_enable();
 		reg = mpc74xx_l1i_enable();
 
+		break;
+	case IBMPOWER7:
+	case IBMPOWER7PLUS:
+	case IBMPOWER8:
+	case IBMPOWER8E:
+	case IBMPOWER8NVL:
+	case IBMPOWER9:
+#ifdef __powerpc64__
+		if (mfmsr() & PSL_HV) {
+			mtspr(SPR_LPCR, mfspr(SPR_LPCR) | lpcr |
+			    LPCR_PECE_WAKESET);
+			isync();
+		}
+#endif
 		break;
 	default:
 #ifdef __powerpc64__

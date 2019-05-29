@@ -87,13 +87,29 @@ int hw_get_chan(struct hostapd_hw_modes *mode, int freq)
 int allowed_ht40_channel_pair(struct hostapd_hw_modes *mode, int pri_chan,
 			      int sec_chan)
 {
-	int ok, j, first;
-	int allowed[] = { 36, 44, 52, 60, 100, 108, 116, 124, 132, 149, 157,
-			  184, 192 };
+	int ok, first;
+	int allowed[] = { 36, 44, 52, 60, 100, 108, 116, 124, 132, 140,
+			  149, 157, 165, 184, 192 };
 	size_t k;
+	struct hostapd_channel_data *p_chan, *s_chan;
+	const int ht40_plus = pri_chan < sec_chan;
 
-	if (pri_chan == sec_chan || !sec_chan)
-		return 1; /* HT40 not used */
+	p_chan = hw_get_channel_chan(mode, pri_chan, NULL);
+	if (!p_chan)
+		return 0;
+
+	if (pri_chan == sec_chan || !sec_chan) {
+		if (chan_pri_allowed(p_chan))
+			return 1; /* HT40 not used */
+
+		wpa_printf(MSG_ERROR, "Channel %d is not allowed as primary",
+			   pri_chan);
+		return 0;
+	}
+
+	s_chan = hw_get_channel_chan(mode, sec_chan, NULL);
+	if (!s_chan)
+		return 0;
 
 	wpa_printf(MSG_DEBUG,
 		   "HT40: control channel: %d  secondary channel: %d",
@@ -101,16 +117,9 @@ int allowed_ht40_channel_pair(struct hostapd_hw_modes *mode, int pri_chan,
 
 	/* Verify that HT40 secondary channel is an allowed 20 MHz
 	 * channel */
-	ok = 0;
-	for (j = 0; j < mode->num_channels; j++) {
-		struct hostapd_channel_data *chan = &mode->channels[j];
-		if (!(chan->flag & HOSTAPD_CHAN_DISABLED) &&
-		    chan->chan == sec_chan) {
-			ok = 1;
-			break;
-		}
-	}
-	if (!ok) {
+	if ((s_chan->flag & HOSTAPD_CHAN_DISABLED) ||
+	    (ht40_plus && !(p_chan->allowed_bw & HOSTAPD_CHAN_WIDTH_40P)) ||
+	    (!ht40_plus && !(p_chan->allowed_bw & HOSTAPD_CHAN_WIDTH_40M))) {
 		wpa_printf(MSG_ERROR, "HT40 secondary channel %d not allowed",
 			   sec_chan);
 		return 0;
@@ -152,8 +161,7 @@ void get_pri_sec_chan(struct wpa_scan_res *bss, int *pri_chan, int *sec_chan)
 	*pri_chan = *sec_chan = 0;
 
 	ieee802_11_parse_elems((u8 *) (bss + 1), bss->ie_len, &elems, 0);
-	if (elems.ht_operation &&
-	    elems.ht_operation_len >= sizeof(*oper)) {
+	if (elems.ht_operation) {
 		oper = (struct ieee80211_ht_operation *) elems.ht_operation;
 		*pri_chan = oper->primary_chan;
 		if (oper->ht_param & HT_INFO_HT_PARAM_STA_CHNL_WIDTH) {
@@ -177,10 +185,8 @@ int check_40mhz_5g(struct hostapd_hw_modes *mode,
 	size_t i;
 	int match;
 
-	if (!mode || !scan_res || !pri_chan || !sec_chan)
-		return 0;
-
-	if (pri_chan == sec_chan)
+	if (!mode || !scan_res || !pri_chan || !sec_chan ||
+	    pri_chan == sec_chan)
 		return 0;
 
 	pri_freq = hw_get_freq(mode, pri_chan);
@@ -238,7 +244,8 @@ int check_40mhz_5g(struct hostapd_hw_modes *mode,
 }
 
 
-int check_20mhz_bss(struct wpa_scan_res *bss, int pri_freq, int start, int end)
+static int check_20mhz_bss(struct wpa_scan_res *bss, int pri_freq, int start,
+			   int end)
 {
 	struct ieee802_11_elems elems;
 	struct ieee80211_ht_operation *oper;
@@ -253,8 +260,7 @@ int check_20mhz_bss(struct wpa_scan_res *bss, int pri_freq, int start, int end)
 		return 1;
 	}
 
-	if (elems.ht_operation &&
-	    elems.ht_operation_len >= sizeof(*oper)) {
+	if (elems.ht_operation) {
 		oper = (struct ieee80211_ht_operation *) elems.ht_operation;
 		if (oper->ht_param & HT_INFO_HT_PARAM_SECONDARY_CHNL_OFF_MASK)
 			return 0;
@@ -275,10 +281,8 @@ int check_40mhz_2g4(struct hostapd_hw_modes *mode,
 	int affected_start, affected_end;
 	size_t i;
 
-	if (!mode || !scan_res || !pri_chan || !sec_chan)
-		return 0;
-
-	if (pri_chan == sec_chan)
+	if (!mode || !scan_res || !pri_chan || !sec_chan ||
+	    pri_chan == sec_chan)
 		return 0;
 
 	pri_freq = hw_get_freq(mode, pri_chan);
@@ -335,9 +339,7 @@ int check_40mhz_2g4(struct hostapd_hw_modes *mode,
 
 		ieee802_11_parse_elems((u8 *) (bss + 1), bss->ie_len, &elems,
 				       0);
-		if (elems.ht_capabilities &&
-		    elems.ht_capabilities_len >=
-		    sizeof(struct ieee80211_ht_capabilities)) {
+		if (elems.ht_capabilities) {
 			struct ieee80211_ht_capabilities *ht_cap =
 				(struct ieee80211_ht_capabilities *)
 				elems.ht_capabilities;
@@ -363,8 +365,6 @@ int hostapd_set_freq_params(struct hostapd_freq_params *data,
 			    int vht_oper_chwidth, int center_segment0,
 			    int center_segment1, u32 vht_caps)
 {
-	int tmp;
-
 	os_memset(data, 0, sizeof(*data));
 	data->mode = mode;
 	data->freq = freq;
@@ -378,11 +378,10 @@ int hostapd_set_freq_params(struct hostapd_freq_params *data,
 
 	if (data->vht_enabled) switch (vht_oper_chwidth) {
 	case VHT_CHANWIDTH_USE_HT:
-		if (center_segment1)
-			return -1;
-		if (center_segment0 != 0 &&
-		    5000 + center_segment0 * 5 != data->center_freq1 &&
-		    2407 + center_segment0 * 5 != data->center_freq1)
+		if (center_segment1 ||
+		    (center_segment0 != 0 &&
+		     5000 + center_segment0 * 5 != data->center_freq1 &&
+		     2407 + center_segment0 * 5 != data->center_freq1))
 			return -1;
 		break;
 	case VHT_CHANWIDTH_80P80MHZ:
@@ -398,19 +397,40 @@ int hostapd_set_freq_params(struct hostapd_freq_params *data,
 		/* fall through */
 	case VHT_CHANWIDTH_80MHZ:
 		data->bandwidth = 80;
-		if (vht_oper_chwidth == 1 && center_segment1)
+		if ((vht_oper_chwidth == VHT_CHANWIDTH_80MHZ &&
+		     center_segment1) ||
+		    (vht_oper_chwidth == VHT_CHANWIDTH_80P80MHZ &&
+		     !center_segment1) ||
+		    !sec_channel_offset)
 			return -1;
-		if (vht_oper_chwidth == 3 && !center_segment1)
-			return -1;
-		if (!sec_channel_offset)
-			return -1;
-		/* primary 40 part must match the HT configuration */
-		tmp = (30 + freq - 5000 - center_segment0 * 5) / 20;
-		tmp /= 2;
-		if (data->center_freq1 != 5000 +
-		    center_segment0 * 5 - 20 + 40 * tmp)
-			return -1;
-		data->center_freq1 = 5000 + center_segment0 * 5;
+		if (!center_segment0) {
+			if (channel <= 48)
+				center_segment0 = 42;
+			else if (channel <= 64)
+				center_segment0 = 58;
+			else if (channel <= 112)
+				center_segment0 = 106;
+			else if (channel <= 128)
+				center_segment0 = 122;
+			else if (channel <= 144)
+				center_segment0 = 138;
+			else if (channel <= 161)
+				center_segment0 = 155;
+			data->center_freq1 = 5000 + center_segment0 * 5;
+		} else {
+			/*
+			 * Note: HT/VHT config and params are coupled. Check if
+			 * HT40 channel band is in VHT80 Pri channel band
+			 * configuration.
+			 */
+			if (center_segment0 == channel + 6 ||
+			    center_segment0 == channel + 2 ||
+			    center_segment0 == channel - 2 ||
+			    center_segment0 == channel - 6)
+				data->center_freq1 = 5000 + center_segment0 * 5;
+			else
+				return -1;
+		}
 		break;
 	case VHT_CHANWIDTH_160MHZ:
 		data->bandwidth = 160;
@@ -424,15 +444,177 @@ int hostapd_set_freq_params(struct hostapd_freq_params *data,
 			return -1;
 		if (!sec_channel_offset)
 			return -1;
-		/* primary 40 part must match the HT configuration */
-		tmp = (70 + freq - 5000 - center_segment0 * 5) / 20;
-		tmp /= 2;
-		if (data->center_freq1 != 5000 +
-		    center_segment0 * 5 - 60 + 40 * tmp)
+		/*
+		 * Note: HT/VHT config and params are coupled. Check if
+		 * HT40 channel band is in VHT160 channel band configuration.
+		 */
+		if (center_segment0 == channel + 14 ||
+		    center_segment0 == channel + 10 ||
+		    center_segment0 == channel + 6 ||
+		    center_segment0 == channel + 2 ||
+		    center_segment0 == channel - 2 ||
+		    center_segment0 == channel - 6 ||
+		    center_segment0 == channel - 10 ||
+		    center_segment0 == channel - 14)
+			data->center_freq1 = 5000 + center_segment0 * 5;
+		else
 			return -1;
-		data->center_freq1 = 5000 + center_segment0 * 5;
 		break;
 	}
 
 	return 0;
+}
+
+
+void set_disable_ht40(struct ieee80211_ht_capabilities *htcaps,
+		      int disabled)
+{
+	/* Masking these out disables HT40 */
+	le16 msk = host_to_le16(HT_CAP_INFO_SUPP_CHANNEL_WIDTH_SET |
+				HT_CAP_INFO_SHORT_GI40MHZ);
+
+	if (disabled)
+		htcaps->ht_capabilities_info &= ~msk;
+	else
+		htcaps->ht_capabilities_info |= msk;
+}
+
+
+#ifdef CONFIG_IEEE80211AC
+
+static int _ieee80211ac_cap_check(u32 hw, u32 conf, u32 cap,
+				  const char *name)
+{
+	u32 req_cap = conf & cap;
+
+	/*
+	 * Make sure we support all requested capabilities.
+	 * NOTE: We assume that 'cap' represents a capability mask,
+	 * not a discrete value.
+	 */
+	if ((hw & req_cap) != req_cap) {
+		wpa_printf(MSG_ERROR,
+			   "Driver does not support configured VHT capability [%s]",
+			   name);
+		return 0;
+	}
+	return 1;
+}
+
+
+static int ieee80211ac_cap_check_max(u32 hw, u32 conf, u32 mask,
+				     unsigned int shift,
+				     const char *name)
+{
+	u32 hw_max = hw & mask;
+	u32 conf_val = conf & mask;
+
+	if (conf_val > hw_max) {
+		wpa_printf(MSG_ERROR,
+			   "Configured VHT capability [%s] exceeds max value supported by the driver (%d > %d)",
+			   name, conf_val >> shift, hw_max >> shift);
+		return 0;
+	}
+	return 1;
+}
+
+
+int ieee80211ac_cap_check(u32 hw, u32 conf)
+{
+#define VHT_CAP_CHECK(cap) \
+	do { \
+		if (!_ieee80211ac_cap_check(hw, conf, cap, #cap)) \
+			return 0; \
+	} while (0)
+
+#define VHT_CAP_CHECK_MAX(cap) \
+	do { \
+		if (!ieee80211ac_cap_check_max(hw, conf, cap, cap ## _SHIFT, \
+					       #cap)) \
+			return 0; \
+	} while (0)
+
+	VHT_CAP_CHECK_MAX(VHT_CAP_MAX_MPDU_LENGTH_MASK);
+	VHT_CAP_CHECK_MAX(VHT_CAP_SUPP_CHAN_WIDTH_MASK);
+	VHT_CAP_CHECK(VHT_CAP_RXLDPC);
+	VHT_CAP_CHECK(VHT_CAP_SHORT_GI_80);
+	VHT_CAP_CHECK(VHT_CAP_SHORT_GI_160);
+	VHT_CAP_CHECK(VHT_CAP_TXSTBC);
+	VHT_CAP_CHECK_MAX(VHT_CAP_RXSTBC_MASK);
+	VHT_CAP_CHECK(VHT_CAP_SU_BEAMFORMER_CAPABLE);
+	VHT_CAP_CHECK(VHT_CAP_SU_BEAMFORMEE_CAPABLE);
+	VHT_CAP_CHECK_MAX(VHT_CAP_BEAMFORMEE_STS_MAX);
+	VHT_CAP_CHECK_MAX(VHT_CAP_SOUNDING_DIMENSION_MAX);
+	VHT_CAP_CHECK(VHT_CAP_MU_BEAMFORMER_CAPABLE);
+	VHT_CAP_CHECK(VHT_CAP_MU_BEAMFORMEE_CAPABLE);
+	VHT_CAP_CHECK(VHT_CAP_VHT_TXOP_PS);
+	VHT_CAP_CHECK(VHT_CAP_HTC_VHT);
+	VHT_CAP_CHECK_MAX(VHT_CAP_MAX_A_MPDU_LENGTH_EXPONENT_MAX);
+	VHT_CAP_CHECK(VHT_CAP_VHT_LINK_ADAPTATION_VHT_UNSOL_MFB);
+	VHT_CAP_CHECK(VHT_CAP_VHT_LINK_ADAPTATION_VHT_MRQ_MFB);
+	VHT_CAP_CHECK(VHT_CAP_RX_ANTENNA_PATTERN);
+	VHT_CAP_CHECK(VHT_CAP_TX_ANTENNA_PATTERN);
+
+#undef VHT_CAP_CHECK
+#undef VHT_CAP_CHECK_MAX
+
+	return 1;
+}
+
+#endif /* CONFIG_IEEE80211AC */
+
+
+u32 num_chan_to_bw(int num_chans)
+{
+	switch (num_chans) {
+	case 2:
+	case 4:
+	case 8:
+		return num_chans * 20;
+	default:
+		return 20;
+	}
+}
+
+
+/* check if BW is applicable for channel */
+int chan_bw_allowed(const struct hostapd_channel_data *chan, u32 bw,
+		    int ht40_plus, int pri)
+{
+	u32 bw_mask;
+
+	switch (bw) {
+	case 20:
+		bw_mask = HOSTAPD_CHAN_WIDTH_20;
+		break;
+	case 40:
+		/* HT 40 MHz support declared only for primary channel,
+		 * just skip 40 MHz secondary checking */
+		if (pri && ht40_plus)
+			bw_mask = HOSTAPD_CHAN_WIDTH_40P;
+		else if (pri && !ht40_plus)
+			bw_mask = HOSTAPD_CHAN_WIDTH_40M;
+		else
+			bw_mask = 0;
+		break;
+	case 80:
+		bw_mask = HOSTAPD_CHAN_WIDTH_80;
+		break;
+	case 160:
+		bw_mask = HOSTAPD_CHAN_WIDTH_160;
+		break;
+	default:
+		bw_mask = 0;
+		break;
+	}
+
+	return (chan->allowed_bw & bw_mask) == bw_mask;
+}
+
+
+/* check if channel is allowed to be used as primary */
+int chan_pri_allowed(const struct hostapd_channel_data *chan)
+{
+	return !(chan->flag & HOSTAPD_CHAN_DISABLED) &&
+		(chan->allowed_bw & HOSTAPD_CHAN_WIDTH_20);
 }

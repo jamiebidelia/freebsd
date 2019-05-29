@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2013, Bryan Venteicher <bryanv@FreeBSD.org>
  * All rights reserved.
  *
@@ -44,7 +46,6 @@ __FBSDID("$FreeBSD$");
 #include <dev/virtio/virtqueue.h>
 
 struct vtrnd_softc {
-	device_t		 vtrnd_dev;
 	uint64_t		 vtrnd_features;
 	struct callout		 vtrnd_callout;
 	struct virtqueue	*vtrnd_vq;
@@ -56,8 +57,8 @@ static int	vtrnd_probe(device_t);
 static int	vtrnd_attach(device_t);
 static int	vtrnd_detach(device_t);
 
-static void	vtrnd_negotiate_features(struct vtrnd_softc *);
-static int	vtrnd_alloc_virtqueue(struct vtrnd_softc *);
+static void	vtrnd_negotiate_features(device_t);
+static int	vtrnd_alloc_virtqueue(device_t);
 static void	vtrnd_harvest(struct vtrnd_softc *);
 static void	vtrnd_timer(void *);
 
@@ -127,14 +128,13 @@ vtrnd_attach(device_t dev)
 	int error;
 
 	sc = device_get_softc(dev);
-	sc->vtrnd_dev = dev;
 
 	callout_init(&sc->vtrnd_callout, 1);
 
 	virtio_set_feature_desc(dev, vtrnd_feature_desc);
-	vtrnd_negotiate_features(sc);
+	vtrnd_negotiate_features(dev);
 
-	error = vtrnd_alloc_virtqueue(sc);
+	error = vtrnd_alloc_virtqueue(dev);
 	if (error) {
 		device_printf(dev, "cannot allocate virtqueue\n");
 		goto fail;
@@ -162,24 +162,21 @@ vtrnd_detach(device_t dev)
 }
 
 static void
-vtrnd_negotiate_features(struct vtrnd_softc *sc)
+vtrnd_negotiate_features(device_t dev)
 {
-	device_t dev;
-	uint64_t features;
+	struct vtrnd_softc *sc;
 
-	dev = sc->vtrnd_dev;
-	features = VTRND_FEATURES;
-
-	sc->vtrnd_features = virtio_negotiate_features(dev, features);
+	sc = device_get_softc(dev);
+	sc->vtrnd_features = virtio_negotiate_features(dev, VTRND_FEATURES);
 }
 
 static int
-vtrnd_alloc_virtqueue(struct vtrnd_softc *sc)
+vtrnd_alloc_virtqueue(device_t dev)
 {
-	device_t dev;
+	struct vtrnd_softc *sc;
 	struct vq_alloc_info vq_info;
 
-	dev = sc->vtrnd_dev;
+	sc = device_get_softc(dev);
 
 	VQ_ALLOC_INFO_INIT(&vq_info, 0, NULL, sc, &sc->vtrnd_vq,
 	    "%s request", device_get_nameunit(dev));
@@ -215,8 +212,7 @@ vtrnd_harvest(struct vtrnd_softc *sc)
 	virtqueue_notify(vq);
 	virtqueue_poll(vq, NULL);
 
-	random_harvest(&value, sizeof(value), sizeof(value) * NBBY / 2,
-	    RANDOM_PURE_VIRTIO);
+	random_harvest_queue(&value, sizeof(value), RANDOM_PURE_VIRTIO);
 }
 
 static void

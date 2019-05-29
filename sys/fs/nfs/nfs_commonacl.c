@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2009 Rick Macklem, University of Guelph
  * All rights reserved.
  *
@@ -101,12 +103,12 @@ nfsrv_dissectace(struct nfsrv_descript *nd, struct acl_entry *acep,
 	if (gotid == 0) {
 		if (flag & NFSV4ACE_IDENTIFIERGROUP) {
 			acep->ae_tag = ACL_GROUP;
-			aceerr = nfsv4_strtogid(nd, name, len, &gid, p);
+			aceerr = nfsv4_strtogid(nd, name, len, &gid);
 			if (aceerr == 0)
 				acep->ae_id = (uid_t)gid;
 		} else {
 			acep->ae_tag = ACL_USER;
-			aceerr = nfsv4_strtouid(nd, name, len, &uid, p);
+			aceerr = nfsv4_strtouid(nd, name, len, &uid);
 			if (aceerr == 0)
 				acep->ae_id = uid;
 		}
@@ -347,6 +349,8 @@ nfsrv_buildace(struct nfsrv_descript *nd, u_char *name, int namelen,
 			acemask |= NFSV4ACE_WRITEACL;
 		if (ace->ae_perm & ACL_WRITE_OWNER)
 			acemask |= NFSV4ACE_WRITEOWNER;
+		if (ace->ae_perm & ACL_SYNCHRONIZE)
+			acemask |= NFSV4ACE_SYNCHRONIZE;
 	} else {
 		if (ace->ae_perm & ACL_READ_DATA)
 			acemask |= NFSV4ACE_READDATA;
@@ -420,7 +424,7 @@ nfsrv_buildacl(struct nfsrv_descript *nd, NFSACL_T *aclp, enum vtype type,
 		case ACL_USER:
 			name = namestr;
 			nfsv4_uidtostr(aclp->acl_entry[i].ae_id, &name,
-			    &namelen, p);
+			    &namelen);
 			if (name != namestr)
 				malloced = 1;
 			break;
@@ -428,13 +432,13 @@ nfsrv_buildacl(struct nfsrv_descript *nd, NFSACL_T *aclp, enum vtype type,
 			isgroup = 1;
 			name = namestr;
 			nfsv4_gidtostr((gid_t)aclp->acl_entry[i].ae_id, &name,
-			    &namelen, p);
+			    &namelen);
 			if (name != namestr)
 				malloced = 1;
 			break;
 		default:
 			continue;
-		};
+		}
 		retlen += nfsrv_buildace(nd, name, namelen, type, isgroup,
 		    isowner, &aclp->acl_entry[i]);
 		entrycnt++;
@@ -443,36 +447,6 @@ nfsrv_buildacl(struct nfsrv_descript *nd, NFSACL_T *aclp, enum vtype type,
 	}
 	*entrycntp = txdr_unsigned(entrycnt);
 	return (retlen);
-}
-
-/*
- * Set an NFSv4 acl.
- */
-APPLESTATIC int
-nfsrv_setacl(vnode_t vp, NFSACL_T *aclp, struct ucred *cred,
-    NFSPROC_T *p)
-{
-	int error;
-
-	if (nfsrv_useacl == 0 || nfs_supportsnfsv4acls(vp) == 0) {
-		error = NFSERR_ATTRNOTSUPP;
-		goto out;
-	}
-	/*
-	 * With NFSv4 ACLs, chmod(2) may need to add additional entries.
-	 * Make sure it has enough room for that - splitting every entry
-	 * into two and appending "canonical six" entries at the end.
-	 * Cribbed out of kern/vfs_acl.c - Rick M.
-	 */
-	if (aclp->acl_cnt > (ACL_MAX_ENTRIES - 6) / 2) {
-		error = NFSERR_ATTRNOTSUPP;
-		goto out;
-	}
-	error = VOP_SETACL(vp, ACL_TYPE_NFS4, aclp, cred, p);
-
-out:
-	NFSEXITCODE(error);
-	return (error);
 }
 
 /*
@@ -503,7 +477,7 @@ nfsrv_compareacl(NFSACL_T *aclp1, NFSACL_T *aclp2)
 		case ACL_OTHER:
 			if (acep1->ae_perm != acep2->ae_perm)
 				return (1);
-		};
+		}
 		acep1++;
 		acep2++;
 	}

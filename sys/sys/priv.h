@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2006 nCircle Network Security, Inc.
  * All rights reserved.
  *
@@ -45,8 +47,9 @@
  * loadable kernel module ABI, and should not be changed across minor
  * releases.
  *
- * When adding a new privilege, remember to determine if it's appropriate for
- * use in jail, and update the privilege switch in kern_jail.c as necessary.
+ * When adding a new privilege, remember to determine if it's appropriate
+ * for use in jail, and update the privilege switch in prison_priv_check()
+ * in kern_jail.c as necessary.
  */
 
 /*
@@ -133,7 +136,7 @@
 #define	PRIV_JAIL_REMOVE	112	/* Remove a jail. */
 
 /*
- * Kernel environment priveleges.
+ * Kernel environment privileges.
  */
 #define	PRIV_KENV_SET		120	/* Set kernel env. variables. */
 #define	PRIV_KENV_UNSET		121	/* Unset kernel env. variables. */
@@ -265,7 +268,7 @@
 #define	PRIV_VFS_GETFH		327	/* Can retrieve file handles. */
 #define	PRIV_VFS_GETQUOTA	328	/* getquota(). */
 #define	PRIV_VFS_LINK		329	/* bsd.hardlink_check_uid */
-#define	PRIV_VFS_MKNOD_BAD	330	/* Can mknod() to mark bad inodes. */
+#define	PRIV_VFS_MKNOD_BAD	330	/* Was: mknod() can mark bad inodes. */
 #define	PRIV_VFS_MKNOD_DEV	331	/* Can mknod() to create dev nodes. */
 #define	PRIV_VFS_MKNOD_WHT	332	/* Can mknod() to create whiteout. */
 #define	PRIV_VFS_MOUNT		333	/* Can mount(). */
@@ -341,6 +344,8 @@
 #define	PRIV_NET_SETIFDESCR	418	/* Set interface description. */
 #define	PRIV_NET_SETIFFIB	419	/* Set interface fib. */
 #define	PRIV_NET_VXLAN		420	/* Administer vxlan. */
+#define	PRIV_NET_SETLANPCP	421	/* Set LAN priority. */
+#define	PRIV_NET_SETVLANPCP	PRIV_NET_SETLANPCP /* Alias Set VLAN priority */
 
 /*
  * 802.11-related privileges.
@@ -527,7 +532,7 @@
 struct thread;
 struct ucred;
 int	priv_check(struct thread *td, int priv);
-int	priv_check_cred(struct ucred *cred, int priv, int flags);
+int	priv_check_cred(struct ucred *cred, int priv);
 #endif
 
 #endif /* !_SYS_PRIV_H_ */

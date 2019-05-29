@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2012 Jukka A. Ukkonen
  * All rights reserved.
  *
@@ -38,6 +40,8 @@ __FBSDID("$FreeBSD$");
 #include <errno.h>
 #include "un-namespace.h"
 #include "libc_private.h"
+
+int __waitid(idtype_t, id_t, siginfo_t *, int);
 
 int
 __waitid(idtype_t idtype, id_t id, siginfo_t *info, int flags)

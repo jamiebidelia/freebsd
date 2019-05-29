@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2004 Tim J. Robbins
  * Copyright (c) 2001 Doug Rabson
  * Copyright (c) 1994-1996 Søren Schmidt
@@ -36,15 +38,8 @@
 #include <compat/linux/linux.h>
 #include <amd64/linux32/linux32_syscall.h>
 
-/*
- * debugging support
- */
-extern u_char linux_debug_map[];
-#define	ldebug(name)	isclr(linux_debug_map, LINUX_SYS_linux_ ## name)
-#define	ARGS(nm, fmt)	"linux(%ld/%ld): "#nm"("fmt")\n",			\
-			(long)td->td_proc->p_pid, (long)td->td_tid
-#define	LMSG(fmt)	"linux(%ld/%ld): "fmt"\n",				\
-			(long)td->td_proc->p_pid, (long)td->td_tid
+#define	LINUX_LEGACY_SYSCALLS
+
 #define	LINUX_DTRACE	linuxulator32
 
 #define	LINUX32_MAXUSER		((1ul << 32) - PAGE_SIZE)
@@ -114,7 +109,7 @@ typedef struct {
  */
 #define	LINUX_AT_COUNT		20	/* Count of used aux entry types.
 					 * Keep this synchronized with
-					 * elf_linux_fixup() code.
+					 * linux_fixup_elf() code.
 					 */
 struct l___sysctl_args
 {
@@ -164,13 +159,6 @@ struct l_rusage {
 	l_long	ru_nvcsw;
 	l_long	ru_nivcsw;
 } __packed;
-
-/* mmap options */
-#define	LINUX_MAP_SHARED	0x0001
-#define	LINUX_MAP_PRIVATE	0x0002
-#define	LINUX_MAP_FIXED		0x0010
-#define	LINUX_MAP_ANON		0x0020
-#define	LINUX_MAP_GROWSDOWN	0x0100
 
 struct l_mmap_argv {
 	l_uintptr_t	addr;
@@ -247,17 +235,19 @@ struct l_stat64 {
 	l_ulonglong	st_ino;
 } __packed;
 
-struct l_statfs64 { 
-        l_int           f_type; 
-        l_int           f_bsize; 
-        uint64_t        f_blocks; 
-        uint64_t        f_bfree; 
-        uint64_t        f_bavail; 
-        uint64_t        f_files; 
-        uint64_t        f_ffree; 
-        l_fsid_t        f_fsid;
-        l_int           f_namelen;
-        l_int           f_spare[6];
+struct l_statfs64 {
+	l_int		f_type;
+	l_int		f_bsize;
+	uint64_t	f_blocks;
+	uint64_t	f_bfree;
+	uint64_t	f_bavail;
+	uint64_t	f_files;
+	uint64_t	f_ffree;
+	l_fsid_t	f_fsid;
+	l_int		f_namelen;
+	l_int		f_frsize;
+	l_int		f_flags;
+	l_int		f_spare[4];
 } __packed;
 
 /* sigaction flags */
@@ -457,11 +447,11 @@ struct l_sigframe {
 
 struct l_rt_sigframe {
 	l_int			sf_sig;
-	l_uintptr_t 		sf_siginfo;
+	l_uintptr_t		sf_siginfo;
 	l_uintptr_t		sf_ucontext;
 	l_siginfo_t		sf_si;
-	struct l_ucontext 	sf_sc;
-	l_handler_t 		sf_handler;
+	struct l_ucontext	sf_sc;
+	l_handler_t		sf_handler;
 } __packed;
 
 /*
@@ -479,52 +469,6 @@ union l_semun {
 	l_uintptr_t	__pad;
 } __packed;
 
-struct l_ipc_perm {
-	l_key_t		key;
-	l_uid16_t	uid;
-	l_gid16_t	gid;
-	l_uid16_t	cuid;
-	l_gid16_t	cgid;
-	l_ushort	mode;
-	l_ushort	seq;
-};
-
-/*
- * Socket defines
- */
-#define	LINUX_SOL_SOCKET	1
-#define	LINUX_SOL_IP		0
-#define	LINUX_SOL_IPX		256
-#define	LINUX_SOL_AX25		257
-#define	LINUX_SOL_TCP		6
-#define	LINUX_SOL_UDP		17
-
-#define	LINUX_SO_DEBUG		1
-#define	LINUX_SO_REUSEADDR	2
-#define	LINUX_SO_TYPE		3
-#define	LINUX_SO_ERROR		4
-#define	LINUX_SO_DONTROUTE	5
-#define	LINUX_SO_BROADCAST	6
-#define	LINUX_SO_SNDBUF		7
-#define	LINUX_SO_RCVBUF		8
-#define	LINUX_SO_KEEPALIVE	9
-#define	LINUX_SO_OOBINLINE	10
-#define	LINUX_SO_NO_CHECK	11
-#define	LINUX_SO_PRIORITY	12
-#define	LINUX_SO_LINGER		13
-#define	LINUX_SO_PEERCRED	17
-#define	LINUX_SO_RCVLOWAT	18
-#define	LINUX_SO_SNDLOWAT	19
-#define	LINUX_SO_RCVTIMEO	20
-#define	LINUX_SO_SNDTIMEO	21
-#define	LINUX_SO_TIMESTAMP	29
-#define	LINUX_SO_ACCEPTCONN	30
-
-struct l_sockaddr {
-	l_ushort	sa_family;
-	char		sa_data[14];
-} __packed;
-
 struct l_ifmap {
 	l_ulong		mem_start;
 	l_ulong		mem_end;
@@ -533,9 +477,6 @@ struct l_ifmap {
 	u_char		dma;
 	u_char		port;
 } __packed;
-
-#define	LINUX_IFHWADDRLEN	6
-#define	LINUX_IFNAMSIZ		16
 
 struct l_ifreq {
 	union {
@@ -549,7 +490,7 @@ struct l_ifreq {
 		struct l_sockaddr	ifru_netmask;
 		struct l_sockaddr	ifru_hwaddr;
 		l_short		ifru_flags[1];
-		l_int		ifru_metric;
+		l_int		ifru_ivalue;
 		l_int		ifru_mtu;
 		struct l_ifmap	ifru_map;
 		char		ifru_slave[LINUX_IFNAMSIZ];
@@ -559,6 +500,7 @@ struct l_ifreq {
 
 #define	ifr_name	ifr_ifrn.ifrn_name	/* Interface name */
 #define	ifr_hwaddr	ifr_ifru.ifru_hwaddr	/* MAC address */
+#define	ifr_ifindex	ifr_ifru.ifru_ivalue	/* Interface index */
 
 struct l_ifconf {
 	int	ifc_len;
@@ -670,6 +612,7 @@ struct l_user_desc {
 	(((desc)->b >> LINUX_ENTRY_B_USEABLE) & 1)
 
 struct iovec;
+struct uio;
 
 struct l_iovec32 {
 	uint32_t	iov_base;
@@ -678,6 +621,8 @@ struct l_iovec32 {
 
 int linux32_copyiniov(struct l_iovec32 *iovp32, l_ulong iovcnt,
 			    struct iovec **iovp, int error);
+int linux32_copyinuio(struct l_iovec32 *iovp, l_ulong iovcnt,
+			    struct uio **uiop);
 int linux_copyout_rusage(struct rusage *ru, void *uaddr);
 
 /* robust futexes */

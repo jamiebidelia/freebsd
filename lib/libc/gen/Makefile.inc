@@ -2,7 +2,10 @@
 # $FreeBSD$
 
 # machine-independent gen sources
-.PATH: ${LIBC_SRCTOP}/${LIBC_ARCH}/gen ${LIBC_SRCTOP}/gen
+.PATH: ${LIBC_SRCTOP}/${LIBC_ARCH}/gen ${LIBC_SRCTOP}/gen ${SRCTOP}/etc
+
+CONFS+=	group master.passwd shells
+CONFSMODE_master.passwd=	600
 
 SRCS+=	__getosreldate.c \
 	__pthread_mutex_init_calloc_cb_stub.c \
@@ -14,9 +17,12 @@ SRCS+=	__getosreldate.c \
 	_thread_init.c \
 	alarm.c \
 	arc4random.c \
+	arc4random-compat.c \
+	arc4random_uniform.c \
 	assert.c \
 	auxv.c \
 	basename.c \
+	basename_compat.c \
 	cap_sandboxed.c \
 	check_utility_compat.c \
 	clock.c \
@@ -29,6 +35,7 @@ SRCS+=	__getosreldate.c \
 	devname.c \
 	dirfd.c \
 	dirname.c \
+	dirname_compat.c \
 	disklabel.c \
 	dlfcn.c \
 	drand48.c \
@@ -39,6 +46,7 @@ SRCS+=	__getosreldate.c \
 	errlst.c \
 	errno.c \
 	exec.c \
+	exect.c \
 	fdevname.c \
 	feature_present.c \
 	fmtcheck.c \
@@ -49,13 +57,13 @@ SRCS+=	__getosreldate.c \
 	fstab.c \
 	ftok.c \
 	fts.c \
-	fts-compat.c \
 	ftw.c \
 	getbootfile.c \
 	getbsize.c \
 	getcap.c \
 	getcwd.c \
 	getdomainname.c \
+	getentropy.c \
 	getgrent.c \
 	getgrouplist.c \
 	gethostname.c \
@@ -99,11 +107,13 @@ SRCS+=	__getosreldate.c \
 	raise.c \
 	readdir.c \
 	readpassphrase.c \
+	recvmmsg.c \
 	rewinddir.c \
 	scandir.c \
 	seed48.c \
 	seekdir.c \
 	semctl.c \
+	sendmmsg.c \
 	setdomainname.c \
 	sethostname.c \
 	setjmperr.c \
@@ -128,6 +138,7 @@ SRCS+=	__getosreldate.c \
 	termios.c \
 	time.c \
 	times.c \
+	timespec_get.c \
 	timezone.c \
 	tls.c \
 	ttyname.c \
@@ -135,7 +146,6 @@ SRCS+=	__getosreldate.c \
 	ualarm.c \
 	ulimit.c \
 	uname.c \
-	unvis-compat.c \
 	usleep.c \
 	utime.c \
 	utxdb.c \
@@ -145,12 +155,26 @@ SRCS+=	__getosreldate.c \
 	waitpid.c \
 	waitid.c \
 	wordexp.c
+.if ${MK_SYMVER} == yes
+SRCS+=	devname-compat11.c \
+	fts-compat.c \
+	fts-compat11.c \
+	ftw-compat11.c \
+	getmntinfo-compat11.c \
+	glob-compat11.c \
+	nftw-compat11.c \
+	readdir-compat11.c \
+	scandir-compat11.c \
+	unvis-compat.c
+.endif
 
-.PATH: ${LIBC_SRCTOP}/../../contrib/libc-pwcache
+CFLAGS.arc4random.c= -I${SRCTOP}/sys -I${SRCTOP}/sys/crypto/chacha20
+
+.PATH: ${SRCTOP}/contrib/libc-pwcache
 SRCS+=	pwcache.c pwcache.h
 
-.PATH: ${LIBC_SRCTOP}/../../contrib/libc-vis
-CFLAGS+=	-I${LIBC_SRCTOP}/../../contrib/libc-vis
+.PATH: ${SRCTOP}/contrib/libc-vis
+CFLAGS+=	-I${SRCTOP}/contrib/libc-vis
 SRCS+=	unvis.c vis.c
 
 MISRCS+=modf.c
@@ -159,8 +183,8 @@ CANCELPOINTS_SRCS=sem.c sem_new.c
 .for src in ${CANCELPOINTS_SRCS}
 SRCS+=cancelpoints_${src}
 CLEANFILES+=cancelpoints_${src}
-cancelpoints_${src}:
-	ln -sf ${LIBC_SRCTOP}/gen/${src} ${.TARGET}
+cancelpoints_${src}: ${LIBC_SRCTOP}/gen/${src} .NOMETA
+	ln -sf ${.ALLSRC} ${.TARGET}
 .endfor
 
 SYM_MAPS+=${LIBC_SRCTOP}/gen/Symbol.map
@@ -170,6 +194,7 @@ SYM_MAPS+=${LIBC_SRCTOP}/gen/Symbol.map
 
 MAN+=	alarm.3 \
 	arc4random.3 \
+	auxv.3 \
 	basename.3 \
 	cap_rights_get.3 \
 	cap_sandboxed.3 \
@@ -206,6 +231,7 @@ MAN+=	alarm.3 \
 	getcwd.3 \
 	getdiskbyname.3 \
 	getdomainname.3 \
+	getentropy.3 \
 	getfsent.3 \
 	getgrent.3 \
 	getgrouplist.3 \
@@ -280,6 +306,7 @@ MAN+=	alarm.3 \
 	tcsetsid.3 \
 	time.3 \
 	times.3 \
+	timespec_get.3 \
 	timezone.3 \
 	ttyname.3 \
 	tzset.3 \
@@ -294,11 +321,9 @@ MAN+=	alarm.3 \
 	vis.3 \
 	wordexp.3
 
-MLINKS+=arc4random.3 arc4random_addrandom.3 \
-	arc4random.3 arc4random_stir.3 \
-	arc4random.3 arc4random_buf.3 \
+MLINKS+=arc4random.3 arc4random_buf.3 \
 	arc4random.3 arc4random_uniform.3
-MLINKS+=basename.3 basename_r.3
+MLINKS+=auxv.3 elf_aux_info.3
 MLINKS+=ctermid.3 ctermid_r.3
 MLINKS+=devname.3 devname_r.3
 MLINKS+=devname.3 fdevname.3
@@ -317,7 +342,8 @@ MLINKS+=dlopen.3 fdlopen.3 \
 	dlopen.3 dlclose.3 \
 	dlopen.3 dlerror.3 \
 	dlopen.3 dlfunc.3 \
-	dlopen.3 dlsym.3
+	dlopen.3 dlsym.3 \
+	dlopen.3 dlvsym.3
 MLINKS+=err.3 err_set_exit.3 \
 	err.3 err_set_file.3 \
 	err.3 errc.3 \
@@ -386,6 +412,7 @@ MLINKS+=getgrent.3 endgrent.3 \
 	getgrent.3 getgrgid_r.3
 MLINKS+=gethostname.3 sethostname.3
 MLINKS+=getnetgrent.3 endnetgrent.3 \
+	getnetgrent.3 getnetgrent_r.3 \
 	getnetgrent.3 innetgr.3 \
 	getnetgrent.3 setnetgrent.3
 MLINKS+=getprogname.3 setprogname.3
@@ -451,10 +478,13 @@ MLINKS+=rand48.3 _rand48.3 \
 	rand48.3 nrand48.3 \
 	rand48.3 seed48.3 \
 	rand48.3 srand48.3
+MLINKS+=recv.2 recvmmsg.2
 MLINKS+=scandir.3 alphasort.3
 MLINKS+=sem_open.3 sem_close.3 \
 	sem_open.3 sem_unlink.3
 MLINKS+=sem_wait.3 sem_trywait.3
+MLINKS+=sem_timedwait.3 sem_clockwait_np.3
+MLINKS+=send.2 sendmmsg.2
 MLINKS+=setjmp.3 _longjmp.3 \
 	setjmp.3 _setjmp.3 \
 	setjmp.3 longjmp.3 \
@@ -463,6 +493,7 @@ MLINKS+=setjmp.3 _longjmp.3 \
 	setjmp.3 siglongjmp.3 \
 	setjmp.3 sigsetjmp.3
 MLINKS+=setmode.3 getmode.3
+MLINKS+=setproctitle.3 setproctitle_fast.3
 MLINKS+=sigsetops.3 sigaddset.3 \
 	sigsetops.3 sigdelset.3 \
 	sigsetops.3 sigemptyset.3 \
@@ -513,3 +544,16 @@ MLINKS+=vis.3 nvis.3 \
 	vis.3 svis.3
 
 MLINKS+=wordexp.3 wordfree.3
+
+afterinstallconfig:
+.if ${MK_TCSH} == "no"
+	sed -i "" -e 's;/bin/csh;/bin/sh;' ${DESTDIR}/etc/master.passwd
+.endif
+	pwd_mkdb -i -p -d ${DESTDIR}/etc ${DESTDIR}/etc/master.passwd
+.if defined(NO_ROOT) && defined(METALOG)
+	( \
+		echo "./etc/pwd.db type=file mode=0644 uname=root gname=wheel"; \
+		echo "./etc/spwd.db type=file mode=0600 uname=root gname=wheel"; \
+		echo "./etc/passwd type=file mode=0644 uname=root gname=wheel"; \
+	) | cat -l >> ${METALOG}
+.endif

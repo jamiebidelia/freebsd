@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2008 Apple Inc.
  * All rights reserved.
  *
@@ -25,8 +27,6 @@
  * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
  * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE. 
- *
- * P4: //depot/projects/trustedbsd/openbsm/libbsm/bsm_errno.c#22
  */
 
 #include <sys/cdefs.h>
@@ -243,6 +243,13 @@ static const struct bsm_errno bsm_errnos[] = {
 	ERRNO_NO_LOCAL_MAPPING,
 #endif
 	ES("Process died with the lock") },
+	{ BSM_ERRNO_EINTEGRITY,
+#ifdef EINTEGRITY
+	EINTEGRITY,
+#else
+	ERRNO_NO_LOCAL_MAPPING,
+#endif
+	ES("Integrity check failed") },
 	{ BSM_ERRNO_ENOTRECOVERABLE,
 #ifdef ENOTRECOVERABLE
 	ENOTRECOVERABLE,
@@ -701,14 +708,13 @@ static const struct bsm_errno bsm_errnos[] = {
 #endif
 	ES("Not permitted in capability mode") },
 };
-static const int bsm_errnos_count = sizeof(bsm_errnos) / sizeof(bsm_errnos[0]);
 
 static const struct bsm_errno *
 bsm_lookup_errno_local(int local_errno)
 {
 	int i;
 
-	for (i = 0; i < bsm_errnos_count; i++) {
+	for (i = 0; i < nitems(bsm_errnos); i++) {
 		if (bsm_errnos[i].be_local_errno == local_errno)
 			return (&bsm_errnos[i]);
 	}
@@ -735,7 +741,7 @@ bsm_lookup_errno_bsm(u_char bsm_errno)
 {
 	int i;
 
-	for (i = 0; i < bsm_errnos_count; i++) {
+	for (i = 0; i < nitems(bsm_errnos); i++) {
 		if (bsm_errnos[i].be_bsm_errno == bsm_errno)
 			return (&bsm_errnos[i]);
 	}

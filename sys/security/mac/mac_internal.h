@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 1999-2002, 2006, 2009 Robert N. M. Watson
+ * Copyright (c) 1999-2002, 2006, 2009, 2019 Robert N. M. Watson
  * Copyright (c) 2001 Ilmar S. Habibulin
  * Copyright (c) 2001-2004 Networks Associates Technology, Inc.
  * Copyright (c) 2006 nCircle Network Security, Inc.
@@ -74,36 +74,38 @@ SDT_PROVIDER_DECLARE(mac);		/* MAC Framework-level events. */
 SDT_PROVIDER_DECLARE(mac_framework);	/* Entry points to MAC. */
 
 #define	MAC_CHECK_PROBE_DEFINE4(name, arg0, arg1, arg2, arg3)		\
-	SDT_PROBE_DEFINE5(mac_framework, kernel, name, mac__check__err,	\
+	SDT_PROBE_DEFINE5(mac_framework, , name, mac__check__err,	\
 	    "int", arg0, arg1, arg2, arg3);				\
-	SDT_PROBE_DEFINE5(mac_framework, kernel, name, mac__check__ok,	\
+	SDT_PROBE_DEFINE5(mac_framework, , name, mac__check__ok,	\
 	    "int", arg0, arg1, arg2, arg3);
 
 #define	MAC_CHECK_PROBE_DEFINE3(name, arg0, arg1, arg2)			\
-	SDT_PROBE_DEFINE4(mac_framework, kernel, name, mac__check__err,	\
+	SDT_PROBE_DEFINE4(mac_framework, , name, mac__check__err,	\
 	    "int", arg0, arg1, arg2);					\
-	SDT_PROBE_DEFINE4(mac_framework, kernel, name, mac__check__ok,	\
+	SDT_PROBE_DEFINE4(mac_framework, , name, mac__check__ok,	\
 	    "int", arg0, arg1, arg2);
 
 #define	MAC_CHECK_PROBE_DEFINE2(name, arg0, arg1)			\
-	SDT_PROBE_DEFINE3(mac_framework, kernel, name, mac__check__err,	\
+	SDT_PROBE_DEFINE3(mac_framework, , name, mac__check__err,	\
 	    "int", arg0, arg1);						\
-	SDT_PROBE_DEFINE3(mac_framework, kernel, name, mac__check__ok,	\
+	SDT_PROBE_DEFINE3(mac_framework, , name, mac__check__ok,	\
 	    "int", arg0, arg1);
 
 #define	MAC_CHECK_PROBE_DEFINE1(name, arg0)				\
-	SDT_PROBE_DEFINE2(mac_framework, kernel, name, mac__check__err,	\
+	SDT_PROBE_DEFINE2(mac_framework, , name, mac__check__err,	\
 	    "int", arg0);						\
-	SDT_PROBE_DEFINE2(mac_framework, kernel, name, mac__check__ok,	\
+	SDT_PROBE_DEFINE2(mac_framework, , name, mac__check__ok,	\
 	    "int", arg0);
 
 #define	MAC_CHECK_PROBE4(name, error, arg0, arg1, arg2, arg3)	do {	\
-	if (error) {							\
-		SDT_PROBE(mac_framework, kernel, name, mac__check__err,	\
-		    error, arg0, arg1, arg2, arg3);			\
-	} else {							\
-		SDT_PROBE(mac_framework, kernel, name, mac__check__ok,	\
-		    0, arg0, arg1, arg2, arg3);				\
+	if (SDT_PROBES_ENABLED()) {					\
+		if (error) {						\
+			SDT_PROBE5(mac_framework, , name, mac__check__err,\
+			    error, arg0, arg1, arg2, arg3);		\
+		} else {						\
+			SDT_PROBE5(mac_framework, , name, mac__check__ok,\
+			    0, arg0, arg1, arg2, arg3);			\
+		}							\
 	}								\
 } while (0)
 
@@ -116,18 +118,20 @@ SDT_PROVIDER_DECLARE(mac_framework);	/* Entry points to MAC. */
 #endif
 
 #define	MAC_GRANT_PROBE_DEFINE2(name, arg0, arg1)			\
-	SDT_PROBE_DEFINE3(mac_framework, kernel, name, mac__grant__err,	\
+	SDT_PROBE_DEFINE3(mac_framework, , name, mac__grant__err,	\
 	    "int", arg0, arg1);						\
-	SDT_PROBE_DEFINE3(mac_framework, kernel, name, mac__grant__ok,	\
+	SDT_PROBE_DEFINE3(mac_framework, , name, mac__grant__ok,	\
 	    "int", arg0, arg1);
 
 #define	MAC_GRANT_PROBE2(name, error, arg0, arg1)	do {		\
-	if (error) {							\
-		SDT_PROBE(mac_framework, kernel, name, mac__grant__err,	\
-		    error, arg0, arg1, 0, 0);				\
-	} else {							\
-		SDT_PROBE(mac_framework, kernel, name, mac__grant__ok,	\
-		    error, arg0, arg1, 0, 0);				\
+	if (SDT_PROBES_ENABLED()) {					\
+		if (error) {						\
+			SDT_PROBE3(mac_framework, , name, mac__grant__err,\
+			    error, arg0, arg1);				\
+		} else {						\
+			SDT_PROBE3(mac_framework, , name, mac__grant__ok,\
+			    error, arg0, arg1);				\
+		}							\
 	}								\
 } while (0)
 
@@ -212,8 +216,24 @@ void	mac_destroy_label(struct label *label);
 int	mac_check_structmac_consistent(struct mac *mac);
 int	mac_allocate_slot(void);
 
-#define MAC_IFNET_LOCK(ifp)	mtx_lock(&mac_ifnet_mtx)
-#define MAC_IFNET_UNLOCK(ifp)	mtx_unlock(&mac_ifnet_mtx)
+/*
+ * Lock ifnets to protect labels only if ifnet labels are in use.
+ */
+#define MAC_IFNET_LOCK(ifp, locked)	do {				\
+	if (mac_labeled & MPC_OBJECT_IFNET) {				\
+		mtx_lock(&mac_ifnet_mtx);				\
+		locked = 1;						\
+	} else {							\
+		locked = 0;						\
+	}								\
+} while (0)
+
+#define MAC_IFNET_UNLOCK(ifp, locked)	do {				\
+	if (locked) {							\
+		mtx_unlock(&mac_ifnet_mtx);				\
+		locked = 0;						\
+	}								\
+} while (0)
 
 /*
  * MAC Framework per-object type functions.  It's not yet clear how the

@@ -21,7 +21,10 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
+#define PFIOC_USE_LATEST
+
 #include <sys/types.h>
+#include <sys/bitset.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 
@@ -31,8 +34,10 @@ __FBSDID("$FreeBSD$");
 
 #include <err.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <math.h>
+#include <search.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,108 +45,168 @@ __FBSDID("$FreeBSD$");
 
 #include <net/altq/altq.h>
 #include <net/altq/altq_cbq.h>
+#include <net/altq/altq_codel.h>
 #include <net/altq/altq_priq.h>
 #include <net/altq/altq_hfsc.h>
+#include <net/altq/altq_fairq.h>
 
 #include "pfctl_parser.h"
 #include "pfctl.h"
 
 #define is_sc_null(sc)	(((sc) == NULL) || ((sc)->m1 == 0 && (sc)->m2 == 0))
 
-TAILQ_HEAD(altqs, pf_altq) altqs = TAILQ_HEAD_INITIALIZER(altqs);
-LIST_HEAD(gen_sc, segment) rtsc, lssc;
+static STAILQ_HEAD(interfaces, pfctl_altq) interfaces = STAILQ_HEAD_INITIALIZER(interfaces);
+static struct hsearch_data queue_map;
+static struct hsearch_data if_map;
+static struct hsearch_data qid_map;
 
-struct pf_altq	*qname_to_pfaltq(const char *, const char *);
-u_int32_t	 qname_to_qid(const char *);
+static struct pfctl_altq *pfaltq_lookup(char *ifname);
+static struct pfctl_altq *qname_to_pfaltq(const char *, const char *);
+static u_int32_t	 qname_to_qid(char *);
 
-static int	eval_pfqueue_cbq(struct pfctl *, struct pf_altq *);
+static int	eval_pfqueue_cbq(struct pfctl *, struct pf_altq *,
+		    struct pfctl_altq *);
 static int	cbq_compute_idletime(struct pfctl *, struct pf_altq *);
-static int	check_commit_cbq(int, int, struct pf_altq *);
+static int	check_commit_cbq(int, int, struct pfctl_altq *);
 static int	print_cbq_opts(const struct pf_altq *);
 
-static int	eval_pfqueue_priq(struct pfctl *, struct pf_altq *);
-static int	check_commit_priq(int, int, struct pf_altq *);
+static int	print_codel_opts(const struct pf_altq *,
+		    const struct node_queue_opt *);
+
+static int	eval_pfqueue_priq(struct pfctl *, struct pf_altq *,
+		    struct pfctl_altq *);
+static int	check_commit_priq(int, int, struct pfctl_altq *);
 static int	print_priq_opts(const struct pf_altq *);
 
-static int	eval_pfqueue_hfsc(struct pfctl *, struct pf_altq *);
-static int	check_commit_hfsc(int, int, struct pf_altq *);
+static int	eval_pfqueue_hfsc(struct pfctl *, struct pf_altq *,
+		    struct pfctl_altq *, struct pfctl_altq *);
+static int	check_commit_hfsc(int, int, struct pfctl_altq *);
 static int	print_hfsc_opts(const struct pf_altq *,
 		    const struct node_queue_opt *);
+
+static int	eval_pfqueue_fairq(struct pfctl *, struct pf_altq *,
+		    struct pfctl_altq *, struct pfctl_altq *);
+static int	print_fairq_opts(const struct pf_altq *,
+		    const struct node_queue_opt *);
+static int	check_commit_fairq(int, int, struct pfctl_altq *);
 
 static void		 gsc_add_sc(struct gen_sc *, struct service_curve *);
 static int		 is_gsc_under_sc(struct gen_sc *,
 			     struct service_curve *);
-static void		 gsc_destroy(struct gen_sc *);
 static struct segment	*gsc_getentry(struct gen_sc *, double);
 static int		 gsc_add_seg(struct gen_sc *, double, double, double,
 			     double);
 static double		 sc_x2y(struct service_curve *, double);
 
 #ifdef __FreeBSD__
-u_int32_t	getifspeed(int, char *);
+u_int64_t	getifspeed(int, char *);
 #else
 u_int32_t	 getifspeed(char *);
 #endif
 u_long		 getifmtu(char *);
 int		 eval_queue_opts(struct pf_altq *, struct node_queue_opt *,
-		     u_int32_t);
-u_int32_t	 eval_bwspec(struct node_queue_bw *, u_int32_t);
+		     u_int64_t);
+u_int64_t	 eval_bwspec(struct node_queue_bw *, u_int64_t);
 void		 print_hfsc_sc(const char *, u_int, u_int, u_int,
 		     const struct node_hfsc_sc *);
+void		 print_fairq_sc(const char *, u_int, u_int, u_int,
+		     const struct node_fairq_sc *);
+
+static __attribute__((constructor)) void
+pfctl_altq_init(void)
+{
+	/*
+	 * As hdestroy() will never be called on these tables, it will be
+	 * safe to use references into the stored data as keys.
+	 */
+	if (hcreate_r(0, &queue_map) == 0)
+		err(1, "Failed to create altq queue map");
+	if (hcreate_r(0, &if_map) == 0)
+		err(1, "Failed to create altq interface map");
+	if (hcreate_r(0, &qid_map) == 0)
+		err(1, "Failed to create altq queue id map");
+}
 
 void
 pfaltq_store(struct pf_altq *a)
 {
-	struct pf_altq	*altq;
-
+	struct pfctl_altq	*altq;
+	ENTRY 			 item;
+	ENTRY			*ret_item;
+	size_t			 key_size;
+	
 	if ((altq = malloc(sizeof(*altq))) == NULL)
-		err(1, "malloc");
-	memcpy(altq, a, sizeof(struct pf_altq));
-	TAILQ_INSERT_TAIL(&altqs, altq, entries);
-}
+		err(1, "queue malloc");
+	memcpy(&altq->pa, a, sizeof(struct pf_altq));
+	memset(&altq->meta, 0, sizeof(altq->meta));
 
-struct pf_altq *
-pfaltq_lookup(const char *ifname)
-{
-	struct pf_altq	*altq;
+	if (a->qname[0] == 0) {
+		item.key = altq->pa.ifname;
+		item.data = altq;
+		if (hsearch_r(item, ENTER, &ret_item, &if_map) == 0)
+			err(1, "interface map insert");
+		STAILQ_INSERT_TAIL(&interfaces, altq, meta.link);
+	} else {
+		key_size = sizeof(a->ifname) + sizeof(a->qname);
+		if ((item.key = malloc(key_size)) == NULL)
+			err(1, "queue map key malloc");
+		snprintf(item.key, key_size, "%s:%s", a->ifname, a->qname);
+		item.data = altq;
+		if (hsearch_r(item, ENTER, &ret_item, &queue_map) == 0)
+			err(1, "queue map insert");
 
-	TAILQ_FOREACH(altq, &altqs, entries) {
-		if (strncmp(ifname, altq->ifname, IFNAMSIZ) == 0 &&
-		    altq->qname[0] == 0)
-			return (altq);
+		item.key = altq->pa.qname;
+		item.data = &altq->pa.qid;
+		if (hsearch_r(item, ENTER, &ret_item, &qid_map) == 0)
+			err(1, "qid map insert");
 	}
-	return (NULL);
 }
 
-struct pf_altq *
+static struct pfctl_altq *
+pfaltq_lookup(char *ifname)
+{
+	ENTRY	 item;
+	ENTRY	*ret_item;
+
+	item.key = ifname;
+	if (hsearch_r(item, FIND, &ret_item, &if_map) == 0)
+		return (NULL);
+
+	return (ret_item->data);
+}
+
+static struct pfctl_altq *
 qname_to_pfaltq(const char *qname, const char *ifname)
 {
-	struct pf_altq	*altq;
+	ENTRY	 item;
+	ENTRY	*ret_item;
+	char	 key[IFNAMSIZ + PF_QNAME_SIZE];
 
-	TAILQ_FOREACH(altq, &altqs, entries) {
-		if (strncmp(ifname, altq->ifname, IFNAMSIZ) == 0 &&
-		    strncmp(qname, altq->qname, PF_QNAME_SIZE) == 0)
-			return (altq);
-	}
-	return (NULL);
+	item.key = key;
+	snprintf(item.key, sizeof(key), "%s:%s", ifname, qname);
+	if (hsearch_r(item, FIND, &ret_item, &queue_map) == 0)
+		return (NULL);
+
+	return (ret_item->data);
 }
 
-u_int32_t
-qname_to_qid(const char *qname)
+static u_int32_t
+qname_to_qid(char *qname)
 {
-	struct pf_altq	*altq;
-
+	ENTRY	 item;
+	ENTRY	*ret_item;
+	uint32_t qid;
+	
 	/*
 	 * We guarantee that same named queues on different interfaces
-	 * have the same qid, so we do NOT need to limit matching on
-	 * one interface!
+	 * have the same qid.
 	 */
+	item.key = qname;
+	if (hsearch_r(item, FIND, &ret_item, &qid_map) == 0)
+		return (0);
 
-	TAILQ_FOREACH(altq, &altqs, entries) {
-		if (strncmp(qname, altq->qname, PF_QNAME_SIZE) == 0)
-			return (altq->qid);
-	}
-	return (0);
+	qid = *(uint32_t *)ret_item->data;
+	return (qid);
 }
 
 void
@@ -173,6 +238,14 @@ print_altq(const struct pf_altq *a, unsigned int level,
 		if (!print_hfsc_opts(a, qopts))
 			printf("hfsc ");
 		break;
+	case ALTQT_FAIRQ:
+		if (!print_fairq_opts(a, qopts))
+			printf("fairq ");
+		break;
+	case ALTQT_CODEL:
+		if (!print_codel_opts(a, qopts))
+			printf("codel ");
+		break;
 	}
 
 	if (bw != NULL && bw->bw_percent > 0) {
@@ -203,7 +276,8 @@ print_queue(const struct pf_altq *a, unsigned int level,
 	printf("%s ", a->qname);
 	if (print_interface)
 		printf("on %s ", a->ifname);
-	if (a->scheduler == ALTQT_CBQ || a->scheduler == ALTQT_HFSC) {
+	if (a->scheduler == ALTQT_CBQ || a->scheduler == ALTQT_HFSC ||
+		a->scheduler == ALTQT_FAIRQ) {
 		if (bw != NULL && bw->bw_percent > 0) {
 			if (bw->bw_percent < 100)
 				printf("bandwidth %u%% ", bw->bw_percent);
@@ -224,6 +298,9 @@ print_queue(const struct pf_altq *a, unsigned int level,
 	case ALTQT_HFSC:
 		print_hfsc_opts(a, qopts);
 		break;
+	case ALTQT_FAIRQ:
+		print_fairq_opts(a, qopts);
+		break;
 	}
 }
 
@@ -234,7 +311,8 @@ int
 eval_pfaltq(struct pfctl *pf, struct pf_altq *pa, struct node_queue_bw *bw,
     struct node_queue_opt *opts)
 {
-	u_int	rate, size, errors = 0;
+	u_int64_t	rate;
+	u_int		size, errors = 0;
 
 	if (bw->bw_absolute > 0)
 		pa->ifbandwidth = bw->bw_absolute;
@@ -251,6 +329,15 @@ eval_pfaltq(struct pfctl *pf, struct pf_altq *pa, struct node_queue_bw *bw,
 		} else if ((pa->ifbandwidth = eval_bwspec(bw, rate)) == 0)
 			pa->ifbandwidth = rate;
 
+	/*
+	 * Limit bandwidth to UINT_MAX for schedulers that aren't 64-bit ready.
+	 */
+	if ((pa->scheduler != ALTQT_HFSC) && (pa->ifbandwidth > UINT_MAX)) {
+		pa->ifbandwidth = UINT_MAX;
+		warnx("interface %s bandwidth limited to %" PRIu64 " bps "
+		    "because selected scheduler is 32-bit limited\n", pa->ifname,
+		    pa->ifbandwidth);
+	}
 	errors += eval_queue_opts(pa, opts, pa->ifbandwidth);
 
 	/* if tbrsize is not specified, use heuristics */
@@ -262,11 +349,11 @@ eval_pfaltq(struct pfctl *pf, struct pf_altq *pa, struct node_queue_bw *bw,
 			size = 4;
 		else if (rate <= 200 * 1000 * 1000)
 			size = 8;
-		else
+		else if (rate <= 2500 * 1000 * 1000ULL)
 			size = 24;
+		else
+			size = 128;
 		size = size * getifmtu(pa->ifname);
-		if (size > 0xffff)
-			size = 0xffff;
 		pa->tbrsize = size;
 	}
 	return (errors);
@@ -278,25 +365,26 @@ eval_pfaltq(struct pfctl *pf, struct pf_altq *pa, struct node_queue_bw *bw,
 int
 check_commit_altq(int dev, int opts)
 {
-	struct pf_altq	*altq;
-	int		 error = 0;
+	struct pfctl_altq	*if_ppa;
+	int			 error = 0;
 
 	/* call the discipline check for each interface. */
-	TAILQ_FOREACH(altq, &altqs, entries) {
-		if (altq->qname[0] == 0) {
-			switch (altq->scheduler) {
-			case ALTQT_CBQ:
-				error = check_commit_cbq(dev, opts, altq);
-				break;
-			case ALTQT_PRIQ:
-				error = check_commit_priq(dev, opts, altq);
-				break;
-			case ALTQT_HFSC:
-				error = check_commit_hfsc(dev, opts, altq);
-				break;
-			default:
-				break;
-			}
+	STAILQ_FOREACH(if_ppa, &interfaces, meta.link) {
+		switch (if_ppa->pa.scheduler) {
+		case ALTQT_CBQ:
+			error = check_commit_cbq(dev, opts, if_ppa);
+			break;
+		case ALTQT_PRIQ:
+			error = check_commit_priq(dev, opts, if_ppa);
+			break;
+		case ALTQT_HFSC:
+			error = check_commit_hfsc(dev, opts, if_ppa);
+			break;
+		case ALTQT_FAIRQ:
+			error = check_commit_fairq(dev, opts, if_ppa);
+			break;
+		default:
+			break;
 		}
 	}
 	return (error);
@@ -310,17 +398,16 @@ eval_pfqueue(struct pfctl *pf, struct pf_altq *pa, struct node_queue_bw *bw,
     struct node_queue_opt *opts)
 {
 	/* should be merged with expand_queue */
-	struct pf_altq	*if_pa, *parent, *altq;
-	u_int32_t	 bwsum;
-	int		 error = 0;
+	struct pfctl_altq	*if_ppa, *parent;
+	int		 	 error = 0;
 
 	/* find the corresponding interface and copy fields used by queues */
-	if ((if_pa = pfaltq_lookup(pa->ifname)) == NULL) {
+	if ((if_ppa = pfaltq_lookup(pa->ifname)) == NULL) {
 		fprintf(stderr, "altq not defined on %s\n", pa->ifname);
 		return (1);
 	}
-	pa->scheduler = if_pa->scheduler;
-	pa->ifbandwidth = if_pa->ifbandwidth;
+	pa->scheduler = if_ppa->pa.scheduler;
+	pa->ifbandwidth = if_ppa->pa.ifbandwidth;
 
 	if (qname_to_pfaltq(pa->qname, pa->ifname) != NULL) {
 		fprintf(stderr, "queue %s already exists on interface %s\n",
@@ -337,56 +424,64 @@ eval_pfqueue(struct pfctl *pf, struct pf_altq *pa, struct node_queue_bw *bw,
 			    pa->parent, pa->qname);
 			return (1);
 		}
-		pa->parent_qid = parent->qid;
+		pa->parent_qid = parent->pa.qid;
 	}
 	if (pa->qlimit == 0)
 		pa->qlimit = DEFAULT_QLIMIT;
 
-	if (pa->scheduler == ALTQT_CBQ || pa->scheduler == ALTQT_HFSC) {
+	if (pa->scheduler == ALTQT_CBQ || pa->scheduler == ALTQT_HFSC ||
+		pa->scheduler == ALTQT_FAIRQ) {
 		pa->bandwidth = eval_bwspec(bw,
-		    parent == NULL ? 0 : parent->bandwidth);
+		    parent == NULL ? pa->ifbandwidth : parent->pa.bandwidth);
 
 		if (pa->bandwidth > pa->ifbandwidth) {
 			fprintf(stderr, "bandwidth for %s higher than "
 			    "interface\n", pa->qname);
 			return (1);
 		}
-		/* check the sum of the child bandwidth is under parent's */
-		if (parent != NULL) {
-			if (pa->bandwidth > parent->bandwidth) {
+		/*
+		 * If not HFSC, then check that the sum of the child
+		 * bandwidths is less than the parent's bandwidth.  For
+		 * HFSC, the equivalent concept is to check that the sum of
+		 * the child linkshare service curves are under the parent's
+		 * linkshare service curve, and that check is performed by
+		 * eval_pfqueue_hfsc().
+		 */
+		if ((parent != NULL) && (pa->scheduler != ALTQT_HFSC)) {
+			if (pa->bandwidth > parent->pa.bandwidth) {
 				warnx("bandwidth for %s higher than parent",
 				    pa->qname);
 				return (1);
 			}
-			bwsum = 0;
-			TAILQ_FOREACH(altq, &altqs, entries) {
-				if (strncmp(altq->ifname, pa->ifname,
-				    IFNAMSIZ) == 0 &&
-				    altq->qname[0] != 0 &&
-				    strncmp(altq->parent, pa->parent,
-				    PF_QNAME_SIZE) == 0)
-					bwsum += altq->bandwidth;
-			}
-			bwsum += pa->bandwidth;
-			if (bwsum > parent->bandwidth) {
-				warnx("the sum of the child bandwidth higher"
-				    " than parent \"%s\"", parent->qname);
+			parent->meta.bwsum += pa->bandwidth;
+			if (parent->meta.bwsum > parent->pa.bandwidth) {
+				warnx("the sum of the child bandwidth (%" PRIu64
+				    ") higher than parent \"%s\" (%" PRIu64 ")",
+				    parent->meta.bwsum, parent->pa.qname,
+				    parent->pa.bandwidth);
 			}
 		}
 	}
 
-	if (eval_queue_opts(pa, opts, parent == NULL? 0 : parent->bandwidth))
+	if (eval_queue_opts(pa, opts,
+		parent == NULL ? pa->ifbandwidth : parent->pa.bandwidth))
 		return (1);
 
+	if (parent != NULL)
+		parent->meta.children++;
+	
 	switch (pa->scheduler) {
 	case ALTQT_CBQ:
-		error = eval_pfqueue_cbq(pf, pa);
+		error = eval_pfqueue_cbq(pf, pa, if_ppa);
 		break;
 	case ALTQT_PRIQ:
-		error = eval_pfqueue_priq(pf, pa);
+		error = eval_pfqueue_priq(pf, pa, if_ppa);
 		break;
 	case ALTQT_HFSC:
-		error = eval_pfqueue_hfsc(pf, pa);
+		error = eval_pfqueue_hfsc(pf, pa, if_ppa, parent);
+		break;
+	case ALTQT_FAIRQ:
+		error = eval_pfqueue_fairq(pf, pa, if_ppa, parent);
 		break;
 	default:
 		break;
@@ -401,7 +496,7 @@ eval_pfqueue(struct pfctl *pf, struct pf_altq *pa, struct node_queue_bw *bw,
 #define	RM_NS_PER_SEC	(1000000000)
 
 static int
-eval_pfqueue_cbq(struct pfctl *pf, struct pf_altq *pa)
+eval_pfqueue_cbq(struct pfctl *pf, struct pf_altq *pa, struct pfctl_altq *if_ppa)
 {
 	struct cbq_opts	*opts;
 	u_int		 ifmtu;
@@ -431,6 +526,11 @@ eval_pfqueue_cbq(struct pfctl *pf, struct pf_altq *pa)
 	if (pa->parent[0] == 0)
 		opts->flags |= (CBQCLF_ROOTCLASS | CBQCLF_WRR);
 
+	if (pa->pq_u.cbq_opts.flags & CBQCLF_ROOTCLASS)
+		if_ppa->meta.root_classes++;
+	if (pa->pq_u.cbq_opts.flags & CBQCLF_DEFCLASS)
+		if_ppa->meta.default_classes++;
+	
 	cbq_compute_idletime(pf, pa);
 	return (0);
 }
@@ -466,12 +566,13 @@ cbq_compute_idletime(struct pfctl *pf, struct pf_altq *pa)
 		 * this causes integer overflow in kernel!
 		 * (bandwidth < 6Kbps when max_pkt_size=1500)
 		 */
-		if (pa->bandwidth != 0 && (pf->opts & PF_OPT_QUIET) == 0)
+		if (pa->bandwidth != 0 && (pf->opts & PF_OPT_QUIET) == 0) {
 			warnx("queue bandwidth must be larger than %s",
 			    rate2str(ifnsPerByte * (double)opts->maxpktsize /
 			    (double)INT_MAX * (double)pa->ifbandwidth));
 			fprintf(stderr, "cbq: queue %s is too slow!\n",
 			    pa->qname);
+		}
 		nsPerByte = (double)(INT_MAX / opts->maxpktsize);
 	}
 
@@ -522,33 +623,20 @@ cbq_compute_idletime(struct pfctl *pf, struct pf_altq *pa)
 }
 
 static int
-check_commit_cbq(int dev, int opts, struct pf_altq *pa)
+check_commit_cbq(int dev, int opts, struct pfctl_altq *if_ppa)
 {
-	struct pf_altq	*altq;
-	int		 root_class, default_class;
-	int		 error = 0;
+	int	error = 0;
 
 	/*
 	 * check if cbq has one root queue and one default queue
 	 * for this interface
 	 */
-	root_class = default_class = 0;
-	TAILQ_FOREACH(altq, &altqs, entries) {
-		if (strncmp(altq->ifname, pa->ifname, IFNAMSIZ) != 0)
-			continue;
-		if (altq->qname[0] == 0)  /* this is for interface */
-			continue;
-		if (altq->pq_u.cbq_opts.flags & CBQCLF_ROOTCLASS)
-			root_class++;
-		if (altq->pq_u.cbq_opts.flags & CBQCLF_DEFCLASS)
-			default_class++;
-	}
-	if (root_class != 1) {
-		warnx("should have one root queue on %s", pa->ifname);
+	if (if_ppa->meta.root_classes != 1) {
+		warnx("should have one root queue on %s", if_ppa->pa.ifname);
 		error++;
 	}
-	if (default_class != 1) {
-		warnx("should have one default queue on %s", pa->ifname);
+	if (if_ppa->meta.default_classes != 1) {
+		warnx("should have one default queue on %s", if_ppa->pa.ifname);
 		error++;
 	}
 	return (error);
@@ -568,6 +656,8 @@ print_cbq_opts(const struct pf_altq *a)
 			printf(" ecn");
 		if (opts->flags & CBQCLF_RIO)
 			printf(" rio");
+		if (opts->flags & CBQCLF_CODEL)
+			printf(" codel");
 		if (opts->flags & CBQCLF_CLEARDSCP)
 			printf(" cleardscp");
 		if (opts->flags & CBQCLF_FLOWVALVE)
@@ -593,51 +683,37 @@ print_cbq_opts(const struct pf_altq *a)
  * PRIQ support functions
  */
 static int
-eval_pfqueue_priq(struct pfctl *pf, struct pf_altq *pa)
+eval_pfqueue_priq(struct pfctl *pf, struct pf_altq *pa, struct pfctl_altq *if_ppa)
 {
-	struct pf_altq	*altq;
 
 	if (pa->priority >= PRIQ_MAXPRI) {
 		warnx("priority out of range: max %d", PRIQ_MAXPRI - 1);
 		return (-1);
 	}
-	/* the priority should be unique for the interface */
-	TAILQ_FOREACH(altq, &altqs, entries) {
-		if (strncmp(altq->ifname, pa->ifname, IFNAMSIZ) == 0 &&
-		    altq->qname[0] != 0 && altq->priority == pa->priority) {
-			warnx("%s and %s have the same priority",
-			    altq->qname, pa->qname);
-			return (-1);
-		}
-	}
+	if (BIT_ISSET(QPRI_BITSET_SIZE, pa->priority, &if_ppa->meta.qpris)) {
+		warnx("%s does not have a unique priority on interface %s",
+		    pa->qname, pa->ifname);
+		return (-1);
+	} else
+		BIT_SET(QPRI_BITSET_SIZE, pa->priority, &if_ppa->meta.qpris);
 
+	if (pa->pq_u.priq_opts.flags & PRCF_DEFAULTCLASS)
+		if_ppa->meta.default_classes++;
 	return (0);
 }
 
 static int
-check_commit_priq(int dev, int opts, struct pf_altq *pa)
+check_commit_priq(int dev, int opts, struct pfctl_altq *if_ppa)
 {
-	struct pf_altq	*altq;
-	int		 default_class;
-	int		 error = 0;
 
 	/*
 	 * check if priq has one default class for this interface
 	 */
-	default_class = 0;
-	TAILQ_FOREACH(altq, &altqs, entries) {
-		if (strncmp(altq->ifname, pa->ifname, IFNAMSIZ) != 0)
-			continue;
-		if (altq->qname[0] == 0)  /* this is for interface */
-			continue;
-		if (altq->pq_u.priq_opts.flags & PRCF_DEFAULTCLASS)
-			default_class++;
+	if (if_ppa->meta.default_classes != 1) {
+		warnx("should have one default queue on %s", if_ppa->pa.ifname);
+		return (1);
 	}
-	if (default_class != 1) {
-		warnx("should have one default queue on %s", pa->ifname);
-		error++;
-	}
-	return (error);
+	return (0);
 }
 
 static int
@@ -655,6 +731,8 @@ print_priq_opts(const struct pf_altq *a)
 			printf(" ecn");
 		if (opts->flags & PRCF_RIO)
 			printf(" rio");
+		if (opts->flags & PRCF_CODEL)
+			printf(" codel");
 		if (opts->flags & PRCF_CLEARDSCP)
 			printf(" cleardscp");
 		if (opts->flags & PRCF_DEFAULTCLASS)
@@ -670,15 +748,15 @@ print_priq_opts(const struct pf_altq *a)
  * HFSC support functions
  */
 static int
-eval_pfqueue_hfsc(struct pfctl *pf, struct pf_altq *pa)
+eval_pfqueue_hfsc(struct pfctl *pf, struct pf_altq *pa, struct pfctl_altq *if_ppa,
+    struct pfctl_altq *parent)
 {
-	struct pf_altq		*altq, *parent;
-	struct hfsc_opts	*opts;
+	struct hfsc_opts_v1	*opts;
 	struct service_curve	 sc;
 
 	opts = &pa->pq_u.hfsc_opts;
 
-	if (pa->parent[0] == 0) {
+	if (parent == NULL) {
 		/* root queue */
 		opts->lssc_m1 = pa->ifbandwidth;
 		opts->lssc_m2 = pa->ifbandwidth;
@@ -686,9 +764,21 @@ eval_pfqueue_hfsc(struct pfctl *pf, struct pf_altq *pa)
 		return (0);
 	}
 
-	LIST_INIT(&rtsc);
-	LIST_INIT(&lssc);
+	/* First child initializes the parent's service curve accumulators. */
+	if (parent->meta.children == 1) {
+		LIST_INIT(&parent->meta.rtsc);
+		LIST_INIT(&parent->meta.lssc);
+	}
 
+	if (parent->pa.pq_u.hfsc_opts.flags & HFCF_DEFAULTCLASS) {
+		warnx("adding %s would make default queue %s not a leaf",
+		    pa->qname, pa->parent);
+		return (-1);
+	}
+
+	if (pa->pq_u.hfsc_opts.flags & HFCF_DEFAULTCLASS)
+		if_ppa->meta.default_classes++;
+	
 	/* if link_share is not specified, use bandwidth */
 	if (opts->lssc_m2 == 0)
 		opts->lssc_m2 = pa->bandwidth;
@@ -718,51 +808,22 @@ eval_pfqueue_hfsc(struct pfctl *pf, struct pf_altq *pa)
 	 * be smaller than the interface bandwidth, and the upper-limit should
 	 * be larger than the real-time service curve when both are defined.
 	 */
-	parent = qname_to_pfaltq(pa->parent, pa->ifname);
-	if (parent == NULL)
-		errx(1, "parent %s not found for %s", pa->parent, pa->qname);
-
-	TAILQ_FOREACH(altq, &altqs, entries) {
-		if (strncmp(altq->ifname, pa->ifname, IFNAMSIZ) != 0)
-			continue;
-		if (altq->qname[0] == 0)  /* this is for interface */
-			continue;
-
-		/* if the class has a real-time service curve, add it. */
-		if (opts->rtsc_m2 != 0 && altq->pq_u.hfsc_opts.rtsc_m2 != 0) {
-			sc.m1 = altq->pq_u.hfsc_opts.rtsc_m1;
-			sc.d = altq->pq_u.hfsc_opts.rtsc_d;
-			sc.m2 = altq->pq_u.hfsc_opts.rtsc_m2;
-			gsc_add_sc(&rtsc, &sc);
-		}
-
-		if (strncmp(altq->parent, pa->parent, PF_QNAME_SIZE) != 0)
-			continue;
-
-		/* if the class has a linkshare service curve, add it. */
-		if (opts->lssc_m2 != 0 && altq->pq_u.hfsc_opts.lssc_m2 != 0) {
-			sc.m1 = altq->pq_u.hfsc_opts.lssc_m1;
-			sc.d = altq->pq_u.hfsc_opts.lssc_d;
-			sc.m2 = altq->pq_u.hfsc_opts.lssc_m2;
-			gsc_add_sc(&lssc, &sc);
-		}
-	}
-
+	
 	/* check the real-time service curve.  reserve 20% of interface bw */
 	if (opts->rtsc_m2 != 0) {
 		/* add this queue to the sum */
 		sc.m1 = opts->rtsc_m1;
 		sc.d = opts->rtsc_d;
 		sc.m2 = opts->rtsc_m2;
-		gsc_add_sc(&rtsc, &sc);
+		gsc_add_sc(&parent->meta.rtsc, &sc);
 		/* compare the sum with 80% of the interface */
 		sc.m1 = 0;
 		sc.d = 0;
 		sc.m2 = pa->ifbandwidth / 100 * 80;
-		if (!is_gsc_under_sc(&rtsc, &sc)) {
+		if (!is_gsc_under_sc(&parent->meta.rtsc, &sc)) {
 			warnx("real-time sc exceeds 80%% of the interface "
 			    "bandwidth (%s)", rate2str((double)sc.m2));
-			goto err_ret;
+			return (-1);
 		}
 	}
 
@@ -772,14 +833,14 @@ eval_pfqueue_hfsc(struct pfctl *pf, struct pf_altq *pa)
 		sc.m1 = opts->lssc_m1;
 		sc.d = opts->lssc_d;
 		sc.m2 = opts->lssc_m2;
-		gsc_add_sc(&lssc, &sc);
+		gsc_add_sc(&parent->meta.lssc, &sc);
 		/* compare the sum of the children with parent's sc */
-		sc.m1 = parent->pq_u.hfsc_opts.lssc_m1;
-		sc.d = parent->pq_u.hfsc_opts.lssc_d;
-		sc.m2 = parent->pq_u.hfsc_opts.lssc_m2;
-		if (!is_gsc_under_sc(&lssc, &sc)) {
+		sc.m1 = parent->pa.pq_u.hfsc_opts.lssc_m1;
+		sc.d = parent->pa.pq_u.hfsc_opts.lssc_d;
+		sc.m2 = parent->pa.pq_u.hfsc_opts.lssc_m2;
+		if (!is_gsc_under_sc(&parent->meta.lssc, &sc)) {
 			warnx("linkshare sc exceeds parent's sc");
-			goto err_ret;
+			return (-1);
 		}
 	}
 
@@ -788,68 +849,114 @@ eval_pfqueue_hfsc(struct pfctl *pf, struct pf_altq *pa)
 		if (opts->ulsc_m1 > pa->ifbandwidth ||
 		    opts->ulsc_m2 > pa->ifbandwidth) {
 			warnx("upper-limit larger than interface bandwidth");
-			goto err_ret;
+			return (-1);
 		}
 		if (opts->rtsc_m2 != 0 && opts->rtsc_m2 > opts->ulsc_m2) {
 			warnx("upper-limit sc smaller than real-time sc");
-			goto err_ret;
+			return (-1);
 		}
 	}
 
-	gsc_destroy(&rtsc);
-	gsc_destroy(&lssc);
+	return (0);
+}
+
+/*
+ * FAIRQ support functions
+ */
+static int
+eval_pfqueue_fairq(struct pfctl *pf __unused, struct pf_altq *pa,
+    struct pfctl_altq *if_ppa, struct pfctl_altq *parent)
+{
+	struct fairq_opts	*opts;
+	struct service_curve	 sc;
+
+	opts = &pa->pq_u.fairq_opts;
+
+	if (pa->parent == NULL) {
+		/* root queue */
+		opts->lssc_m1 = pa->ifbandwidth;
+		opts->lssc_m2 = pa->ifbandwidth;
+		opts->lssc_d = 0;
+		return (0);
+	}
+
+	/* First child initializes the parent's service curve accumulator. */
+	if (parent->meta.children == 1)
+		LIST_INIT(&parent->meta.lssc);
+
+	if (parent->pa.pq_u.fairq_opts.flags & FARF_DEFAULTCLASS) {
+		warnx("adding %s would make default queue %s not a leaf",
+		    pa->qname, pa->parent);
+		return (-1);
+	}
+
+	if (pa->pq_u.fairq_opts.flags & FARF_DEFAULTCLASS)
+		if_ppa->meta.default_classes++;
+
+	/* if link_share is not specified, use bandwidth */
+	if (opts->lssc_m2 == 0)
+		opts->lssc_m2 = pa->bandwidth;
+
+	/*
+	 * admission control:
+	 * for the real-time service curve, the sum of the service curves
+	 * should not exceed 80% of the interface bandwidth.  20% is reserved
+	 * not to over-commit the actual interface bandwidth.
+	 * for the link-sharing service curve, the sum of the child service
+	 * curve should not exceed the parent service curve.
+	 * for the upper-limit service curve, the assigned bandwidth should
+	 * be smaller than the interface bandwidth, and the upper-limit should
+	 * be larger than the real-time service curve when both are defined.
+	 */
+
+	/* check the linkshare service curve. */
+	if (opts->lssc_m2 != 0) {
+		/* add this queue to the child sum */
+		sc.m1 = opts->lssc_m1;
+		sc.d = opts->lssc_d;
+		sc.m2 = opts->lssc_m2;
+		gsc_add_sc(&parent->meta.lssc, &sc);
+		/* compare the sum of the children with parent's sc */
+		sc.m1 = parent->pa.pq_u.fairq_opts.lssc_m1;
+		sc.d = parent->pa.pq_u.fairq_opts.lssc_d;
+		sc.m2 = parent->pa.pq_u.fairq_opts.lssc_m2;
+		if (!is_gsc_under_sc(&parent->meta.lssc, &sc)) {
+			warnx("link-sharing sc exceeds parent's sc");
+			return (-1);
+		}
+	}
 
 	return (0);
-
-err_ret:
-	gsc_destroy(&rtsc);
-	gsc_destroy(&lssc);
-	return (-1);
 }
 
 static int
-check_commit_hfsc(int dev, int opts, struct pf_altq *pa)
+check_commit_hfsc(int dev, int opts, struct pfctl_altq *if_ppa)
 {
-	struct pf_altq	*altq, *def = NULL;
-	int		 default_class;
-	int		 error = 0;
 
 	/* check if hfsc has one default queue for this interface */
-	default_class = 0;
-	TAILQ_FOREACH(altq, &altqs, entries) {
-		if (strncmp(altq->ifname, pa->ifname, IFNAMSIZ) != 0)
-			continue;
-		if (altq->qname[0] == 0)  /* this is for interface */
-			continue;
-		if (altq->parent[0] == 0)  /* dummy root */
-			continue;
-		if (altq->pq_u.hfsc_opts.flags & HFCF_DEFAULTCLASS) {
-			default_class++;
-			def = altq;
-		}
-	}
-	if (default_class != 1) {
-		warnx("should have one default queue on %s", pa->ifname);
+	if (if_ppa->meta.default_classes != 1) {
+		warnx("should have one default queue on %s", if_ppa->pa.ifname);
 		return (1);
 	}
-	/* make sure the default queue is a leaf */
-	TAILQ_FOREACH(altq, &altqs, entries) {
-		if (strncmp(altq->ifname, pa->ifname, IFNAMSIZ) != 0)
-			continue;
-		if (altq->qname[0] == 0)  /* this is for interface */
-			continue;
-		if (strncmp(altq->parent, def->qname, PF_QNAME_SIZE) == 0) {
-			warnx("default queue is not a leaf");
-			error++;
-		}
+	return (0);
+}
+
+static int
+check_commit_fairq(int dev __unused, int opts __unused, struct pfctl_altq *if_ppa)
+{
+
+	/* check if fairq has one default queue for this interface */
+	if (if_ppa->meta.default_classes != 1) {
+		warnx("should have one default queue on %s", if_ppa->pa.ifname);
+		return (1);
 	}
-	return (error);
+	return (0);
 }
 
 static int
 print_hfsc_opts(const struct pf_altq *a, const struct node_queue_opt *qopts)
 {
-	const struct hfsc_opts		*opts;
+	const struct hfsc_opts_v1	*opts;
 	const struct node_hfsc_sc	*rtsc, *lssc, *ulsc;
 
 	opts = &a->pq_u.hfsc_opts;
@@ -871,6 +978,8 @@ print_hfsc_opts(const struct pf_altq *a, const struct node_queue_opt *qopts)
 			printf(" ecn");
 		if (opts->flags & HFCF_RIO)
 			printf(" rio");
+		if (opts->flags & HFCF_CODEL)
+			printf(" codel");
 		if (opts->flags & HFCF_CLEARDSCP)
 			printf(" cleardscp");
 		if (opts->flags & HFCF_DEFAULTCLASS)
@@ -885,6 +994,67 @@ print_hfsc_opts(const struct pf_altq *a, const struct node_queue_opt *qopts)
 		if (opts->ulsc_m2 != 0)
 			print_hfsc_sc("upperlimit", opts->ulsc_m1, opts->ulsc_d,
 			    opts->ulsc_m2, ulsc);
+		printf(" ) ");
+
+		return (1);
+	} else
+		return (0);
+}
+
+static int
+print_codel_opts(const struct pf_altq *a, const struct node_queue_opt *qopts)
+{
+	const struct codel_opts *opts;
+
+	opts = &a->pq_u.codel_opts;
+	if (opts->target || opts->interval || opts->ecn) {
+		printf("codel(");
+		if (opts->target)
+			printf(" target %d", opts->target);
+		if (opts->interval)
+			printf(" interval %d", opts->interval);
+		if (opts->ecn)
+			printf("ecn");
+		printf(" ) ");
+
+		return (1);
+	}
+
+	return (0);
+}
+
+static int
+print_fairq_opts(const struct pf_altq *a, const struct node_queue_opt *qopts)
+{
+	const struct fairq_opts		*opts;
+	const struct node_fairq_sc	*loc_lssc;
+
+	opts = &a->pq_u.fairq_opts;
+	if (qopts == NULL)
+		loc_lssc = NULL;
+	else
+		loc_lssc = &qopts->data.fairq_opts.linkshare;
+
+	if (opts->flags ||
+	    (opts->lssc_m2 != 0 && (opts->lssc_m2 != a->bandwidth ||
+	    opts->lssc_d != 0))) {
+		printf("fairq(");
+		if (opts->flags & FARF_RED)
+			printf(" red");
+		if (opts->flags & FARF_ECN)
+			printf(" ecn");
+		if (opts->flags & FARF_RIO)
+			printf(" rio");
+		if (opts->flags & FARF_CODEL)
+			printf(" codel");
+		if (opts->flags & FARF_CLEARDSCP)
+			printf(" cleardscp");
+		if (opts->flags & FARF_DEFAULTCLASS)
+			printf(" default");
+		if (opts->lssc_m2 != 0 && (opts->lssc_m2 != a->bandwidth ||
+		    opts->lssc_d != 0))
+			print_fairq_sc("linkshare", opts->lssc_m1, opts->lssc_d,
+			    opts->lssc_m2, loc_lssc);
 		printf(" ) ");
 
 		return (1);
@@ -951,17 +1121,6 @@ is_gsc_under_sc(struct gen_sc *gsc, struct service_curve *sc)
 			return (0);
 	}
 	return (1);
-}
-
-static void
-gsc_destroy(struct gen_sc *gsc)
-{
-	struct segment	*s;
-
-	while ((s = LIST_FIRST(gsc)) != NULL) {
-		LIST_REMOVE(s, _next);
-		free(s);
-	}
 }
 
 /*
@@ -1101,7 +1260,7 @@ rate2str(double rate)
  * FreeBSD does not have SIOCGIFDATA.
  * To emulate this, DIOCGIFSPEED ioctl added to pf.
  */
-u_int32_t
+u_int64_t
 getifspeed(int pfdev, char *ifname)
 {
 	struct pf_ifspeed io;
@@ -1112,7 +1271,7 @@ getifspeed(int pfdev, char *ifname)
 		errx(1, "getifspeed: strlcpy");
 	if (ioctl(pfdev, DIOCGIFSPEED, &io) == -1)
 		err(1, "DIOCGIFSPEED");
-	return ((u_int32_t)io.baudrate);
+	return (io.baudrate);
 }
 #else
 u_int32_t
@@ -1122,8 +1281,7 @@ getifspeed(char *ifname)
 	struct ifreq	ifr;
 	struct if_data	ifrdat;
 
-	if ((s = socket(get_socket_domain(), SOCK_DGRAM, 0)) < 0)
-		err(1, "socket");
+	s = get_query_socket();
 	bzero(&ifr, sizeof(ifr));
 	if (strlcpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name)) >=
 	    sizeof(ifr.ifr_name))
@@ -1131,8 +1289,6 @@ getifspeed(char *ifname)
 	ifr.ifr_data = (caddr_t)&ifrdat;
 	if (ioctl(s, SIOCGIFDATA, (caddr_t)&ifr) == -1)
 		err(1, "SIOCGIFDATA");
-	if (close(s))
-		err(1, "close");
 	return ((u_int32_t)ifrdat.ifi_baudrate);
 }
 #endif
@@ -1143,8 +1299,7 @@ getifmtu(char *ifname)
 	int		s;
 	struct ifreq	ifr;
 
-	if ((s = socket(get_socket_domain(), SOCK_DGRAM, 0)) < 0)
-		err(1, "socket");
+	s = get_query_socket();
 	bzero(&ifr, sizeof(ifr));
 	if (strlcpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name)) >=
 	    sizeof(ifr.ifr_name))
@@ -1155,8 +1310,6 @@ getifmtu(char *ifname)
 #else
 		err(1, "SIOCGIFMTU");
 #endif
-	if (close(s))
-		err(1, "close");
 	if (ifr.ifr_mtu > 0)
 		return (ifr.ifr_mtu);
 	else {
@@ -1167,7 +1320,7 @@ getifmtu(char *ifname)
 
 int
 eval_queue_opts(struct pf_altq *pa, struct node_queue_opt *opts,
-    u_int32_t ref_bw)
+    u_int64_t ref_bw)
 {
 	int	errors = 0;
 
@@ -1211,6 +1364,28 @@ eval_queue_opts(struct pf_altq *pa, struct node_queue_opt *opts,
 			    opts->data.hfsc_opts.upperlimit.d;
 		}
 		break;
+	case ALTQT_FAIRQ:
+		pa->pq_u.fairq_opts.flags = opts->data.fairq_opts.flags;
+		pa->pq_u.fairq_opts.nbuckets = opts->data.fairq_opts.nbuckets;
+		pa->pq_u.fairq_opts.hogs_m1 =
+			eval_bwspec(&opts->data.fairq_opts.hogs_bw, ref_bw);
+
+		if (opts->data.fairq_opts.linkshare.used) {
+			pa->pq_u.fairq_opts.lssc_m1 =
+			    eval_bwspec(&opts->data.fairq_opts.linkshare.m1,
+			    ref_bw);
+			pa->pq_u.fairq_opts.lssc_m2 =
+			    eval_bwspec(&opts->data.fairq_opts.linkshare.m2,
+			    ref_bw);
+			pa->pq_u.fairq_opts.lssc_d =
+			    opts->data.fairq_opts.linkshare.d;
+		}
+		break;
+	case ALTQT_CODEL:
+		pa->pq_u.codel_opts.target = opts->data.codel_opts.target;
+		pa->pq_u.codel_opts.interval = opts->data.codel_opts.interval;
+		pa->pq_u.codel_opts.ecn = opts->data.codel_opts.ecn;
+		break;
 	default:
 		warnx("eval_queue_opts: unknown scheduler type %u",
 		    opts->qtype);
@@ -1221,11 +1396,21 @@ eval_queue_opts(struct pf_altq *pa, struct node_queue_opt *opts,
 	return (errors);
 }
 
-u_int32_t
-eval_bwspec(struct node_queue_bw *bw, u_int32_t ref_bw)
+/*
+ * If absolute bandwidth if set, return the lesser of that value and the
+ * reference bandwidth.  Limiting to the reference bandwidth allows simple
+ * limiting of configured bandwidth parameters for schedulers that are
+ * 32-bit limited, as the root/interface bandwidth (top-level reference
+ * bandwidth) will be properly limited in that case.
+ *
+ * Otherwise, if the absolute bandwidth is not set, return given percentage
+ * of reference bandwidth.
+ */
+u_int64_t
+eval_bwspec(struct node_queue_bw *bw, u_int64_t ref_bw)
 {
 	if (bw->bw_absolute > 0)
-		return (bw->bw_absolute);
+		return (MIN(bw->bw_absolute, ref_bw));
 
 	if (bw->bw_percent > 0)
 		return (ref_bw / 100 * bw->bw_percent);
@@ -1236,6 +1421,30 @@ eval_bwspec(struct node_queue_bw *bw, u_int32_t ref_bw)
 void
 print_hfsc_sc(const char *scname, u_int m1, u_int d, u_int m2,
     const struct node_hfsc_sc *sc)
+{
+	printf(" %s", scname);
+
+	if (d != 0) {
+		printf("(");
+		if (sc != NULL && sc->m1.bw_percent > 0)
+			printf("%u%%", sc->m1.bw_percent);
+		else
+			printf("%s", rate2str((double)m1));
+		printf(" %u", d);
+	}
+
+	if (sc != NULL && sc->m2.bw_percent > 0)
+		printf(" %u%%", sc->m2.bw_percent);
+	else
+		printf(" %s", rate2str((double)m2));
+
+	if (d != 0)
+		printf(")");
+}
+
+void
+print_fairq_sc(const char *scname, u_int m1, u_int d, u_int m2,
+    const struct node_fairq_sc *sc)
 {
 	printf(" %s", scname);
 

@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) 1996
  *	Bill Paul <wpaul@ctr.columbia.edu>.  All rights reserved.
  *
@@ -43,10 +45,7 @@ __FBSDID("$FreeBSD$");
 #include "un-namespace.h"
 
 int
-_des_crypt_call(buf, len, dparms)
-	char *buf;
-	int len;
-	struct desparams *dparms;
+_des_crypt_call(char *buf, int len, struct desparams *dparms)
 {
 	CLIENT *clnt;
 	desresp  *result_1;

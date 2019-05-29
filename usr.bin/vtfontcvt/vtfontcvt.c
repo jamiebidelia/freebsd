@@ -63,10 +63,10 @@ struct glyph {
 TAILQ_HEAD(glyph_list, glyph);
 static SLIST_HEAD(, glyph) glyph_hash[FONTCVT_NHASH];
 static struct glyph_list glyphs[VFNT_MAPS] = {
-    TAILQ_HEAD_INITIALIZER(glyphs[0]),
-    TAILQ_HEAD_INITIALIZER(glyphs[1]),
-    TAILQ_HEAD_INITIALIZER(glyphs[2]),
-    TAILQ_HEAD_INITIALIZER(glyphs[3]),
+	TAILQ_HEAD_INITIALIZER(glyphs[0]),
+	TAILQ_HEAD_INITIALIZER(glyphs[1]),
+	TAILQ_HEAD_INITIALIZER(glyphs[2]),
+	TAILQ_HEAD_INITIALIZER(glyphs[3]),
 };
 static unsigned int glyph_total, glyph_count[4], glyph_unique, glyph_dupe;
 
@@ -79,10 +79,10 @@ struct mapping {
 
 TAILQ_HEAD(mapping_list, mapping);
 static struct mapping_list maps[VFNT_MAPS] = {
-    TAILQ_HEAD_INITIALIZER(maps[0]),
-    TAILQ_HEAD_INITIALIZER(maps[1]),
-    TAILQ_HEAD_INITIALIZER(maps[2]),
-    TAILQ_HEAD_INITIALIZER(maps[3]),
+	TAILQ_HEAD_INITIALIZER(maps[0]),
+	TAILQ_HEAD_INITIALIZER(maps[1]),
+	TAILQ_HEAD_INITIALIZER(maps[2]),
+	TAILQ_HEAD_INITIALIZER(maps[3]),
 };
 static unsigned int mapping_total, map_count[4], map_folded_count[4],
     mapping_unique, mapping_dupe;
@@ -96,6 +96,16 @@ usage(void)
 	exit(1);
 }
 
+static void *
+xmalloc(size_t size)
+{
+	void *m;
+
+	if ((m = malloc(size)) == NULL)
+		errx(1, "memory allocation failure");
+	return (m);
+}
+
 static int
 add_mapping(struct glyph *gl, unsigned int c, unsigned int map_idx)
 {
@@ -104,7 +114,7 @@ add_mapping(struct glyph *gl, unsigned int c, unsigned int map_idx)
 
 	mapping_total++;
 
-	mp = malloc(sizeof *mp);
+	mp = xmalloc(sizeof *mp);
 	mp->m_char = c;
 	mp->m_glyph = gl;
 	mp->m_length = 0;
@@ -112,7 +122,7 @@ add_mapping(struct glyph *gl, unsigned int c, unsigned int map_idx)
 	ml = &maps[map_idx];
 	if (TAILQ_LAST(ml, mapping_list) != NULL &&
 	    TAILQ_LAST(ml, mapping_list)->m_char >= c)
-		errx(1, "Bad ordering at character %u\n", c);
+		errx(1, "Bad ordering at character %u", c);
 	TAILQ_INSERT_TAIL(ml, mp, m_list);
 
 	map_count[map_idx]++;
@@ -133,7 +143,7 @@ dedup_mapping(unsigned int map_idx)
 		while (mp_normal->m_char < mp_bold->m_char)
 			mp_normal = TAILQ_NEXT(mp_normal, m_list);
 		if (mp_bold->m_char != mp_normal->m_char)
-			errx(1, "Character %u not in normal font!\n",
+			errx(1, "Character %u not in normal font!",
 			    mp_bold->m_char);
 		if (mp_bold->m_glyph != mp_normal->m_glyph)
 			continue;
@@ -163,8 +173,8 @@ add_glyph(const uint8_t *bytes, unsigned int map_idx, int fallback)
 		}
 	}
 
-	gl = malloc(sizeof *gl);
-	gl->g_data = malloc(wbytes * height);
+	gl = xmalloc(sizeof *gl);
+	gl->g_data = xmalloc(wbytes * height);
 	memcpy(gl->g_data, bytes, wbytes * height);
 	if (fallback)
 		TAILQ_INSERT_HEAD(&glyphs[map_idx], gl, g_list);
@@ -208,7 +218,7 @@ parse_bitmap_line(uint8_t *left, uint8_t *right, unsigned int line,
 	unsigned int i, subline;
 
 	if (dwidth != width && dwidth != width * 2)
-		errx(1, "Bitmap with unsupported width %u!\n", dwidth);
+		errx(1, "Bitmap with unsupported width %u!", dwidth);
 
 	/* Move pixel data right to simplify splitting double characters. */
 	line >>= (howmany(dwidth, 8) * 8) - dwidth;
@@ -225,7 +235,7 @@ parse_bitmap_line(uint8_t *left, uint8_t *right, unsigned int line,
 			*p++ = subline >> 8;
 			*p = subline;
 		} else {
-			errx(1, "Unsupported wbytes %u!\n", wbytes);
+			errx(1, "Unsupported wbytes %u!", wbytes);
 		}
 
 		line >>= width;
@@ -255,10 +265,23 @@ parse_bdf(FILE *fp, unsigned int map_idx)
 
 		if (strncmp(ln, "BITMAP", 6) == 0 &&
 		    (ln[6] == ' ' || ln[6] == '\0')) {
+			/*
+			 * Assume that the next _height_ lines are bitmap
+			 * data.  ENDCHAR is allowed to terminate the bitmap
+			 * early but is not otherwise checked; any extra data
+			 * is ignored.
+			 */
 			for (i = 0; i < height; i++) {
 				if ((ln = fgetln(fp, &length)) == NULL)
-					errx(1, "Unexpected EOF!\n");
+					errx(1, "Unexpected EOF!");
 				ln[length - 1] = '\0';
+				if (strcmp(ln, "ENDCHAR") == 0) {
+					memset(bytes + i * wbytes, 0,
+					    (height - i) * wbytes);
+					memset(bytes_r + i * wbytes, 0,
+					    (height - i) * wbytes);
+					break;
+				}
 				sscanf(ln, "%x", &line);
 				if (parse_bitmap_line(bytes + i * wbytes,
 				     bytes_r + i * wbytes, line, dwidth) != 0)
@@ -290,18 +313,28 @@ parse_hex(FILE *fp, unsigned int map_idx)
 	char *ln, *p;
 	char fmt_str[8];
 	size_t length;
-	uint8_t bytes[wbytes * height], bytes_r[wbytes * height];
+	uint8_t *bytes = NULL, *bytes_r = NULL;
 	unsigned curchar = 0, i, line, chars_per_row, dwidth;
+	int rv = 0;
 
 	while ((ln = fgetln(fp, &length)) != NULL) {
 		ln[length - 1] = '\0';
 
 		if (strncmp(ln, "# Height: ", 10) == 0) {
+			if (bytes != NULL)
+				errx(1, "malformed input: Height tag after font data");
 			height = atoi(ln + 10);
 		} else if (strncmp(ln, "# Width: ", 9) == 0) {
+			if (bytes != NULL)
+				errx(1, "malformed input: Width tag after font data");
 			set_width(atoi(ln + 9));
-		} else if (sscanf(ln, "%4x:", &curchar)) {
-			p = ln + 5;
+		} else if (sscanf(ln, "%6x:", &curchar)) {
+			if (bytes == NULL) {
+				bytes = xmalloc(wbytes * height);
+				bytes_r = xmalloc(wbytes * height);
+			}
+			/* ln is guaranteed to have a colon here. */
+			p = strchr(ln, ':') + 1;
 			chars_per_row = strlen(p) / height;
 			dwidth = width;
 			if (chars_per_row / 2 > (width + 7) / 8)
@@ -313,16 +346,23 @@ parse_hex(FILE *fp, unsigned int map_idx)
 				sscanf(p, fmt_str, &line);
 				p += chars_per_row;
 				if (parse_bitmap_line(bytes + i * wbytes,
-				    bytes_r + i * wbytes, line, dwidth) != 0)
-					return (1);
+				    bytes_r + i * wbytes, line, dwidth) != 0) {
+					rv = 1;
+					goto out;
+				}
 			}
 
 			if (add_char(curchar, map_idx, bytes,
-			    dwidth == width * 2 ? bytes_r : NULL) != 0)
-				return (1);
+			    dwidth == width * 2 ? bytes_r : NULL) != 0) {
+				rv = 1;
+				goto out;
+			}
 		}
 	}
-	return (0);
+out:
+	free(bytes);
+	free(bytes_r);
+	return (rv);
 }
 
 static int

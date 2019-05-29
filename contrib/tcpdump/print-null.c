@@ -17,20 +17,19 @@
  * THIS SOFTWARE IS PROVIDED ``AS IS'' AND WITHOUT ANY EXPRESS OR IMPLIED
  * WARRANTIES, INCLUDING, WITHOUT LIMITATION, THE IMPLIED WARRANTIES OF
  * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
- *
- * $FreeBSD$
  */
 
-#define NETDISSECT_REWORKED
+/* \summary: BSD loopback device printer */
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <tcpdump-stdinc.h>
+#include <netdissect-stdinc.h>
 
 #include <string.h>
 
-#include "interface.h"
+#include "netdissect.h"
 #include "af.h"
 
 /*
@@ -85,7 +84,7 @@ null_if_print(netdissect_options *ndo, const struct pcap_pkthdr *h, const u_char
 		return (NULL_HDRLEN);
 	}
 
-	memcpy((char *)&family, (char *)p, sizeof(family));
+	memcpy((char *)&family, (const char *)p, sizeof(family));
 
 	/*
 	 * This isn't necessarily in our host byte order; if this is
@@ -111,16 +110,14 @@ null_if_print(netdissect_options *ndo, const struct pcap_pkthdr *h, const u_char
 		ip_print(ndo, p, length);
 		break;
 
-#ifdef INET6
 	case BSD_AFNUM_INET6_BSD:
 	case BSD_AFNUM_INET6_FREEBSD:
 	case BSD_AFNUM_INET6_DARWIN:
 		ip6_print(ndo, p, length);
 		break;
-#endif
 
 	case BSD_AFNUM_ISO:
-		isoclns_print(ndo, p, length, caplen);
+		isoclns_print(ndo, p, length);
 		break;
 
 	case BSD_AFNUM_APPLETALK:

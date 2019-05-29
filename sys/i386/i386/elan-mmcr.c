@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: Beerware
+ *
  * ----------------------------------------------------------------------------
  * "THE BEER-WARE LICENSE" (Revision 42):
  * <phk@FreeBSD.org> wrote this file.  As long as you retain this notice you
@@ -46,6 +48,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/systm.h>
 #include <sys/kernel.h>
 #include <sys/conf.h>
+#include <sys/eventhandler.h>
 #include <sys/sysctl.h>
 #include <sys/syslog.h>
 #include <sys/timetc.h>

@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1980, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -11,7 +13,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 4. Neither the name of the University nor the names of its contributors
+ * 3. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -91,7 +93,7 @@ STRNCMP(register char *s1, register char *s2, register int len)
  *	internal format.
  *
  *	Either meta symbols (\a \d or \p) or character strings or
- *	operations ( alternation or perenthesizing ) can be
+ *	operations ( alternation or parenthesizing ) can be
  *	specified.  Each starts with a descriptor byte.  The descriptor
  *	byte has STR set for strings, META set for meta symbols
  *	and OPER set for operations.
@@ -110,7 +112,7 @@ STRNCMP(register char *s1, register char *s2, register int len)
  *				character count
  *				the string
  *
- *		operatins :=	descriptor
+ *		operations :=	descriptor
  *				symbol
  *				character count
  */
@@ -318,7 +320,7 @@ expconv()
 
 
 /*
- *	The following routine recognises an irregular expresion
+ *	The following routine recognises an irregular expression
  *	with the following special characters:
  *
  *		\?	-	means last match was optional

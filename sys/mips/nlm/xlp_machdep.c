@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright 2003-2011 Netlogic Microsystems (Netlogic). All rights
  * reserved.
  *
@@ -47,6 +49,7 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/cons.h>		/* cinit() */
 #include <sys/kdb.h>
+#include <sys/boot.h>
 #include <sys/reboot.h>
 #include <sys/queue.h>
 #include <sys/smp.h>
@@ -259,36 +262,6 @@ unsupp:
 	return;
 }
 
-/* Parse cmd line args as env - copied from ar71xx */
-static void
-xlp_parse_bootargs(char *cmdline)
-{
-	char *n, *v;
-
-	while ((v = strsep(&cmdline, " \n")) != NULL) {
-		if (*v == '\0')
-			continue;
-		if (*v == '-') {
-			while (*v != '\0') {
-				v++;
-				switch (*v) {
-				case 'a': boothowto |= RB_ASKNAME; break;
-				case 'd': boothowto |= RB_KDB; break;
-				case 'g': boothowto |= RB_GDB; break;
-				case 's': boothowto |= RB_SINGLE; break;
-				case 'v': boothowto |= RB_VERBOSE; break;
-				}
-			}
-		} else {
-			n = strsep(&v, "=");
-			if (v == NULL)
-				kern_setenv(n, "1");
-			else
-				kern_setenv(n, v);
-		}
-	}
-}
-
 #ifdef FDT
 static void
 xlp_bootargs_init(__register_t arg)
@@ -311,8 +284,6 @@ xlp_bootargs_init(__register_t arg)
 		while (1);
 	if (OF_init((void *)dtbp) != 0)
 		while (1);
-	if (fdt_immr_addr(xlp_io_base) != 0)
-		while (1);
 	OF_interpret("perform-fixup", 0);
 
 	chosen = OF_finddevice("/chosen");
@@ -321,7 +292,7 @@ xlp_bootargs_init(__register_t arg)
 	}
 
 	if (OF_getprop(chosen, "bootargs", buf, sizeof(buf)) != -1)
-		xlp_parse_bootargs(buf);
+		boothowto |= boot_parse_cmdline(buf);
 }
 #else
 /*
@@ -363,7 +334,7 @@ xlp_bootargs_init(__register_t arg)
 	v = kern_getenv("bootargs");
 	if (v != NULL) {
 		strlcpy(buf, v, sizeof(buf));
-		xlp_parse_bootargs(buf);
+		boothowto |= boot_parse_cmdline(buf);
 		freeenv(v);
 	}
 }
@@ -443,11 +414,10 @@ static vm_paddr_t xlp_mem_excl[] = {
 static int
 mem_exclude_add(vm_paddr_t *avail, vm_paddr_t mstart, vm_paddr_t mend)
 {
-	int nreg = sizeof(xlp_mem_excl)/sizeof(xlp_mem_excl[0]);
 	int i, pos;
 
 	pos = 0;
-	for (i = 0; i < nreg; i += 2) {
+	for (i = 0; i < nitems(xlp_mem_excl); i += 2) {
 		if (mstart > xlp_mem_excl[i + 1])
 			continue;
 		if (mstart < xlp_mem_excl[i]) {
@@ -690,10 +660,17 @@ platform_init_ap(int cpuid)
 }
 
 int
-platform_ipi_intrnum(void)
+platform_ipi_hardintr_num(void)
 {
 
 	return (IRQ_IPI);
+}
+
+int
+platform_ipi_softintr_num(void)
+{
+
+	return (-1);
 }
 
 void
@@ -701,7 +678,7 @@ platform_ipi_send(int cpuid)
 {
 
 	nlm_pic_send_ipi(xlp_pic_base, xlp_cpuid_to_hwtid[cpuid],
-	    platform_ipi_intrnum(), 0);
+	    platform_ipi_hardintr_num(), 0);
 }
 
 void

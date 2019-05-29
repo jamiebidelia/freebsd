@@ -1,6 +1,7 @@
 /*-
  * Copyright (c) 2011-2015 LSI Corp.
- * Copyright (c) 2013-2015 Avago Technologies
+ * Copyright (c) 2013-2016 Avago Technologies
+ * Copyright 2000-2020 Broadcom Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -24,7 +25,7 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * Avago Technologies (LSI) MPT-Fusion Host Adapter FreeBSD
+ * Broadcom Inc. (LSI) MPT-Fusion Host Adapter FreeBSD
  *
  * $FreeBSD$
  */
@@ -70,9 +71,6 @@ struct mprsas_target {
 	uint16_t	parent_handle;
 	uint64_t	parent_sasaddr;
 	uint32_t	parent_devinfo;
-	struct sysctl_ctx_list sysctl_ctx;
-	struct sysctl_oid *sysctl_tree;
-	TAILQ_ENTRY(mprsas_target) sysctl_link;
 	uint64_t        issued;
 	uint64_t        completed;
 	unsigned int    outstanding;
@@ -83,6 +81,9 @@ struct mprsas_target {
 	uint8_t		scsi_req_desc_type;
 	uint8_t		stop_at_shutdown;
 	uint8_t		supports_SSU;
+	uint8_t		is_nvme;
+	uint32_t	MDTS;
+	uint8_t		controller_reset_timeout;
 };
 
 struct mprsas_softc {

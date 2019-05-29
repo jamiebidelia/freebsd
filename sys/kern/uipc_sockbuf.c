@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1982, 1986, 1988, 1990, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -10,7 +12,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 4. Neither the name of the University nor the names of its contributors
+ * 3. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -38,6 +40,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/aio.h> /* for aio_swake proto */
 #include <sys/kernel.h>
 #include <sys/lock.h>
+#include <sys/malloc.h>
 #include <sys/mbuf.h>
 #include <sys/mutex.h>
 #include <sys/proc.h>
@@ -67,6 +70,23 @@ static	u_long sb_efficiency = 8;	/* parameter for sbreserve() */
 
 static struct mbuf	*sbcut_internal(struct sockbuf *sb, int len);
 static void	sbflush_internal(struct sockbuf *sb);
+
+/*
+ * Our own version of m_clrprotoflags(), that can preserve M_NOTREADY.
+ */
+static void
+sbm_clrprotoflags(struct mbuf *m, int flags)
+{
+	int mask;
+
+	mask = ~M_PROTOFLAGS;
+	if (flags & PRUS_NOTREADY)
+		mask |= M_NOTREADY;
+	while (m) {
+		m->m_flags &= mask;
+		m = m->m_next;
+	}
+}
 
 /*
  * Mark ready "count" mbufs starting with "m".
@@ -296,14 +316,14 @@ sowakeup(struct socket *so, struct sockbuf *sb)
 
 	SOCKBUF_LOCK_ASSERT(sb);
 
-	selwakeuppri(&sb->sb_sel, PSOCK);
-	if (!SEL_WAITING(&sb->sb_sel))
+	selwakeuppri(sb->sb_sel, PSOCK);
+	if (!SEL_WAITING(sb->sb_sel))
 		sb->sb_flags &= ~SB_SEL;
 	if (sb->sb_flags & SB_WAIT) {
 		sb->sb_flags &= ~SB_WAIT;
 		wakeup(&sb->sb_acc);
 	}
-	KNOTE_LOCKED(&sb->sb_sel.si_note, 0);
+	KNOTE_LOCKED(&sb->sb_sel->si_note, 0);
 	if (sb->sb_upcall != NULL) {
 		ret = sb->sb_upcall(so, sb->sb_upcallarg, M_NOWAIT);
 		if (ret == SU_ISCONNECTED) {
@@ -314,7 +334,7 @@ sowakeup(struct socket *so, struct sockbuf *sb)
 	} else
 		ret = SU_OK;
 	if (sb->sb_flags & SB_AIO)
-		aio_swake(so, sb);
+		sowakeup_aio(so, sb);
 	SOCKBUF_UNLOCK(sb);
 	if (ret == SU_ISCONNECTED)
 		soisconnected(so);
@@ -420,9 +440,7 @@ sbreserve_locked(struct sockbuf *sb, u_long cc, struct socket *so,
 	if (cc > sb_max_adj)
 		return (0);
 	if (td != NULL) {
-		PROC_LOCK(td->td_proc);
-		sbsize_limit = lim_cur(td->td_proc, RLIMIT_SBSIZE);
-		PROC_UNLOCK(td->td_proc);
+		sbsize_limit = lim_cur(td, RLIMIT_SBSIZE);
 	} else
 		sbsize_limit = RLIM_INFINITY;
 	if (!chgsbsize(so->so_cred->cr_uidinfo, &sb->sb_hiwat, cc,
@@ -435,14 +453,79 @@ sbreserve_locked(struct sockbuf *sb, u_long cc, struct socket *so,
 }
 
 int
-sbreserve(struct sockbuf *sb, u_long cc, struct socket *so, 
-    struct thread *td)
+sbsetopt(struct socket *so, int cmd, u_long cc)
 {
+	struct sockbuf *sb;
+	short *flags;
+	u_int *hiwat, *lowat;
 	int error;
 
-	SOCKBUF_LOCK(sb);
-	error = sbreserve_locked(sb, cc, so, td);
-	SOCKBUF_UNLOCK(sb);
+	sb = NULL;
+	SOCK_LOCK(so);
+	if (SOLISTENING(so)) {
+		switch (cmd) {
+			case SO_SNDLOWAT:
+			case SO_SNDBUF:
+				lowat = &so->sol_sbsnd_lowat;
+				hiwat = &so->sol_sbsnd_hiwat;
+				flags = &so->sol_sbsnd_flags;
+				break;
+			case SO_RCVLOWAT:
+			case SO_RCVBUF:
+				lowat = &so->sol_sbrcv_lowat;
+				hiwat = &so->sol_sbrcv_hiwat;
+				flags = &so->sol_sbrcv_flags;
+				break;
+		}
+	} else {
+		switch (cmd) {
+			case SO_SNDLOWAT:
+			case SO_SNDBUF:
+				sb = &so->so_snd;
+				break;
+			case SO_RCVLOWAT:
+			case SO_RCVBUF:
+				sb = &so->so_rcv;
+				break;
+		}
+		flags = &sb->sb_flags;
+		hiwat = &sb->sb_hiwat;
+		lowat = &sb->sb_lowat;
+		SOCKBUF_LOCK(sb);
+	}
+
+	error = 0;
+	switch (cmd) {
+	case SO_SNDBUF:
+	case SO_RCVBUF:
+		if (SOLISTENING(so)) {
+			if (cc > sb_max_adj) {
+				error = ENOBUFS;
+				break;
+			}
+			*hiwat = cc;
+			if (*lowat > *hiwat)
+				*lowat = *hiwat;
+		} else {
+			if (!sbreserve_locked(sb, cc, so, curthread))
+				error = ENOBUFS;
+		}
+		if (error == 0)
+			*flags &= ~SB_AUTOSIZE;
+		break;
+	case SO_SNDLOWAT:
+	case SO_RCVLOWAT:
+		/*
+		 * Make sure the low-water is never greater than the
+		 * high-water.
+		 */
+		*lowat = (cc > *hiwat) ? *hiwat : cc;
+		break;
+	}
+
+	if (!SOLISTENING(so))
+		SOCKBUF_UNLOCK(sb);
+	SOCK_UNLOCK(so);
 	return (error);
 }
 
@@ -571,15 +654,15 @@ sblastmbufchk(struct sockbuf *sb, const char *file, int line)
  * are discarded and mbufs are compacted where possible.
  */
 void
-sbappend_locked(struct sockbuf *sb, struct mbuf *m)
+sbappend_locked(struct sockbuf *sb, struct mbuf *m, int flags)
 {
 	struct mbuf *n;
 
 	SOCKBUF_LOCK_ASSERT(sb);
 
-	if (m == 0)
+	if (m == NULL)
 		return;
-	m_clrprotoflags(m);
+	sbm_clrprotoflags(m, flags);
 	SBLASTRECORDCHK(sb);
 	n = sb->sb_mb;
 	if (n) {
@@ -622,11 +705,11 @@ sbappend_locked(struct sockbuf *sb, struct mbuf *m)
  * are discarded and mbufs are compacted where possible.
  */
 void
-sbappend(struct sockbuf *sb, struct mbuf *m)
+sbappend(struct sockbuf *sb, struct mbuf *m, int flags)
 {
 
 	SOCKBUF_LOCK(sb);
-	sbappend_locked(sb, m);
+	sbappend_locked(sb, m, flags);
 	SOCKBUF_UNLOCK(sb);
 }
 
@@ -730,7 +813,7 @@ sbappendrecord_locked(struct sockbuf *sb, struct mbuf *m0)
 
 	SOCKBUF_LOCK_ASSERT(sb);
 
-	if (m0 == 0)
+	if (m0 == NULL)
 		return;
 	m_clrprotoflags(m0);
 	/*
@@ -778,8 +861,20 @@ sbappendaddr_locked_internal(struct sockbuf *sb, const struct sockaddr *asa,
 		return (0);
 	m->m_len = asa->sa_len;
 	bcopy(asa, mtod(m, caddr_t), asa->sa_len);
-	if (m0)
+	if (m0) {
 		m_clrprotoflags(m0);
+		m_tag_delete_chain(m0, NULL);
+		/*
+		 * Clear some persistent info from pkthdr.
+		 * We don't use m_demote(), because some netgraph consumers
+		 * expect M_PKTHDR presence.
+		 */
+		m0->m_pkthdr.rcvif = NULL;
+		m0->m_pkthdr.flowid = 0;
+		m0->m_pkthdr.csum_flags = 0;
+		m0->m_pkthdr.fibnum = 0;
+		m0->m_pkthdr.rsstype = 0;
+	}
 	if (ctrl_last)
 		ctrl_last->m_next = m0;	/* concatenate data to control */
 	else
@@ -860,23 +955,14 @@ sbappendaddr(struct sockbuf *sb, const struct sockaddr *asa,
 	return (retval);
 }
 
-int
+void
 sbappendcontrol_locked(struct sockbuf *sb, struct mbuf *m0,
     struct mbuf *control)
 {
-	struct mbuf *m, *n, *mlast;
-	int space;
+	struct mbuf *m, *mlast;
 
-	SOCKBUF_LOCK_ASSERT(sb);
-
-	if (control == 0)
-		panic("sbappendcontrol_locked");
-	space = m_length(control, &n) + m_length(m0, NULL);
-
-	if (space > sbspace(sb))
-		return (0);
 	m_clrprotoflags(m0);
-	n->m_next = m0;			/* concatenate data to control */
+	m_last(control)->m_next = m0;
 
 	SBLASTRECORDCHK(sb);
 
@@ -890,18 +976,15 @@ sbappendcontrol_locked(struct sockbuf *sb, struct mbuf *m0,
 	SBLASTMBUFCHK(sb);
 
 	SBLASTRECORDCHK(sb);
-	return (1);
 }
 
-int
+void
 sbappendcontrol(struct sockbuf *sb, struct mbuf *m0, struct mbuf *control)
 {
-	int retval;
 
 	SOCKBUF_LOCK(sb);
-	retval = sbappendcontrol_locked(sb, m0, control);
+	sbappendcontrol_locked(sb, m0, control);
 	SOCKBUF_UNLOCK(sb);
-	return (retval);
 }
 
 /*
@@ -1027,6 +1110,11 @@ sbcut_internal(struct sockbuf *sb, int len)
 {
 	struct mbuf *m, *next, *mfree;
 
+	KASSERT(len >= 0, ("%s: len is %d but it is supposed to be >= 0",
+	    __func__, len));
+	KASSERT(len <= sb->sb_ccc, ("%s: len: %d is > ccc: %u",
+	    __func__, len, sb->sb_ccc));
+
 	next = (m = sb->sb_mb) ? m->m_nextpkt : 0;
 	mfree = NULL;
 
@@ -1136,51 +1224,53 @@ sbdrop(struct sockbuf *sb, int len)
 	m_freem(mfree);
 }
 
-/*
- * Maintain a pointer and offset pair into the socket buffer mbuf chain to
- * avoid traversal of the entire socket buffer for larger offsets.
- */
 struct mbuf *
-sbsndptr(struct sockbuf *sb, u_int off, u_int len, u_int *moff)
+sbsndptr_noadv(struct sockbuf *sb, uint32_t off, uint32_t *moff)
 {
-	struct mbuf *m, *ret;
+	struct mbuf *m;
 
 	KASSERT(sb->sb_mb != NULL, ("%s: sb_mb is NULL", __func__));
-	KASSERT(off + len <= sb->sb_acc, ("%s: beyond sb", __func__));
-	KASSERT(sb->sb_sndptroff <= sb->sb_acc, ("%s: sndptroff broken", __func__));
-
-	/*
-	 * Is off below stored offset? Happens on retransmits.
-	 * Just return, we can't help here.
-	 */
-	if (sb->sb_sndptroff > off) {
+	if (sb->sb_sndptr == NULL || sb->sb_sndptroff > off) {
 		*moff = off;
+		if (sb->sb_sndptr == NULL) {
+			sb->sb_sndptr = sb->sb_mb;
+			sb->sb_sndptroff = 0;
+		}
 		return (sb->sb_mb);
+	} else {
+		m = sb->sb_sndptr;
+		off -= sb->sb_sndptroff;
 	}
+	*moff = off;
+	return (m);
+}
 
-	/* Return closest mbuf in chain for current offset. */
-	*moff = off - sb->sb_sndptroff;
-	m = ret = sb->sb_sndptr ? sb->sb_sndptr : sb->sb_mb;
-	if (*moff == m->m_len) {
-		*moff = 0;
-		sb->sb_sndptroff += m->m_len;
-		m = ret = m->m_next;
-		KASSERT(ret->m_len > 0,
-		    ("mbuf %p in sockbuf %p chain has no valid data", ret, sb));
+void
+sbsndptr_adv(struct sockbuf *sb, struct mbuf *mb, uint32_t len)
+{
+	/*
+	 * A small copy was done, advance forward the sb_sbsndptr to cover
+	 * it.
+	 */
+	struct mbuf *m;
+
+	if (mb != sb->sb_sndptr) {
+		/* Did not copyout at the same mbuf */
+		return;
 	}
-
-	/* Advance by len to be as close as possible for the next transmit. */
-	for (off = off - sb->sb_sndptroff + len - 1;
-	     off > 0 && m != NULL && off >= m->m_len;
-	     m = m->m_next) {
-		sb->sb_sndptroff += m->m_len;
-		off -= m->m_len;
+	m = mb;
+	while (m && (len > 0)) {
+		if (len >= m->m_len) {
+			len -= m->m_len;
+			if (m->m_next) {
+				sb->sb_sndptroff += m->m_len;
+				sb->sb_sndptr = m->m_next;
+			}
+			m = m->m_next;
+		} else {
+			len = 0;
+		}
 	}
-	if (off > 0 && m == NULL)
-		panic("%s: sockbuf %p and mbuf %p clashing", __func__, sb, ret);
-	sb->sb_sndptr = m;
-
-	return (ret);
 }
 
 /*

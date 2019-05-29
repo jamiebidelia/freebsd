@@ -32,7 +32,7 @@
 
 #include "_libelf.h"
 
-ELFTC_VCSID("$Id: elf_data.c 3177 2015-03-30 18:19:41Z emaste $");
+ELFTC_VCSID("$Id: elf_data.c 3632 2018-10-10 21:12:43Z jkoshy $");
 
 Elf_Data *
 elf_getdata(Elf_Scn *s, Elf_Data *ed)
@@ -43,8 +43,7 @@ elf_getdata(Elf_Scn *s, Elf_Data *ed)
 	size_t count, fsz, msz;
 	struct _Libelf_Data *d;
 	uint64_t sh_align, sh_offset, sh_size;
-	int (*xlate)(unsigned char *_d, size_t _dsz, unsigned char *_s,
-	    size_t _c, int _swap);
+	_libelf_translator_function *xlate;
 
 	d = (struct _Libelf_Data *) ed;
 
@@ -94,7 +93,7 @@ elf_getdata(Elf_Scn *s, Elf_Data *ed)
 
 	if ((elftype = _libelf_xlate_shtype(sh_type)) < ELF_T_FIRST ||
 	    elftype > ELF_T_LAST || (sh_type != SHT_NOBITS &&
-	    sh_offset + sh_size > (uint64_t) e->e_rawsize)) {
+	    (sh_offset > e->e_rawsize || sh_size > e->e_rawsize - sh_offset))) {
 		LIBELF_SET_ERROR(SECTION, 0);
 		return (NULL);
 	}
@@ -151,7 +150,8 @@ elf_getdata(Elf_Scn *s, Elf_Data *ed)
 
 	d->d_flags  |= LIBELF_F_DATA_MALLOCED;
 
-	xlate = _libelf_get_translator(elftype, ELF_TOMEMORY, elfclass);
+	xlate = _libelf_get_translator(elftype, ELF_TOMEMORY, elfclass,
+	    _libelf_elfmachine(e));
 	if (!(*xlate)(d->d_data.d_buf, (size_t) d->d_data.d_size,
 	    e->e_rawfile + sh_offset, count,
 	    e->e_byteorder != LIBELF_PRIVATE(byteorder))) {
@@ -249,6 +249,12 @@ elf_rawdata(Elf_Scn *s, Elf_Data *ed)
 	}
 
 	if (sh_type == SHT_NULL) {
+		LIBELF_SET_ERROR(SECTION, 0);
+		return (NULL);
+	}
+
+	if (sh_type != SHT_NOBITS &&
+	    (sh_offset > e->e_rawsize || sh_size > e->e_rawsize - sh_offset)) {
 		LIBELF_SET_ERROR(SECTION, 0);
 		return (NULL);
 	}

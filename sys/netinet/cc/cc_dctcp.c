@@ -50,22 +50,18 @@ __FBSDID("$FreeBSD$");
 
 #include <net/vnet.h>
 
-#include <netinet/in.h>
-#include <netinet/ip.h>
-#include <netinet/cc.h>
+#include <netinet/tcp.h>
 #include <netinet/tcp_seq.h>
 #include <netinet/tcp_var.h>
-
+#include <netinet/cc/cc.h>
 #include <netinet/cc/cc_module.h>
 
-#define	CAST_PTR_INT(X)	(*((int*)(X)))
-
 #define MAX_ALPHA_VALUE 1024
-static VNET_DEFINE(uint32_t, dctcp_alpha) = 0;
+VNET_DEFINE_STATIC(uint32_t, dctcp_alpha) = 0;
 #define V_dctcp_alpha	    VNET(dctcp_alpha)
-static VNET_DEFINE(uint32_t, dctcp_shift_g) = 4;
+VNET_DEFINE_STATIC(uint32_t, dctcp_shift_g) = 4;
 #define	V_dctcp_shift_g	    VNET(dctcp_shift_g)
-static VNET_DEFINE(uint32_t, dctcp_slowstart) = 0;
+VNET_DEFINE_STATIC(uint32_t, dctcp_slowstart) = 0;
 #define	V_dctcp_slowstart   VNET(dctcp_slowstart)
 
 struct dctcp {
@@ -186,8 +182,7 @@ dctcp_after_idle(struct cc_var *ccv)
 static void
 dctcp_cb_destroy(struct cc_var *ccv)
 {
-	if (ccv->cc_data != NULL)
-		free(ccv->cc_data, M_dctcp);
+	free(ccv->cc_data, M_dctcp);
 }
 
 static int
@@ -204,7 +199,7 @@ dctcp_cb_init(struct cc_var *ccv)
 	dctcp_data->bytes_ecn = 0;
 	dctcp_data->bytes_total = 0;
 	/*
-	 * When alpha is set to 0 in the beggining, DCTCP sender transfers as
+	 * When alpha is set to 0 in the beginning, DCTCP sender transfers as
 	 * much data as possible until the value converges which may expand the
 	 * queueing delay at the switch. When alpha is set to 1, queueing delay
 	 * is kept small.
@@ -403,7 +398,7 @@ dctcp_alpha_handler(SYSCTL_HANDLER_ARGS)
 	new = V_dctcp_alpha;
 	error = sysctl_handle_int(oidp, &new, 0, req);
 	if (error == 0 && req->newptr != NULL) {
-		if (CAST_PTR_INT(req->newptr) > 1)
+		if (new > 1)
 			error = EINVAL;
 		else {
 			if (new > MAX_ALPHA_VALUE)
@@ -425,7 +420,7 @@ dctcp_shift_g_handler(SYSCTL_HANDLER_ARGS)
 	new = V_dctcp_shift_g;
 	error = sysctl_handle_int(oidp, &new, 0, req);
 	if (error == 0 && req->newptr != NULL) {
-		if (CAST_PTR_INT(req->newptr) > 1)
+		if (new > 1)
 			error = EINVAL;
 		else
 			V_dctcp_shift_g = new;
@@ -443,7 +438,7 @@ dctcp_slowstart_handler(SYSCTL_HANDLER_ARGS)
 	new = V_dctcp_slowstart;
 	error = sysctl_handle_int(oidp, &new, 0, req);
 	if (error == 0 && req->newptr != NULL) {
-		if (CAST_PTR_INT(req->newptr) > 1)
+		if (new > 1)
 			error = EINVAL;
 		else
 			V_dctcp_slowstart = new;

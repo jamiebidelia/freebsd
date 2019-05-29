@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2008 Marcel Moolenaar
  * All rights reserved.
  *
@@ -67,38 +69,46 @@ volatile static u_quad_t ap_timebase;
 static u_int ipi_msg_cnt[32];
 static struct mtx ap_boot_mtx;
 struct pcb stoppcbs[MAXCPU];
-int longfault(faultbuf, int);
 
 void
 machdep_ap_bootstrap(void)
 {
 
-	/* Set PIR */
-	PCPU_SET(pir, mfspr(SPR_PIR));
 	PCPU_SET(awake, 1);
 	__asm __volatile("msync; isync");
 
 	while (ap_letgo == 0)
-		;
+		nop_prio_vlow();
+	nop_prio_medium();
 
-	/* Initialize DEC and TB, sync with the BSP values */
-#ifdef __powerpc64__
-	/* Writing to the time base register is hypervisor-privileged */
-	if (mfmsr() & PSL_HV)
-		mttb(ap_timebase);
-#else
-	mttb(ap_timebase);
-#endif
-	decr_ap_init();
+	/*
+	 * Set timebase as soon as possible to meet an implicit rendezvous
+	 * from cpu_mp_unleash(), which sets ap_letgo and then immediately
+	 * sets timebase.
+	 *
+	 * Note that this is instrinsically racy and is only relevant on
+	 * platforms that do not support better mechanisms.
+	 */
+	platform_smp_timebase_sync(ap_timebase, 1);
 
-	/* Give platform code a chance to do anything necessary */
+	/* Give platform code a chance to do anything else necessary */
 	platform_smp_ap_init();
+
+	/* Initialize decrementer */
+	decr_ap_init();
 
 	/* Serialize console output and AP count increment */
 	mtx_lock_spin(&ap_boot_mtx);
 	ap_awake++;
-	printf("SMP: AP CPU #%d launched\n", PCPU_GET(cpuid));
+	if (bootverbose)
+		printf("SMP: AP CPU #%d launched\n", PCPU_GET(cpuid));
+	else
+		printf("%s%d%s", ap_awake == 2 ? "Launching APs: " : "",
+		    PCPU_GET(cpuid), ap_awake == mp_ncpus ? "\n" : " ");
 	mtx_unlock_spin(&ap_boot_mtx);
+
+	while(smp_started == 0)
+		;
 
 	/* Start per-CPU event timers. */
 	cpu_initclocks_ap();
@@ -114,20 +124,16 @@ cpu_mp_setmaxid(void)
 	int error;
 
 	mp_ncpus = 0;
+	mp_maxid = 0;
 	error = platform_smp_first_cpu(&cpuref);
 	while (!error) {
 		mp_ncpus++;
+		mp_maxid = max(cpuref.cr_cpuid, mp_maxid);
 		error = platform_smp_next_cpu(&cpuref);
 	}
 	/* Sanity. */
 	if (mp_ncpus == 0)
 		mp_ncpus = 1;
-
-	/*
-	 * Set the largest cpuid we're going to use. This is necessary
-	 * for VM initialization.
-	 */
-	mp_maxid = min(mp_ncpus, MAXCPU) - 1;
 }
 
 int
@@ -149,7 +155,6 @@ cpu_mp_start(void)
 
 	error = platform_smp_get_bsp(&bsp);
 	KASSERT(error == 0, ("Don't know BSP"));
-	KASSERT(bsp.cr_cpuid == 0, ("%s: cpuid != 0", __func__));
 
 	error = platform_smp_first_cpu(&cpu);
 	while (!error) {
@@ -167,8 +172,8 @@ cpu_mp_start(void)
 			void *dpcpu;
 
 			pc = &__pcpu[cpu.cr_cpuid];
-			dpcpu = (void *)kmem_malloc(kernel_arena, DPCPU_SIZE,
-			    M_WAITOK | M_ZERO);
+			dpcpu = (void *)kmem_malloc(DPCPU_SIZE, M_WAITOK |
+			    M_ZERO);
 			pcpu_init(pc, cpu.cr_cpuid, sizeof(*pc));
 			dpcpu_init(dpcpu, cpu.cr_cpuid);
 		} else {
@@ -177,10 +182,23 @@ cpu_mp_start(void)
 			pc->pc_bsp = 1;
 		}
 		pc->pc_hwref = cpu.cr_hwref;
+
+		if (vm_ndomains > 1)
+			pc->pc_domain = cpu.cr_domain;
+		else
+			pc->pc_domain = 0;
+
+		CPU_SET(pc->pc_cpuid, &cpuset_domain[pc->pc_domain]);
+		KASSERT(pc->pc_domain < MAXMEMDOM, ("bad domain value %d\n",
+		    pc->pc_domain));
 		CPU_SET(pc->pc_cpuid, &all_cpus);
 next:
 		error = platform_smp_next_cpu(&cpu);
 	}
+
+#ifdef SMP
+	platform_smp_probe_threads();
+#endif
 }
 
 void
@@ -189,11 +207,14 @@ cpu_mp_announce(void)
 	struct pcpu *pc;
 	int i;
 
-	for (i = 0; i <= mp_maxid; i++) {
+	if (!bootverbose)
+		return;
+
+	CPU_FOREACH(i) {
 		pc = pcpu_find(i);
 		if (pc == NULL)
 			continue;
-		printf("cpu%d: dev=%x", i, (int)pc->pc_hwref);
+		printf("cpu%d: dev=%x domain=%d ", i, (int)pc->pc_hwref, pc->pc_domain);
 		if (pc->pc_bsp)
 			printf(" (BSP)");
 		printf("\n");
@@ -205,6 +226,7 @@ cpu_mp_unleash(void *dummy)
 {
 	struct pcpu *pc;
 	int cpus, timeout;
+	int ret;
 
 	if (mp_ncpus <= 1)
 		return;
@@ -213,6 +235,9 @@ cpu_mp_unleash(void *dummy)
 
 	cpus = 0;
 	smp_cpus = 0;
+#ifdef BOOKE
+	tlb1_ap_prep();
+#endif
 	STAILQ_FOREACH(pc, &cpuhead, pc_allcpu) {
 		cpus++;
 		if (!pc->pc_bsp) {
@@ -220,20 +245,20 @@ cpu_mp_unleash(void *dummy)
 				printf("Waking up CPU %d (dev=%x)\n",
 				    pc->pc_cpuid, (int)pc->pc_hwref);
 
-			platform_smp_start_cpu(pc);
-			
-			timeout = 2000;	/* wait 2sec for the AP */
-			while (!pc->pc_awake && --timeout > 0)
-				DELAY(1000);
-
+			ret = platform_smp_start_cpu(pc);
+			if (ret == 0) {
+				timeout = 2000;	/* wait 2sec for the AP */
+				while (!pc->pc_awake && --timeout > 0)
+					DELAY(1000);
+			}
 		} else {
-			PCPU_SET(pir, mfspr(SPR_PIR));
 			pc->pc_awake = 1;
 		}
 		if (pc->pc_awake) {
 			if (bootverbose)
-				printf("Adding CPU %d, pir=%x, awake=%x\n",
-				    pc->pc_cpuid, pc->pc_pir, pc->pc_awake);
+				printf("Adding CPU %d, hwref=%jx, awake=%x\n",
+				    pc->pc_cpuid, (uintmax_t)pc->pc_hwref,
+				    pc->pc_awake);
 			smp_cpus++;
 		} else
 			CPU_SET(pc->pc_cpuid, &stopped_cpus);
@@ -248,13 +273,7 @@ cpu_mp_unleash(void *dummy)
 	/* Let APs continue */
 	atomic_store_rel_int(&ap_letgo, 1);
 
-#ifdef __powerpc64__
-	/* Writing to the time base register is hypervisor-privileged */
-	if (mfmsr() & PSL_HV)
-		mttb(ap_timebase);
-#else
-	mttb(ap_timebase);
-#endif
+	platform_smp_timebase_sync(ap_timebase, 0);
 
 	while (ap_awake < smp_cpus)
 		;
@@ -264,11 +283,12 @@ cpu_mp_unleash(void *dummy)
 		    mp_ncpus, cpus, smp_cpus);
 	}
 
+	if (smp_cpus > 1)
+		atomic_store_rel_int(&smp_started, 1);
+
 	/* Let the APs get into the scheduler */
 	DELAY(10000);
 
-	/* XXX Atomic set operation? */
-	smp_started = 1;
 }
 
 SYSINIT(start_aps, SI_SUB_SMP, SI_ORDER_FIRST, cpu_mp_unleash, NULL);

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2009 Bruce Simpson.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -44,7 +46,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 4. Neither the name of the University nor the names of its contributors
+ * 3. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -108,7 +110,7 @@ static void	mli_delete_locked(const struct ifnet *);
 static void	mld_dispatch_packet(struct mbuf *);
 static void	mld_dispatch_queue(struct mbufq *, int);
 static void	mld_final_leave(struct in6_multi *, struct mld_ifsoftc *);
-static void	mld_fasttimo_vnet(void);
+static void	mld_fasttimo_vnet(struct in6_multi_head *inmh);
 static int	mld_handle_state_change(struct in6_multi *,
 		    struct mld_ifsoftc *);
 static int	mld_initial_join(struct in6_multi *, struct mld_ifsoftc *,
@@ -122,7 +124,7 @@ static int	mld_v1_input_query(struct ifnet *, const struct ip6_hdr *,
 		    /*const*/ struct mld_hdr *);
 static int	mld_v1_input_report(struct ifnet *, const struct ip6_hdr *,
 		    /*const*/ struct mld_hdr *);
-static void	mld_v1_process_group_timer(struct mld_ifsoftc *,
+static void	mld_v1_process_group_timer(struct in6_multi_head *,
 		    struct in6_multi *);
 static void	mld_v1_process_querier_timers(struct mld_ifsoftc *);
 static int	mld_v1_transmit_report(struct in6_multi *, const int);
@@ -140,7 +142,7 @@ static int	mld_v2_input_query(struct ifnet *, const struct ip6_hdr *,
 		    struct mbuf *, const int, const int);
 static int	mld_v2_merge_state_changes(struct in6_multi *,
 		    struct mbufq *);
-static void	mld_v2_process_group_timers(struct mld_ifsoftc *,
+static void	mld_v2_process_group_timers(struct in6_multi_head *,
 		    struct mbufq *, struct mbufq *,
 		    struct in6_multi *, const int);
 static int	mld_v2_process_group_query(struct in6_multi *,
@@ -205,11 +207,11 @@ static MALLOC_DEFINE(M_MLD, "mld", "mld state");
 /*
  * VIMAGE-wide globals.
  */
-static VNET_DEFINE(struct timeval, mld_gsrdelay) = {10, 0};
-static VNET_DEFINE(LIST_HEAD(, mld_ifsoftc), mli_head);
-static VNET_DEFINE(int, interface_timers_running6);
-static VNET_DEFINE(int, state_change_timers_running6);
-static VNET_DEFINE(int, current_state_timers_running6);
+VNET_DEFINE_STATIC(struct timeval, mld_gsrdelay) = {10, 0};
+VNET_DEFINE_STATIC(LIST_HEAD(, mld_ifsoftc), mli_head);
+VNET_DEFINE_STATIC(int, interface_timers_running6);
+VNET_DEFINE_STATIC(int, state_change_timers_running6);
+VNET_DEFINE_STATIC(int, current_state_timers_running6);
 
 #define	V_mld_gsrdelay			VNET(mld_gsrdelay)
 #define	V_mli_head			VNET(mli_head)
@@ -240,6 +242,10 @@ static SYSCTL_NODE(_net_inet6_mld, OID_AUTO, ifinfo,
 static int	mld_v1enable = 1;
 SYSCTL_INT(_net_inet6_mld, OID_AUTO, v1enable, CTLFLAG_RWTUN,
     &mld_v1enable, 0, "Enable fallback to MLDv1");
+
+static int	mld_v2enable = 1;
+SYSCTL_INT(_net_inet6_mld, OID_AUTO, v2enable, CTLFLAG_RWTUN,
+    &mld_v2enable, 0, "Enable MLDv2");
 
 static int	mld_use_allow = 1;
 SYSCTL_INT(_net_inet6_mld, OID_AUTO, use_allow, CTLFLAG_RWTUN,
@@ -300,7 +306,8 @@ mld_restore_context(struct mbuf *m)
 
 #if defined(VIMAGE) && defined(INVARIANTS)
 	KASSERT(curvnet == m->m_pkthdr.PH_loc.ptr,
-	    ("%s: called when curvnet was not restored", __func__));
+	    ("%s: called when curvnet was not restored: cuvnet %p m ptr %p",
+	    __func__, curvnet, m->m_pkthdr.PH_loc.ptr));
 #endif
 	return (m->m_pkthdr.flowid);
 }
@@ -374,6 +381,7 @@ sysctl_mld_ifinfo(SYSCTL_HANDLER_ARGS)
 		return (error);
 
 	IN6_MULTI_LOCK();
+	IN6_MULTI_LIST_LOCK();
 	MLD_LOCK();
 
 	if (name[0] <= 0 || name[0] > V_if_index) {
@@ -406,6 +414,7 @@ sysctl_mld_ifinfo(SYSCTL_HANDLER_ARGS)
 
 out_locked:
 	MLD_UNLOCK();
+	IN6_MULTI_LIST_UNLOCK();
 	IN6_MULTI_UNLOCK();
 	return (error);
 }
@@ -505,7 +514,6 @@ mli_alloc_locked(/*const*/ struct ifnet *ifp)
 	mli->mli_qi = MLD_QI_INIT;
 	mli->mli_qri = MLD_QRI_INIT;
 	mli->mli_uri = MLD_URI_INIT;
-	SLIST_INIT(&mli->mli_relinmhead);
 	mbufq_init(&mli->mli_gq, MLD_MAX_RESPONSE_PACKETS);
 
 	LIST_INSERT_HEAD(&V_mli_head, mli, mli_link);
@@ -529,40 +537,47 @@ out:
  * XXX This routine is also bitten by unlocked ifma_protospec access.
  */
 void
-mld_ifdetach(struct ifnet *ifp)
+mld_ifdetach(struct ifnet *ifp, struct in6_multi_head *inmh)
 {
+	struct epoch_tracker     et;
 	struct mld_ifsoftc	*mli;
 	struct ifmultiaddr	*ifma;
-	struct in6_multi	*inm, *tinm;
+	struct in6_multi	*inm;
 
 	CTR3(KTR_MLD, "%s: called for ifp %p(%s)", __func__, ifp,
 	    if_name(ifp));
 
-	IN6_MULTI_LOCK_ASSERT();
+	IN6_MULTI_LIST_LOCK_ASSERT();
 	MLD_LOCK();
 
 	mli = MLD_IFINFO(ifp);
-	if (mli->mli_version == MLD_VERSION_2) {
-		IF_ADDR_RLOCK(ifp);
-		TAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
-			if (ifma->ifma_addr->sa_family != AF_INET6 ||
-			    ifma->ifma_protospec == NULL)
-				continue;
-			inm = (struct in6_multi *)ifma->ifma_protospec;
-			if (inm->in6m_state == MLD_LEAVING_MEMBER) {
-				SLIST_INSERT_HEAD(&mli->mli_relinmhead,
-				    inm, in6m_nrele);
-			}
+	IF_ADDR_WLOCK(ifp);
+	/*
+	 * Extract list of in6_multi associated with the detaching ifp
+	 * which the PF_INET6 layer is about to release.
+	 */
+	NET_EPOCH_ENTER(et);
+	CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
+		inm = in6m_ifmultiaddr_get_inm(ifma);
+		if (inm == NULL)
+			continue;
+		in6m_disconnect_locked(inmh, inm);
+
+		if (mli->mli_version == MLD_VERSION_2) {
 			in6m_clear_recorded(inm);
-		}
-		IF_ADDR_RUNLOCK(ifp);
-		SLIST_FOREACH_SAFE(inm, &mli->mli_relinmhead, in6m_nrele,
-		    tinm) {
-			SLIST_REMOVE_HEAD(&mli->mli_relinmhead, in6m_nrele);
-			in6m_release_locked(inm);
+
+			/*
+			 * We need to release the final reference held
+			 * for issuing the INCLUDE {}.
+			 */
+			if (inm->in6m_state == MLD_LEAVING_MEMBER) {
+				inm->in6m_state = MLD_NOT_MEMBER;
+				in6m_rele_locked(inmh, inm);
+			}
 		}
 	}
-
+	NET_EPOCH_EXIT(et);
+	IF_ADDR_WUNLOCK(ifp);
 	MLD_UNLOCK();
 }
 
@@ -603,17 +618,10 @@ mli_delete_locked(const struct ifnet *ifp)
 
 			LIST_REMOVE(mli, mli_link);
 
-			KASSERT(SLIST_EMPTY(&mli->mli_relinmhead),
-			    ("%s: there are dangling in_multi references",
-			    __func__));
-
 			free(mli, M_MLD);
 			return;
 		}
 	}
-#ifdef INVARIANTS
-	panic("%s: mld_ifsoftc not found for ifp %p\n", __func__,  ifp);
-#endif
 }
 
 /*
@@ -627,6 +635,7 @@ static int
 mld_v1_input_query(struct ifnet *ifp, const struct ip6_hdr *ip6,
     /*const*/ struct mld_hdr *mld)
 {
+	struct epoch_tracker	 et;
 	struct ifmultiaddr	*ifma;
 	struct mld_ifsoftc	*mli;
 	struct in6_multi	*inm;
@@ -680,7 +689,7 @@ mld_v1_input_query(struct ifnet *ifp, const struct ip6_hdr *ip6,
 		in6_setscope(&mld->mld_addr, ifp, NULL);
 	}
 
-	IN6_MULTI_LOCK();
+	IN6_MULTI_LIST_LOCK();
 	MLD_LOCK();
 
 	/*
@@ -694,19 +703,18 @@ mld_v1_input_query(struct ifnet *ifp, const struct ip6_hdr *ip6,
 	if (timer == 0)
 		timer = 1;
 
-	IF_ADDR_RLOCK(ifp);
+	NET_EPOCH_ENTER(et);
 	if (is_general_query) {
 		/*
 		 * For each reporting group joined on this
 		 * interface, kick the report timer.
 		 */
 		CTR2(KTR_MLD, "process v1 general query on ifp %p(%s)",
-		    ifp, if_name(ifp));
-		TAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
-			if (ifma->ifma_addr->sa_family != AF_INET6 ||
-			    ifma->ifma_protospec == NULL)
+			 ifp, if_name(ifp));
+		CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
+			inm = in6m_ifmultiaddr_get_inm(ifma);
+			if (inm == NULL)
 				continue;
-			inm = (struct in6_multi *)ifma->ifma_protospec;
 			mld_v1_update_group(inm, timer);
 		}
 	} else {
@@ -726,9 +734,9 @@ mld_v1_input_query(struct ifnet *ifp, const struct ip6_hdr *ip6,
 		in6_clearscope(&mld->mld_addr);
 	}
 
-	IF_ADDR_RUNLOCK(ifp);
+	NET_EPOCH_EXIT(et);
 	MLD_UNLOCK();
-	IN6_MULTI_UNLOCK();
+	IN6_MULTI_LIST_UNLOCK();
 
 	return (0);
 }
@@ -759,7 +767,7 @@ mld_v1_update_group(struct in6_multi *inm, const int timer)
 	    ip6_sprintf(ip6tbuf, &inm->in6m_addr),
 	    if_name(inm->in6m_ifp), timer);
 
-	IN6_MULTI_LOCK_ASSERT();
+	IN6_MULTI_LIST_LOCK_ASSERT();
 
 	switch (inm->in6m_state) {
 	case MLD_NOT_MEMBER:
@@ -815,7 +823,12 @@ mld_v2_input_query(struct ifnet *ifp, const struct ip6_hdr *ip6,
 	char			 ip6tbuf[INET6_ADDRSTRLEN];
 #endif
 
-	is_general_query = 0;
+	if (!mld_v2enable) {
+		CTR3(KTR_MLD, "ignore v2 query src %s on ifp %p(%s)",
+		    ip6_sprintf(ip6tbuf, &ip6->ip6_src),
+		    ifp, if_name(ifp));
+		return (0);
+	}
 
 	/*
 	 * RFC3810 Section 6.2: MLD queries must originate from
@@ -827,6 +840,8 @@ mld_v2_input_query(struct ifnet *ifp, const struct ip6_hdr *ip6,
 		    ifp, if_name(ifp));
 		return (0);
 	}
+
+	is_general_query = 0;
 
 	CTR2(KTR_MLD, "input v2 query on ifp %p(%s)", ifp, if_name(ifp));
 
@@ -882,7 +897,7 @@ mld_v2_input_query(struct ifnet *ifp, const struct ip6_hdr *ip6,
 		in6_setscope(&mld->mld_addr, ifp, NULL);
 	}
 
-	IN6_MULTI_LOCK();
+	IN6_MULTI_LIST_LOCK();
 	MLD_LOCK();
 
 	mli = MLD_IFINFO(ifp);
@@ -923,6 +938,8 @@ mld_v2_input_query(struct ifnet *ifp, const struct ip6_hdr *ip6,
 			V_interface_timers_running6 = 1;
 		}
 	} else {
+		struct epoch_tracker et;
+
 		/*
 		 * MLDv2 Group-specific or Group-and-source-specific Query.
 		 *
@@ -931,10 +948,10 @@ mld_v2_input_query(struct ifnet *ifp, const struct ip6_hdr *ip6,
 		 * Queries for groups we are not a member of on this
 		 * link are simply ignored.
 		 */
-		IF_ADDR_RLOCK(ifp);
+		NET_EPOCH_ENTER(et);
 		inm = in6m_lookup_locked(ifp, &mld->mld_addr);
 		if (inm == NULL) {
-			IF_ADDR_RUNLOCK(ifp);
+			NET_EPOCH_EXIT(et);
 			goto out_locked;
 		}
 		if (nsrc > 0) {
@@ -942,7 +959,7 @@ mld_v2_input_query(struct ifnet *ifp, const struct ip6_hdr *ip6,
 			    &V_mld_gsrdelay)) {
 				CTR1(KTR_MLD, "%s: GS query throttled.",
 				    __func__);
-				IF_ADDR_RUNLOCK(ifp);
+				NET_EPOCH_EXIT(et);
 				goto out_locked;
 			}
 		}
@@ -960,20 +977,20 @@ mld_v2_input_query(struct ifnet *ifp, const struct ip6_hdr *ip6,
 
 		/* XXX Clear embedded scope ID as userland won't expect it. */
 		in6_clearscope(&mld->mld_addr);
-		IF_ADDR_RUNLOCK(ifp);
+		NET_EPOCH_EXIT(et);
 	}
 
 out_locked:
 	MLD_UNLOCK();
-	IN6_MULTI_UNLOCK();
+	IN6_MULTI_LIST_UNLOCK();
 
 	return (0);
 }
 
 /*
- * Process a recieved MLDv2 group-specific or group-and-source-specific
+ * Process a received MLDv2 group-specific or group-and-source-specific
  * query.
- * Return <0 if any error occured. Currently this is ignored.
+ * Return <0 if any error occurred. Currently this is ignored.
  */
 static int
 mld_v2_process_group_query(struct in6_multi *inm, struct mld_ifsoftc *mli,
@@ -983,7 +1000,7 @@ mld_v2_process_group_query(struct in6_multi *inm, struct mld_ifsoftc *mli,
 	int			 retval;
 	uint16_t		 nsrc;
 
-	IN6_MULTI_LOCK_ASSERT();
+	IN6_MULTI_LIST_LOCK_ASSERT();
 	MLD_LOCK_ASSERT();
 
 	retval = 0;
@@ -1095,6 +1112,7 @@ mld_v1_input_report(struct ifnet *ifp, const struct ip6_hdr *ip6,
     /*const*/ struct mld_hdr *mld)
 {
 	struct in6_addr		 src, dst;
+	struct epoch_tracker	 et;
 	struct in6_ifaddr	*ia;
 	struct in6_multi	*inm;
 #ifdef KTR
@@ -1168,9 +1186,9 @@ mld_v1_input_report(struct ifnet *ifp, const struct ip6_hdr *ip6,
 	if (!IN6_IS_ADDR_UNSPECIFIED(&mld->mld_addr))
 		in6_setscope(&mld->mld_addr, ifp, NULL);
 
-	IN6_MULTI_LOCK();
+	IN6_MULTI_LIST_LOCK();
 	MLD_LOCK();
-	IF_ADDR_RLOCK(ifp);
+	NET_EPOCH_ENTER(et);
 
 	/*
 	 * MLDv1 report suppression.
@@ -1218,9 +1236,9 @@ mld_v1_input_report(struct ifnet *ifp, const struct ip6_hdr *ip6,
 	}
 
 out_locked:
-	IF_ADDR_RUNLOCK(ifp);
+	NET_EPOCH_EXIT(et);
 	MLD_UNLOCK();
-	IN6_MULTI_UNLOCK();
+	IN6_MULTI_LIST_UNLOCK();
 
 	/* XXX Clear embedded scope ID as userland won't expect it. */
 	in6_clearscope(&mld->mld_addr);
@@ -1308,15 +1326,19 @@ mld_input(struct mbuf *m, int off, int icmp6len)
 void
 mld_fasttimo(void)
 {
+	struct in6_multi_head inmh;
 	VNET_ITERATOR_DECL(vnet_iter);
 
+	SLIST_INIT(&inmh);
+	
 	VNET_LIST_RLOCK_NOSLEEP();
 	VNET_FOREACH(vnet_iter) {
 		CURVNET_SET(vnet_iter);
-		mld_fasttimo_vnet();
+		mld_fasttimo_vnet(&inmh);
 		CURVNET_RESTORE();
 	}
 	VNET_LIST_RUNLOCK_NOSLEEP();
+	in6m_release_list_deferred(&inmh);
 }
 
 /*
@@ -1325,14 +1347,15 @@ mld_fasttimo(void)
  * VIMAGE: Assume caller has set up our curvnet.
  */
 static void
-mld_fasttimo_vnet(void)
+mld_fasttimo_vnet(struct in6_multi_head *inmh)
 {
+	struct epoch_tracker     et;
 	struct mbufq		 scq;	/* State-change packets */
 	struct mbufq		 qrq;	/* Query response packets */
 	struct ifnet		*ifp;
 	struct mld_ifsoftc	*mli;
 	struct ifmultiaddr	*ifma;
-	struct in6_multi	*inm, *tinm;
+	struct in6_multi	*inm;
 	int			 uri_fasthz;
 
 	uri_fasthz = 0;
@@ -1347,7 +1370,7 @@ mld_fasttimo_vnet(void)
 	    !V_state_change_timers_running6)
 		return;
 
-	IN6_MULTI_LOCK();
+	IN6_MULTI_LIST_LOCK();
 	MLD_LOCK();
 
 	/*
@@ -1391,23 +1414,23 @@ mld_fasttimo_vnet(void)
 			mbufq_init(&scq, MLD_MAX_STATE_CHANGE_PACKETS);
 		}
 
-		IF_ADDR_RLOCK(ifp);
-		TAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
-			if (ifma->ifma_addr->sa_family != AF_INET6 ||
-			    ifma->ifma_protospec == NULL)
+		IF_ADDR_WLOCK(ifp);
+		NET_EPOCH_ENTER(et);
+		CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
+			inm = in6m_ifmultiaddr_get_inm(ifma);
+			if (inm == NULL)
 				continue;
-			inm = (struct in6_multi *)ifma->ifma_protospec;
 			switch (mli->mli_version) {
 			case MLD_VERSION_1:
-				mld_v1_process_group_timer(mli, inm);
+				mld_v1_process_group_timer(inmh, inm);
 				break;
 			case MLD_VERSION_2:
-				mld_v2_process_group_timers(mli, &qrq,
+				mld_v2_process_group_timers(inmh, &qrq,
 				    &scq, inm, uri_fasthz);
 				break;
 			}
 		}
-		IF_ADDR_RUNLOCK(ifp);
+		IF_ADDR_WUNLOCK(ifp);
 
 		switch (mli->mli_version) {
 		case MLD_VERSION_1:
@@ -1419,10 +1442,8 @@ mld_fasttimo_vnet(void)
 			 * IF_ADDR_LOCK internally as well as
 			 * ip6_output() to transmit a packet.
 			 */
-			SLIST_FOREACH_SAFE(inm, &mli->mli_relinmhead,
-			    in6m_nrele, tinm) {
-				SLIST_REMOVE_HEAD(&mli->mli_relinmhead,
-				    in6m_nrele);
+			while ((inm = SLIST_FIRST(inmh)) != NULL) {
+				SLIST_REMOVE_HEAD(inmh, in6m_defer);
 				(void)mld_v1_transmit_report(inm,
 				    MLD_LISTENER_REPORT);
 			}
@@ -1430,24 +1451,14 @@ mld_fasttimo_vnet(void)
 		case MLD_VERSION_2:
 			mld_dispatch_queue(&qrq, 0);
 			mld_dispatch_queue(&scq, 0);
-
-			/*
-			 * Free the in_multi reference(s) for
-			 * this lifecycle.
-			 */
-			SLIST_FOREACH_SAFE(inm, &mli->mli_relinmhead,
-			    in6m_nrele, tinm) {
-				SLIST_REMOVE_HEAD(&mli->mli_relinmhead,
-				    in6m_nrele);
-				in6m_release_locked(inm);
-			}
 			break;
 		}
+		NET_EPOCH_EXIT(et);
 	}
 
 out_locked:
 	MLD_UNLOCK();
-	IN6_MULTI_UNLOCK();
+	IN6_MULTI_LIST_UNLOCK();
 }
 
 /*
@@ -1455,11 +1466,11 @@ out_locked:
  * Will update the global pending timer flags.
  */
 static void
-mld_v1_process_group_timer(struct mld_ifsoftc *mli, struct in6_multi *inm)
+mld_v1_process_group_timer(struct in6_multi_head *inmh, struct in6_multi *inm)
 {
 	int report_timer_expired;
 
-	IN6_MULTI_LOCK_ASSERT();
+	IN6_MULTI_LIST_LOCK_ASSERT();
 	MLD_LOCK_ASSERT();
 
 	if (inm->in6m_timer == 0) {
@@ -1482,8 +1493,7 @@ mld_v1_process_group_timer(struct mld_ifsoftc *mli, struct in6_multi *inm)
 	case MLD_REPORTING_MEMBER:
 		if (report_timer_expired) {
 			inm->in6m_state = MLD_IDLE_MEMBER;
-			SLIST_INSERT_HEAD(&mli->mli_relinmhead, inm,
-			    in6m_nrele);
+			SLIST_INSERT_HEAD(inmh, inm, in6m_defer);
 		}
 		break;
 	case MLD_G_QUERY_PENDING_MEMBER:
@@ -1499,7 +1509,7 @@ mld_v1_process_group_timer(struct mld_ifsoftc *mli, struct in6_multi *inm)
  * Note: Unlocked read from mli.
  */
 static void
-mld_v2_process_group_timers(struct mld_ifsoftc *mli,
+mld_v2_process_group_timers(struct in6_multi_head *inmh,
     struct mbufq *qrq, struct mbufq *scq,
     struct in6_multi *inm, const int uri_fasthz)
 {
@@ -1509,7 +1519,7 @@ mld_v2_process_group_timers(struct mld_ifsoftc *mli,
 	char ip6tbuf[INET6_ADDRSTRLEN];
 #endif
 
-	IN6_MULTI_LOCK_ASSERT();
+	IN6_MULTI_LIST_LOCK_ASSERT();
 	MLD_LOCK_ASSERT();
 
 	query_response_timer_expired = 0;
@@ -1607,8 +1617,8 @@ mld_v2_process_group_timers(struct mld_ifsoftc *mli,
 			if (inm->in6m_state == MLD_LEAVING_MEMBER &&
 			    inm->in6m_scrv == 0) {
 				inm->in6m_state = MLD_NOT_MEMBER;
-				SLIST_INSERT_HEAD(&mli->mli_relinmhead,
-				    inm, in6m_nrele);
+				in6m_disconnect_locked(inmh, inm);
+				in6m_rele_locked(inmh, inm);
 			}
 		}
 		break;
@@ -1652,14 +1662,17 @@ mld_set_version(struct mld_ifsoftc *mli, const int version)
 static void
 mld_v2_cancel_link_timers(struct mld_ifsoftc *mli)
 {
+	struct epoch_tracker	 et;
+	struct in6_multi_head	 inmh;
 	struct ifmultiaddr	*ifma;
 	struct ifnet		*ifp;
-	struct in6_multi	*inm, *tinm;
+	struct in6_multi	*inm;
 
 	CTR3(KTR_MLD, "%s: cancel v2 timers on ifp %p(%s)", __func__,
 	    mli->mli_ifp, if_name(mli->mli_ifp));
 
-	IN6_MULTI_LOCK_ASSERT();
+	SLIST_INIT(&inmh);
+	IN6_MULTI_LIST_LOCK_ASSERT();
 	MLD_LOCK_ASSERT();
 
 	/*
@@ -1675,11 +1688,12 @@ mld_v2_cancel_link_timers(struct mld_ifsoftc *mli)
 
 	ifp = mli->mli_ifp;
 
-	IF_ADDR_RLOCK(ifp);
-	TAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
-		if (ifma->ifma_addr->sa_family != AF_INET6)
+	IF_ADDR_WLOCK(ifp);
+	NET_EPOCH_ENTER(et);
+	CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
+		inm = in6m_ifmultiaddr_get_inm(ifma);
+		if (inm == NULL)
 			continue;
-		inm = (struct in6_multi *)ifma->ifma_protospec;
 		switch (inm->in6m_state) {
 		case MLD_NOT_MEMBER:
 		case MLD_SILENT_MEMBER:
@@ -1694,8 +1708,9 @@ mld_v2_cancel_link_timers(struct mld_ifsoftc *mli)
 			 * version, we need to release the final
 			 * reference held for issuing the INCLUDE {}.
 			 */
-			SLIST_INSERT_HEAD(&mli->mli_relinmhead, inm,
-			    in6m_nrele);
+			if (inm->in6m_refcount == 1)
+				in6m_disconnect_locked(&inmh, inm);
+			in6m_rele_locked(&inmh, inm);
 			/* FALLTHROUGH */
 		case MLD_G_QUERY_PENDING_MEMBER:
 		case MLD_SG_QUERY_PENDING_MEMBER:
@@ -1712,11 +1727,9 @@ mld_v2_cancel_link_timers(struct mld_ifsoftc *mli)
 			break;
 		}
 	}
-	IF_ADDR_RUNLOCK(ifp);
-	SLIST_FOREACH_SAFE(inm, &mli->mli_relinmhead, in6m_nrele, tinm) {
-		SLIST_REMOVE_HEAD(&mli->mli_relinmhead, in6m_nrele);
-		in6m_release_locked(inm);
-	}
+	NET_EPOCH_EXIT(et);
+	IF_ADDR_WUNLOCK(ifp);
+	in6m_release_list_deferred(&inmh);
 }
 
 /*
@@ -1788,10 +1801,13 @@ mld_v1_transmit_report(struct in6_multi *in6m, const int type)
 	struct mbuf		*mh, *md;
 	struct mld_hdr		*mld;
 
-	IN6_MULTI_LOCK_ASSERT();
+	IN6_MULTI_LIST_LOCK_ASSERT();
 	MLD_LOCK_ASSERT();
-
+	
 	ifp = in6m->in6m_ifp;
+	/* in process of being freed */
+	if (ifp == NULL)
+		return (0);
 	ia = in6ifa_ifpforlinklocal(ifp, IN6_IFF_NOTREADY|IN6_IFF_ANYCAST);
 	/* ia may be NULL if link-local address is tentative. */
 
@@ -1879,9 +1895,17 @@ mld_change_state(struct in6_multi *inm, const int delay)
 	struct ifnet *ifp;
 	int error;
 
-	IN6_MULTI_LOCK_ASSERT();
+	IN6_MULTI_LIST_LOCK_ASSERT();
 
 	error = 0;
+
+	/*
+	 * Check if the in6_multi has already been disconnected.
+	 */
+	if (inm->in6m_ifp == NULL) {
+		CTR1(KTR_MLD, "%s: inm is disconnected", __func__);
+		return (0);
+	}
 
 	/*
 	 * Try to detect if the upper layer just asked us to change state
@@ -1889,16 +1913,15 @@ mld_change_state(struct in6_multi *inm, const int delay)
 	 */
 	KASSERT(inm->in6m_ifma != NULL, ("%s: no ifma", __func__));
 	ifp = inm->in6m_ifma->ifma_ifp;
-	if (ifp != NULL) {
-		/*
-		 * Sanity check that netinet6's notion of ifp is the
-		 * same as net's.
-		 */
-		KASSERT(inm->in6m_ifp == ifp, ("%s: bad ifp", __func__));
-	}
+	if (ifp == NULL)
+		return (0);
+	/*
+	 * Sanity check that netinet6's notion of ifp is the
+	 * same as net's.
+	 */
+	KASSERT(inm->in6m_ifp == ifp, ("%s: bad ifp", __func__));
 
 	MLD_LOCK();
-
 	mli = MLD_IFINFO(ifp);
 	KASSERT(mli != NULL, ("%s: no mld_ifsoftc for ifp %p", __func__, ifp));
 
@@ -1963,7 +1986,7 @@ mld_initial_join(struct in6_multi *inm, struct mld_ifsoftc *mli,
 
 	ifp = inm->in6m_ifp;
 
-	IN6_MULTI_LOCK_ASSERT();
+	IN6_MULTI_LIST_LOCK_ASSERT();
 	MLD_LOCK_ASSERT();
 
 	KASSERT(mli && mli->mli_ifp == ifp, ("%s: inconsistent ifp", __func__));
@@ -1992,9 +2015,10 @@ mld_initial_join(struct in6_multi *inm, struct mld_ifsoftc *mli,
 		 * group around for the final INCLUDE {} enqueue.
 		 */
 		if (mli->mli_version == MLD_VERSION_2 &&
-		    inm->in6m_state == MLD_LEAVING_MEMBER)
-			in6m_release_locked(inm);
-
+		    inm->in6m_state == MLD_LEAVING_MEMBER) {
+			inm->in6m_refcount--;
+			MPASS(inm->in6m_refcount > 0);
+		}
 		inm->in6m_state = MLD_REPORTING_MEMBER;
 
 		switch (mli->mli_version) {
@@ -2106,7 +2130,7 @@ mld_handle_state_change(struct in6_multi *inm, struct mld_ifsoftc *mli)
 
 	ifp = inm->in6m_ifp;
 
-	IN6_MULTI_LOCK_ASSERT();
+	IN6_MULTI_LIST_LOCK_ASSERT();
 	MLD_LOCK_ASSERT();
 
 	KASSERT(mli && mli->mli_ifp == ifp,
@@ -2169,7 +2193,7 @@ mld_final_leave(struct in6_multi *inm, struct mld_ifsoftc *mli)
 	    __func__, ip6_sprintf(ip6tbuf, &inm->in6m_addr),
 	    inm->in6m_ifp, if_name(inm->in6m_ifp));
 
-	IN6_MULTI_LOCK_ASSERT();
+	IN6_MULTI_LIST_LOCK_ASSERT();
 	MLD_LOCK_ASSERT();
 
 	switch (inm->in6m_state) {
@@ -2286,7 +2310,7 @@ mld_v2_enqueue_group_record(struct mbufq *mq, struct in6_multi *inm,
 	struct ifnet		*ifp;
 	struct ip6_msource	*ims, *nims;
 	struct mbuf		*m0, *m, *md;
-	int			 error, is_filter_list_change;
+	int			 is_filter_list_change;
 	int			 minrec0len, m0srcs, msrcs, nbytes, off;
 	int			 record_has_sources;
 	int			 now;
@@ -2296,9 +2320,8 @@ mld_v2_enqueue_group_record(struct mbufq *mq, struct in6_multi *inm,
 	char			 ip6tbuf[INET6_ADDRSTRLEN];
 #endif
 
-	IN6_MULTI_LOCK_ASSERT();
+	IN6_MULTI_LIST_LOCK_ASSERT();
 
-	error = 0;
 	ifp = inm->in6m_ifp;
 	is_filter_list_change = 0;
 	m = NULL;
@@ -2680,7 +2703,7 @@ mld_v2_enqueue_filter_change(struct mbufq *mq, struct in6_multi *inm)
 	char			 ip6tbuf[INET6_ADDRSTRLEN];
 #endif
 
-	IN6_MULTI_LOCK_ASSERT();
+	IN6_MULTI_LIST_LOCK_ASSERT();
 
 	if (inm->in6m_nsrc == 0 ||
 	    (inm->in6m_st[0].iss_asm > 0 && inm->in6m_st[1].iss_asm > 0))
@@ -2880,7 +2903,7 @@ mld_v2_merge_state_changes(struct in6_multi *inm, struct mbufq *scq)
 	domerge = 0;
 	recslen = 0;
 
-	IN6_MULTI_LOCK_ASSERT();
+	IN6_MULTI_LIST_LOCK_ASSERT();
 	MLD_LOCK_ASSERT();
 
 	/*
@@ -2974,26 +2997,34 @@ mld_v2_merge_state_changes(struct in6_multi *inm, struct mbufq *scq)
 static void
 mld_v2_dispatch_general_query(struct mld_ifsoftc *mli)
 {
+	struct epoch_tracker	 et;
 	struct ifmultiaddr	*ifma;
 	struct ifnet		*ifp;
 	struct in6_multi	*inm;
 	int			 retval;
 
-	IN6_MULTI_LOCK_ASSERT();
+	IN6_MULTI_LIST_LOCK_ASSERT();
 	MLD_LOCK_ASSERT();
 
 	KASSERT(mli->mli_version == MLD_VERSION_2,
 	    ("%s: called when version %d", __func__, mli->mli_version));
 
+	/*
+	 * Check that there are some packets queued. If so, send them first.
+	 * For large number of groups the reply to general query can take
+	 * many packets, we should finish sending them before starting of
+	 * queuing the new reply.
+	 */
+	if (mbufq_len(&mli->mli_gq) != 0)
+		goto send;
+
 	ifp = mli->mli_ifp;
 
-	IF_ADDR_RLOCK(ifp);
-	TAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
-		if (ifma->ifma_addr->sa_family != AF_INET6 ||
-		    ifma->ifma_protospec == NULL)
+	NET_EPOCH_ENTER(et);
+	CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
+		inm = in6m_ifmultiaddr_get_inm(ifma);
+		if (inm == NULL)
 			continue;
-
-		inm = (struct in6_multi *)ifma->ifma_protospec;
 		KASSERT(ifp == inm->in6m_ifp,
 		    ("%s: inconsistent ifp", __func__));
 
@@ -3018,8 +3049,9 @@ mld_v2_dispatch_general_query(struct mld_ifsoftc *mli)
 			break;
 		}
 	}
-	IF_ADDR_RUNLOCK(ifp);
+	NET_EPOCH_EXIT(et);
 
+send:
 	mld_dispatch_queue(&mli->mli_gq, MLD_MAX_RESPONSE_BURST);
 
 	/*
@@ -3254,7 +3286,7 @@ mld_init(void *unused __unused)
 	mld_po.ip6po_prefer_tempaddr = IP6PO_TEMPADDR_NOTPREFER;
 	mld_po.ip6po_flags = IP6PO_DONTFRAG;
 }
-SYSINIT(mld_init, SI_SUB_PSEUDO, SI_ORDER_MIDDLE, mld_init, NULL);
+SYSINIT(mld_init, SI_SUB_PROTO_MC, SI_ORDER_MIDDLE, mld_init, NULL);
 
 static void
 mld_uninit(void *unused __unused)
@@ -3263,7 +3295,7 @@ mld_uninit(void *unused __unused)
 	CTR1(KTR_MLD, "%s: tearing down", __func__);
 	MLD_LOCK_DESTROY();
 }
-SYSUNINIT(mld_uninit, SI_SUB_PSEUDO, SI_ORDER_MIDDLE, mld_uninit, NULL);
+SYSUNINIT(mld_uninit, SI_SUB_PROTO_MC, SI_ORDER_MIDDLE, mld_uninit, NULL);
 
 static void
 vnet_mld_init(const void *unused __unused)
@@ -3273,19 +3305,17 @@ vnet_mld_init(const void *unused __unused)
 
 	LIST_INIT(&V_mli_head);
 }
-VNET_SYSINIT(vnet_mld_init, SI_SUB_PSEUDO, SI_ORDER_ANY, vnet_mld_init,
+VNET_SYSINIT(vnet_mld_init, SI_SUB_PROTO_MC, SI_ORDER_ANY, vnet_mld_init,
     NULL);
 
 static void
 vnet_mld_uninit(const void *unused __unused)
 {
 
+	/* This can happen if we shutdown the network stack. */
 	CTR1(KTR_MLD, "%s: tearing down", __func__);
-
-	KASSERT(LIST_EMPTY(&V_mli_head),
-	    ("%s: mli list not empty; ifnets not detached?", __func__));
 }
-VNET_SYSUNINIT(vnet_mld_uninit, SI_SUB_PSEUDO, SI_ORDER_ANY, vnet_mld_uninit,
+VNET_SYSUNINIT(vnet_mld_uninit, SI_SUB_PROTO_MC, SI_ORDER_ANY, vnet_mld_uninit,
     NULL);
 
 static int
@@ -3307,4 +3337,4 @@ static moduledata_t mld_mod = {
     mld_modevent,
     0
 };
-DECLARE_MODULE(mld, mld_mod, SI_SUB_PSEUDO, SI_ORDER_ANY);
+DECLARE_MODULE(mld, mld_mod, SI_SUB_PROTO_MC, SI_ORDER_ANY);

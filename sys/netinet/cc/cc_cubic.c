@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2008-2010 Lawrence Stewart <lstewart@freebsd.org>
  * Copyright (c) 2010 The FreeBSD Foundation
  * All rights reserved.
@@ -59,11 +61,11 @@ __FBSDID("$FreeBSD$");
 
 #include <net/vnet.h>
 
-#include <netinet/cc.h>
+#include <netinet/tcp.h>
 #include <netinet/tcp_seq.h>
 #include <netinet/tcp_timer.h>
 #include <netinet/tcp_var.h>
-
+#include <netinet/cc/cc.h>
 #include <netinet/cc/cc_cubic.h>
 #include <netinet/cc/cc_module.h>
 
@@ -143,7 +145,7 @@ cubic_ack_received(struct cc_var *ccv, uint16_t type)
 			 * the I-D. Using min_rtt in the tf_cwnd calculation
 			 * causes w_tf to grow much faster than it should if the
 			 * RTT is dominated by network buffering rather than
-			 * propogation delay.
+			 * propagation delay.
 			 */
 			w_tf = tf_cwnd(ticks_since_cong,
 			    cubic_data->mean_rtt_ticks, cubic_data->max_cwnd,
@@ -193,9 +195,7 @@ cubic_ack_received(struct cc_var *ccv, uint16_t type)
 static void
 cubic_cb_destroy(struct cc_var *ccv)
 {
-
-	if (ccv->cc_data != NULL)
-		free(ccv->cc_data, M_CUBIC);
+	free(ccv->cc_data, M_CUBIC);
 }
 
 static int
@@ -261,9 +261,10 @@ cubic_cong_signal(struct cc_var *ccv, uint32_t type)
 		 * chance the first one is a false alarm and may not indicate
 		 * congestion.
 		 */
-		if (CCV(ccv, t_rxtshift) >= 2)
+		if (CCV(ccv, t_rxtshift) >= 2) {
 			cubic_data->num_cong_events++;
 			cubic_data->t_last_cong = ticks;
+		}
 		break;
 	}
 }
@@ -299,8 +300,10 @@ static void
 cubic_post_recovery(struct cc_var *ccv)
 {
 	struct cubic *cubic_data;
+	int pipe;
 
 	cubic_data = ccv->cc_data;
+	pipe = 0;
 
 	/* Fast convergence heuristic. */
 	if (cubic_data->max_cwnd < cubic_data->prev_max_cwnd)
@@ -315,9 +318,17 @@ cubic_post_recovery(struct cc_var *ccv)
 		 *
 		 * XXXLAS: Find a way to do this without needing curack
 		 */
-		if (SEQ_GT(ccv->curack + CCV(ccv, snd_ssthresh),
-		    CCV(ccv, snd_max)))
-			CCV(ccv, snd_cwnd) = CCV(ccv, snd_max) - ccv->curack +
+		if (V_tcp_do_rfc6675_pipe)
+			pipe = tcp_compute_pipe(ccv->ccvc.tcp);
+		else
+			pipe = CCV(ccv, snd_max) - ccv->curack;
+
+		if (pipe < CCV(ccv, snd_ssthresh))
+			/*
+			 * Ensure that cwnd does not collapse to 1 MSS under
+			 * adverse conditions. Implements RFC6582
+			 */
+			CCV(ccv, snd_cwnd) = max(pipe, CCV(ccv, t_maxseg)) +
 			    CCV(ccv, t_maxseg);
 		else
 			/* Update cwnd based on beta and adjusted max_cwnd. */
@@ -398,8 +409,8 @@ cubic_ssthresh_update(struct cc_var *ccv)
 	if (cubic_data->num_cong_events == 0)
 		CCV(ccv, snd_ssthresh) = CCV(ccv, snd_cwnd) >> 1;
 	else
-		CCV(ccv, snd_ssthresh) = (CCV(ccv, snd_cwnd) * CUBIC_BETA)
-		    >> CUBIC_SHIFT;
+		CCV(ccv, snd_ssthresh) = ((u_long)CCV(ccv, snd_cwnd) *
+		    CUBIC_BETA) >> CUBIC_SHIFT;
 }
 
 

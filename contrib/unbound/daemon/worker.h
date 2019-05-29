@@ -61,6 +61,7 @@ struct ub_randstate;
 struct regional;
 struct tube;
 struct daemon_remote;
+struct query_info;
 
 /** worker commands */
 enum worker_commands {
@@ -84,7 +85,7 @@ struct worker {
 	/** global shared daemon structure */
 	struct daemon* daemon;
 	/** thread id */
-	ub_thread_t thr_id;
+	ub_thread_type thr_id;
 	/** pipe, for commands for this worker */
 	struct tube* cmd;
 	/** the event base this worker works with */
@@ -103,6 +104,10 @@ struct worker {
 	struct comm_point* cmd_com;
 	/** timer for statistics */
 	struct comm_timer* stat_timer;
+	/** ratelimit for errors, time value */
+	time_t err_limit_time;
+	/** ratelimit for errors, packet count */
+	unsigned int err_limit_count;
 
 	/** random() table for this worker. */
 	struct ub_randstate* rndstate;
@@ -111,7 +116,7 @@ struct worker {
 	/** allocation cache for this thread */
 	struct alloc_cache alloc;
 	/** per thread statistics */
-	struct server_stats stats;
+	struct ub_server_stats stats;
 	/** thread scratch regional */
 	struct regional* scratchpad;
 

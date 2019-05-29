@@ -16,39 +16,30 @@
 #include <sys/param.h>
 #include <sys/time.h>
 #include <sys/file.h>
-#ifdef __hpux
-# include <sys/timeout.h>
-#endif
 #if !defined(_KERNEL)
 # include <stdio.h>
 # include <string.h>
 # include <stdlib.h>
 # define _KERNEL
-# ifdef __OpenBSD__
-struct file;
-# endif
 # include <sys/uio.h>
 # undef _KERNEL
 #endif
-#if defined(_KERNEL) && \
-    defined(__FreeBSD_version) && (__FreeBSD_version >= 220000)
+#if defined(_KERNEL) && defined(__FreeBSD_version)
 # include <sys/filio.h>
 # include <sys/fcntl.h>
 #else
 # include <sys/ioctl.h>
 #endif
-#if !defined(linux)
 # include <sys/protosw.h>
-#endif
 #include <sys/socket.h>
 #if defined(_KERNEL)
 # include <sys/systm.h>
-# if !defined(__SVR4) && !defined(__svr4__)
+# if !defined(__SVR4)
 #  include <sys/mbuf.h>
 # endif
 #endif
-#if !defined(__SVR4) && !defined(__svr4__)
-# if defined(_KERNEL) && !defined(__sgi) && !defined(AIX)
+#if !defined(__SVR4)
+# if defined(_KERNEL)
 #  include <sys/kernel.h>
 # endif
 #else
@@ -66,9 +57,7 @@ struct file;
 #include <netinet/in.h>
 #include <netinet/in_systm.h>
 #include <netinet/ip.h>
-#if !defined(linux)
 # include <netinet/ip_var.h>
-#endif
 #include <netinet/tcp.h>
 #include <netinet/udp.h>
 #include <netinet/ip_icmp.h>
@@ -112,7 +101,7 @@ static void ipf_frag_free __P((ipf_frag_softc_t *, ipfr_t *));
 
 static frentry_t ipfr_block;
 
-const ipftuneable_t ipf_tuneables[] = {
+static ipftuneable_t ipf_frag_tuneables[] = {
 	{ { (void *)offsetof(ipf_frag_softc_t, ipfr_size) },
 		"frag_size",		1,	0x7fffffff,
 		stsizeof(ipf_frag_softc_t, ipfr_size),
@@ -189,6 +178,18 @@ ipf_frag_soft_create(softc)
 	RWLOCK_INIT(&softf->ipfr_frag, "ipf fragment rwlock");
 	RWLOCK_INIT(&softf->ipfr_natfrag, "ipf NAT fragment rwlock");
 
+	softf->ipf_frag_tune = ipf_tune_array_copy(softf,
+						   sizeof(ipf_frag_tuneables),
+						   ipf_frag_tuneables);
+	if (softf->ipf_frag_tune == NULL) {
+		ipf_frag_soft_destroy(softc, softf);
+		return NULL;
+	}
+	if (ipf_tune_array_link(softc, softf->ipf_frag_tune) == -1) {
+		ipf_frag_soft_destroy(softc, softf);
+		return NULL;
+	}
+
 	softf->ipfr_size = IPFT_SIZE;
 	softf->ipfr_ttl = IPF_TTLVAL(60);
 	softf->ipfr_lock = 1;
@@ -218,6 +219,12 @@ ipf_frag_soft_destroy(softc, arg)
 	RW_DESTROY(&softf->ipfr_ipidfrag);
 	RW_DESTROY(&softf->ipfr_frag);
 	RW_DESTROY(&softf->ipfr_natfrag);
+
+	if (softf->ipf_frag_tune != NULL) {
+		ipf_tune_array_unlink(softc, softf->ipf_frag_tune);
+		KFREES(softf->ipf_frag_tune, sizeof(ipf_frag_tuneables));
+		softf->ipf_frag_tune = NULL;
+	}
 
 	KFREE(softf);
 }
@@ -456,7 +463,7 @@ ipfr_frag_new(softc, softf, fin, pass, table
 			  IPFR_CMPSZ)) {
 			RWLOCK_EXIT(lock);
 			FBUMPD(ifs_exists);
-			KFREE(fra);
+			KFREE(fran);
 			return NULL;
 		}
 
@@ -719,13 +726,15 @@ ipf_frag_lookup(softc, softf, fin, table
 					FBUMP(ifs_overlap);
 					DT2(ifs_overlap, u_short, off,
 					    ipfr_t *, f);
+					DT3(ipf_fi_bad_ifs_overlap, fr_info_t *, fin, u_short, off,
+					    ipfr_t *, f);
 					fin->fin_flx |= FI_BAD;
 					break;
 				}
 			} else if (off == 0)
 				f->ipfr_seen0 = 1;
 
-			if (f != table[idx]) {
+			if (f != table[idx] && MUTEX_TRY_UPGRADE(lock)) {
 				ipfr_t **fp;
 
 				/*
@@ -743,6 +752,7 @@ ipf_frag_lookup(softc, softf, fin, table
 				table[idx]->ipfr_hprev = &f->ipfr_hnext;
 				f->ipfr_hprev = table + idx;
 				table[idx] = f;
+				MUTEX_DOWNGRADE(lock);
 			}
 
 			/*
@@ -901,6 +911,7 @@ ipf_frag_known(fin, passp)
 		if (fin->fin_flx & FI_BAD) {
 			fr = &ipfr_block;
 			fin->fin_reason = FRB_BADFRAG;
+			DT2(ipf_frb_badfrag, fr_info_t *, fin, uint, fra);
 		} else {
 			fr = fra->ipfr_rule;
 		}

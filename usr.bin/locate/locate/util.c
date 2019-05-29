@@ -1,4 +1,6 @@
 /*
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) 1995 Wolfram Schneider <wosch@FreeBSD.org>. Berlin.
  * Copyright (c) 1989, 1993
  *	The Regents of the University of California.  All rights reserved.
@@ -83,17 +85,14 @@ check_bigram_char(ch)
  *
  */
 char **
-colon(dbv, path, dot)
-	char **dbv;
-	char *path;
-	char *dot; /* default for single ':' */
+colon(char **dbv, char *path, char *dot)
 {
 	int vlen, slen;
 	char *c, *ch, *p;
 	char **pv;
 
 	if (dbv == NULL) {
-		if ((dbv = malloc(sizeof(char **))) == NULL)
+		if ((dbv = malloc(sizeof(char *))) == NULL)
 			err(1, "malloc");
 		*dbv = NULL;
 	}
@@ -123,7 +122,7 @@ colon(dbv, path, dot)
 				*(p + slen) = '\0';
 			}
 			/* increase dbv with element p */
-			if ((dbv = realloc(dbv, sizeof(char **) * (vlen + 2)))
+			if ((dbv = realloc(dbv, sizeof(char *) * (vlen + 2)))
 			    == NULL)
 				err(1, "realloc");
 			*(dbv + vlen) = p;

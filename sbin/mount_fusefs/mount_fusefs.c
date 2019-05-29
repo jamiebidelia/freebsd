@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2005 Jean-Sebastien Pedron
  * Copyright (c) 2005 Csaba Henk 
  * All rights reserved.
@@ -499,7 +501,7 @@ init_backgrounded(void)
 
 	len = sizeof(ibg);
 
-	if (sysctlbyname("vfs.fuse.init_backgrounded", &ibg, &len, NULL, 0))
+	if (sysctlbyname("vfs.fusefs.init_backgrounded", &ibg, &len, NULL, 0))
 		return (0);
 
 	return (ibg);

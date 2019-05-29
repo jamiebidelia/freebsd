@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) 2003
  *	Bill Paul <wpaul@windriver.com>.  All rights reserved.
  *
@@ -90,6 +92,7 @@ static void	rgephy_reset(struct mii_softc *);
 static int	rgephy_linkup(struct mii_softc *);
 static void	rgephy_loop(struct mii_softc *);
 static void	rgephy_load_dspcode(struct mii_softc *);
+static void	rgephy_disable_eee(struct mii_softc *);
 
 static const struct mii_phydesc rgephys[] = {
 	MII_PHY_DESC(REALTEK, RTL8169S),
@@ -120,6 +123,8 @@ rgephy_attach(device_t dev)
 	flags = 0;
 	if (mii_dev_mac_match(dev, "re"))
 		flags |= MIIF_PHYPRIV0;
+	else if (mii_dev_mac_match(dev, "ure"))
+		flags |= MIIF_PHYPRIV1;
 	mii_phy_dev_attach(dev, flags, &rgephy_funcs, 0);
 
 	/* RTL8169S do not report auto-sense; add manually. */
@@ -292,7 +297,10 @@ rgephy_linkup(struct mii_softc *sc)
 				linkup++;
 		}
 	} else {
-		reg = PHY_READ(sc, RL_GMEDIASTAT);
+		if (sc->mii_flags & MIIF_PHYPRIV1)
+			reg = PHY_READ(sc, URE_GMEDIASTAT);
+		else
+			reg = PHY_READ(sc, RL_GMEDIASTAT);
 		if (reg & RL_GMEDIASTAT_LINK)
 			linkup++;
 	}
@@ -377,7 +385,10 @@ rgephy_status(struct mii_softc *sc)
 				mii->mii_media_active |= IFM_HDX;
 		}
 	} else {
-		bmsr = PHY_READ(sc, RL_GMEDIASTAT);
+		if (sc->mii_flags & MIIF_PHYPRIV1)
+			bmsr = PHY_READ(sc, URE_GMEDIASTAT);
+		else
+			bmsr = PHY_READ(sc, RL_GMEDIASTAT);
 		if (bmsr & RL_GMEDIASTAT_1000MBPS)
 			mii->mii_media_active |= IFM_1000_T;
 		else if (bmsr & RL_GMEDIASTAT_100MBPS)
@@ -517,10 +528,9 @@ rgephy_reset(struct mii_softc *sc)
 	switch (sc->mii_mpd_rev) {
 	case RGEPHY_8211F:
 		pcr = PHY_READ(sc, RGEPHY_F_MII_PCR1);
-		if ((pcr & RGEPHY_F_PCR1_MDI_MM) != 0) {
-			pcr &= ~RGEPHY_F_PCR1_MDI_MM;
-			PHY_WRITE(sc, RGEPHY_F_MII_PCR1, pcr);
-		}
+		pcr &= ~(RGEPHY_F_PCR1_MDI_MM | RGEPHY_F_PCR1_ALDPS_EN);
+		PHY_WRITE(sc, RGEPHY_F_MII_PCR1, pcr);
+		rgephy_disable_eee(sc);
 		break;
 	case RGEPHY_8211C:
 		if ((sc->mii_flags & MIIF_PHYPRIV0) == 0) {
@@ -547,4 +557,30 @@ rgephy_reset(struct mii_softc *sc)
 	mii_phy_reset(sc);
 	DELAY(1000);
 	rgephy_load_dspcode(sc);
+}
+
+static void
+rgephy_disable_eee(struct mii_softc *sc)
+{
+	uint16_t anar;
+
+	PHY_WRITE(sc, RGEPHY_F_EPAGSR, 0x0000);
+	PHY_WRITE(sc, MII_MMDACR, MMDACR_FN_ADDRESS |
+	    (MMDACR_DADDRMASK & RGEPHY_F_MMD_DEV_7));
+	PHY_WRITE(sc, MII_MMDAADR, RGEPHY_F_MMD_EEEAR);
+	PHY_WRITE(sc, MII_MMDACR, MMDACR_FN_DATANPI |
+	    (MMDACR_DADDRMASK & RGEPHY_F_MMD_DEV_7));
+	PHY_WRITE(sc, MII_MMDAADR, 0x0000);
+	PHY_WRITE(sc, MII_MMDACR, 0x0000);
+	/*
+	 * XXX
+	 * Restart auto-negotiation to take changes effect.
+	 * This may result in link establishment.
+	 */
+	anar = BMSR_MEDIA_TO_ANAR(sc->mii_capabilities) | ANAR_CSMA;
+	PHY_WRITE(sc, RGEPHY_MII_ANAR, anar);
+	PHY_WRITE(sc, RGEPHY_MII_1000CTL, RGEPHY_1000CTL_AHD |
+	    RGEPHY_1000CTL_AFD);
+	PHY_WRITE(sc, RGEPHY_MII_BMCR, RGEPHY_BMCR_RESET |
+	    RGEPHY_BMCR_AUTOEN | RGEPHY_BMCR_STARTNEG);
 }

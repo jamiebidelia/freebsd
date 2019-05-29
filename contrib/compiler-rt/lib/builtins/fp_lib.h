@@ -25,6 +25,7 @@
 #include <stdbool.h>
 #include <limits.h>
 #include "int_lib.h"
+#include "int_math.h"
 
 // x86_64 FreeBSD prior v9.3 define fixed-width types incorrectly in
 // 32-bit mode.
@@ -46,12 +47,12 @@ typedef float fp_t;
 #define REP_C UINT32_C
 #define significandBits 23
 
-static inline int rep_clz(rep_t a) {
+static __inline int rep_clz(rep_t a) {
     return __builtin_clz(a);
 }
 
 // 32x32 --> 64 bit multiply
-static inline void wideMultiply(rep_t a, rep_t b, rep_t *hi, rep_t *lo) {
+static __inline void wideMultiply(rep_t a, rep_t b, rep_t *hi, rep_t *lo) {
     const uint64_t product = (uint64_t)a*b;
     *hi = product >> 32;
     *lo = product;
@@ -66,7 +67,7 @@ typedef double fp_t;
 #define REP_C UINT64_C
 #define significandBits 52
 
-static inline int rep_clz(rep_t a) {
+static __inline int rep_clz(rep_t a) {
 #if defined __LP64__
     return __builtin_clzl(a);
 #else
@@ -83,7 +84,7 @@ static inline int rep_clz(rep_t a) {
 // 64x64 -> 128 wide multiply for platforms that don't have such an operation;
 // many 64-bit platforms have this operation, but they tend to have hardware
 // floating-point, so we don't bother with a special case for them here.
-static inline void wideMultiply(rep_t a, rep_t b, rep_t *hi, rep_t *lo) {
+static __inline void wideMultiply(rep_t a, rep_t b, rep_t *hi, rep_t *lo) {
     // Each of the component 32x32 -> 64 products
     const uint64_t plolo = loWord(a) * loWord(b);
     const uint64_t plohi = loWord(a) * hiWord(b);
@@ -112,7 +113,7 @@ typedef long double fp_t;
 // 128-bit integer, we let the constant be casted to 128-bit integer
 #define significandBits 112
 
-static inline int rep_clz(rep_t a) {
+static __inline int rep_clz(rep_t a) {
     const union
         {
              __uint128_t ll;
@@ -148,7 +149,7 @@ static inline int rep_clz(rep_t a) {
 // 128x128 -> 256 wide multiply for platforms that don't have such an operation;
 // many 64-bit platforms have this operation, but they tend to have hardware
 // floating-point, so we don't bother with a special case for them here.
-static inline void wideMultiply(rep_t a, rep_t b, rep_t *hi, rep_t *lo) {
+static __inline void wideMultiply(rep_t a, rep_t b, rep_t *hi, rep_t *lo) {
 
     const uint64_t product11 = Word_1(a) * Word_1(b);
     const uint64_t product12 = Word_1(a) * Word_2(b);
@@ -228,28 +229,28 @@ static inline void wideMultiply(rep_t a, rep_t b, rep_t *hi, rep_t *lo) {
 #define quietBit        (implicitBit >> 1)
 #define qnanRep         (exponentMask | quietBit)
 
-static inline rep_t toRep(fp_t x) {
+static __inline rep_t toRep(fp_t x) {
     const union { fp_t f; rep_t i; } rep = {.f = x};
     return rep.i;
 }
 
-static inline fp_t fromRep(rep_t x) {
+static __inline fp_t fromRep(rep_t x) {
     const union { fp_t f; rep_t i; } rep = {.i = x};
     return rep.f;
 }
 
-static inline int normalize(rep_t *significand) {
+static __inline int normalize(rep_t *significand) {
     const int shift = rep_clz(*significand) - rep_clz(implicitBit);
     *significand <<= shift;
     return 1 - shift;
 }
 
-static inline void wideLeftShift(rep_t *hi, rep_t *lo, int count) {
+static __inline void wideLeftShift(rep_t *hi, rep_t *lo, int count) {
     *hi = *hi << count | *lo >> (typeWidth - count);
     *lo = *lo << count;
 }
 
-static inline void wideRightShiftWithSticky(rep_t *hi, rep_t *lo, unsigned int count) {
+static __inline void wideRightShiftWithSticky(rep_t *hi, rep_t *lo, unsigned int count) {
     if (count < typeWidth) {
         const bool sticky = *lo << (typeWidth - count);
         *lo = *hi << (typeWidth - count) | *lo >> count | sticky;
@@ -265,6 +266,62 @@ static inline void wideRightShiftWithSticky(rep_t *hi, rep_t *lo, unsigned int c
         *hi = 0;
     }
 }
+
+// Implements logb methods (logb, logbf, logbl) for IEEE-754. This avoids
+// pulling in a libm dependency from compiler-rt, but is not meant to replace
+// it (i.e. code calling logb() should get the one from libm, not this), hence
+// the __compiler_rt prefix.
+static __inline fp_t __compiler_rt_logbX(fp_t x) {
+  rep_t rep = toRep(x);
+  int exp = (rep & exponentMask) >> significandBits;
+
+  // Abnormal cases:
+  // 1) +/- inf returns +inf; NaN returns NaN
+  // 2) 0.0 returns -inf
+  if (exp == maxExponent) {
+    if (((rep & signBit) == 0) || (x != x)) {
+      return x;  // NaN or +inf: return x
+    } else {
+      return -x;  // -inf: return -x
+    }
+  } else if (x == 0.0) {
+    // 0.0: return -inf
+    return fromRep(infRep | signBit);
+  }
+
+  if (exp != 0) {
+    // Normal number
+    return exp - exponentBias;  // Unbias exponent
+  } else {
+    // Subnormal number; normalize and repeat
+    rep &= absMask;
+    const int shift = 1 - normalize(&rep);
+    exp = (rep & exponentMask) >> significandBits;
+    return exp - exponentBias - shift;  // Unbias exponent
+  }
+}
+#endif
+
+#if defined(SINGLE_PRECISION)
+static __inline fp_t __compiler_rt_logbf(fp_t x) {
+  return __compiler_rt_logbX(x);
+}
+#elif defined(DOUBLE_PRECISION)
+static __inline fp_t __compiler_rt_logb(fp_t x) {
+  return __compiler_rt_logbX(x);
+}
+#elif defined(QUAD_PRECISION)
+  #if defined(CRT_LDBL_128BIT)
+static __inline fp_t __compiler_rt_logbl(fp_t x) {
+  return __compiler_rt_logbX(x);
+}
+  #else
+// The generic implementation only works for ieee754 floating point. For other
+// floating point types, continue to rely on the libm implementation for now.
+static __inline long double __compiler_rt_logbl(long double x) {
+  return crt_logbl(x);
+}
+  #endif
 #endif
 
 #endif // FP_LIB_HEADER

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2005-2006 Robert N. M. Watson
  * All rights reserved.
  *
@@ -27,11 +29,9 @@
  */
 
 #include <sys/param.h>
+#include <sys/counter.h>
 #include <sys/cpuset.h>
 #include <sys/sysctl.h>
-
-#include <vm/vm.h>
-#include <vm/vm_page.h>
 
 #include <vm/uma.h>
 #include <vm/uma_int.h>
@@ -56,6 +56,8 @@ static struct nlist namelist[] = {
 	{ .n_name = "_mp_maxid" },
 #define	X_ALL_CPUS	2
 	{ .n_name = "_all_cpus" },
+#define	X_VM_NDOMAINS	3
+	{ .n_name = "_vm_ndomains" },
 	{ .n_name = "" },
 };
 
@@ -211,6 +213,15 @@ retry:
 			mtp->mt_numfrees += upsp->ups_frees;
 		}
 
+		/*
+		 * Values for uth_allocs and uth_frees frees are snap.
+		 * It may happen that kernel reports that number of frees
+		 * is greater than number of allocs. See counter(9) for
+		 * details.
+		 */
+		if (mtp->mt_numallocs < mtp->mt_numfrees)
+			mtp->mt_numallocs = mtp->mt_numfrees;
+
 		mtp->mt_size = uthp->uth_size;
 		mtp->mt_rsize = uthp->uth_rsize;
 		mtp->mt_memalloced = mtp->mt_numallocs * uthp->uth_size;
@@ -298,11 +309,12 @@ memstat_kvm_uma(struct memory_type_list *list, void *kvm_handle)
 {
 	LIST_HEAD(, uma_keg) uma_kegs;
 	struct memory_type *mtp;
+	struct uma_zone_domain uzd;
 	struct uma_bucket *ubp, ub;
 	struct uma_cache *ucp, *ucp_array;
 	struct uma_zone *uzp, uz;
 	struct uma_keg *kzp, kz;
-	int hint_dontsearch, i, mp_maxid, ret;
+	int hint_dontsearch, i, mp_maxid, ndomains, ret;
 	char name[MEMTYPE_MAXNAME];
 	cpuset_t all_cpus;
 	long cpusetsize;
@@ -320,6 +332,12 @@ memstat_kvm_uma(struct memory_type_list *list, void *kvm_handle)
 		return (-1);
 	}
 	ret = kread_symbol(kvm, X_MP_MAXID, &mp_maxid, sizeof(mp_maxid), 0);
+	if (ret != 0) {
+		list->mtl_error = ret;
+		return (-1);
+	}
+	ret = kread_symbol(kvm, X_VM_NDOMAINS, &ndomains,
+	    sizeof(ndomains), 0);
 	if (ret != 0) {
 		list->mtl_error = ret;
 		return (-1);
@@ -398,10 +416,18 @@ memstat_kvm_uma(struct memory_type_list *list, void *kvm_handle)
 			 * Reset the statistics on a current node.
 			 */
 			_memstat_mt_reset_stats(mtp, mp_maxid + 1);
-			mtp->mt_numallocs = uz.uz_allocs;
-			mtp->mt_numfrees = uz.uz_frees;
-			mtp->mt_failures = uz.uz_fails;
+			mtp->mt_numallocs = kvm_counter_u64_fetch(kvm,
+			    (unsigned long )uz.uz_allocs);
+			mtp->mt_numfrees = kvm_counter_u64_fetch(kvm,
+			    (unsigned long )uz.uz_frees);
+			mtp->mt_failures = kvm_counter_u64_fetch(kvm,
+			    (unsigned long )uz.uz_fails);
 			mtp->mt_sleeps = uz.uz_sleeps;
+
+			/* See comment above in memstat_sysctl_uma(). */
+			if (mtp->mt_numallocs < mtp->mt_numfrees)
+				mtp->mt_numallocs = mtp->mt_numfrees;
+
 			if (kz.uk_flags & UMA_ZFLAG_INTERNAL)
 				goto skip_percpu;
 			for (i = 0; i < mp_maxid + 1; i++) {
@@ -440,18 +466,20 @@ skip_percpu:
 			mtp->mt_memalloced = mtp->mt_numallocs * mtp->mt_size;
 			mtp->mt_memfreed = mtp->mt_numfrees * mtp->mt_size;
 			mtp->mt_bytes = mtp->mt_memalloced - mtp->mt_memfreed;
-			if (kz.uk_ppera > 1)
-				mtp->mt_countlimit = kz.uk_maxpages /
-				    kz.uk_ipers;
-			else
-				mtp->mt_countlimit = kz.uk_maxpages *
-				    kz.uk_ipers;
+			mtp->mt_countlimit = uz.uz_max_items;
 			mtp->mt_byteslimit = mtp->mt_countlimit * mtp->mt_size;
 			mtp->mt_count = mtp->mt_numallocs - mtp->mt_numfrees;
-			for (ubp = LIST_FIRST(&uz.uz_buckets); ubp !=
-			    NULL; ubp = LIST_NEXT(&ub, ub_link)) {
-				ret = kread(kvm, ubp, &ub, sizeof(ub), 0);
-				mtp->mt_zonefree += ub.ub_cnt;
+			for (i = 0; i < ndomains; i++) {
+				ret = kread(kvm, &uz.uz_domain[i], &uzd,
+				   sizeof(uzd), 0);
+				for (ubp =
+				    LIST_FIRST(&uzd.uzd_buckets);
+				    ubp != NULL;
+				    ubp = LIST_NEXT(&ub, ub_link)) {
+					ret = kread(kvm, ubp, &ub,
+					   sizeof(ub), 0);
+					mtp->mt_zonefree += ub.ub_cnt;
+				}
 			}
 			if (!((kz.uk_flags & UMA_ZONE_SECONDARY) &&
 			    LIST_FIRST(&kz.uk_zones) != uzp)) {

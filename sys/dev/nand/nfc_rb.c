@@ -31,16 +31,14 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/proc.h>
 #include <sys/bus.h>
-#include <sys/conf.h>
 #include <sys/kernel.h>
 #include <sys/module.h>
 #include <sys/malloc.h>
 #include <sys/rman.h>
-#include <sys/lock.h>
-#include <sys/mutex.h>
-#include <sys/time.h>
+#include <sys/slicer.h>
+
+#include <geom/geom_disk.h>
 
 #include <machine/bus.h>
 
@@ -49,6 +47,9 @@ __FBSDID("$FreeBSD$");
 
 #include <dev/nand/nand.h>
 #include <dev/nand/nandbus.h>
+
+#include <powerpc/mpc85xx/mpc85xx.h>
+
 #include "nfc_if.h"
 #include "gpio_if.h"
 
@@ -108,6 +109,40 @@ static const struct nand_ecc_data rb_ecc = {
 };
 #endif
 
+/* Slicer operates on the NAND controller, so we have to find the chip. */
+static int
+rb_nand_slicer(device_t dev, const char *provider __unused,
+    struct flash_slice *slices, int *nslices)
+{
+	struct nand_chip *chip;
+	device_t *children;
+	int n;
+
+	if (device_get_children(dev, &children, &n) != 0) {
+		panic("Slicer called on controller with no child!");
+	}
+	dev = children[0];
+	free(children, M_TEMP);
+
+	if (device_get_children(dev, &children, &n) != 0) {
+		panic("Slicer called on controller with nandbus but no child!");
+	}
+	dev = children[0];
+	free(children, M_TEMP);
+
+	chip = device_get_softc(dev);
+	*nslices = 2;
+	slices[0].base = 0;
+	slices[0].size = 4 * 1024 * 1024;
+	slices[0].label = "boot";
+
+	slices[1].base = 4 * 1024 * 1024;
+	slices[1].size = chip->ndisk->d_mediasize - slices[0].size;
+	slices[1].label = "rootfs";
+
+	return (0);
+}
+
 static int
 rb_nand_probe(device_t dev)
 {
@@ -128,6 +163,7 @@ rb_nand_attach(device_t dev)
 	struct rb_nand_softc *sc;
 	phandle_t node;
 	uint32_t ale[2],cle[2],nce[2],rdy[2];
+	u_long size,start;
 	int err;
 
 	sc = device_get_softc(dev);
@@ -167,6 +203,16 @@ rb_nand_attach(device_t dev)
 		device_printf(dev, "could not allocate resources!\n");
 		return (ENXIO);
 	}
+
+	start = rman_get_start(sc->sc_mem);
+	size = rman_get_size(sc->sc_mem);
+	if (law_enable(OCP85XX_TGTIF_LBC, start, size) != 0) {
+		bus_release_resource(dev, SYS_RES_MEMORY, sc->rid, sc->sc_mem);
+		device_printf(dev, "could not allocate local address window.\n");
+		return (ENXIO);
+	}
+
+	flash_register_slicer(rb_nand_slicer, FLASH_SLICES_TYPE_NAND, TRUE);
 
 	nand_init(&sc->nand_dev, dev, NAND_ECC_SOFT, 0, 0, NULL, NULL);
 

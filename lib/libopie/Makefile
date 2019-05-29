@@ -2,7 +2,11 @@
 #
 # $FreeBSD$
 #
-OPIE_DIST?=	${.CURDIR}/../../contrib/opie
+
+CONFS=	opieaccess
+CONFSMODE=	600
+PACKAGE=lib${LIB}
+OPIE_DIST?=	${SRCTOP}/contrib/opie
 DIST_DIR=	${OPIE_DIST}/${.CURDIR:T}
 SHLIB_MAJOR=    8
 

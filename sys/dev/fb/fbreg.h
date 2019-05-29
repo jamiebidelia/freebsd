@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 1999 Kazutaka YOKOTA <yokota@zodiac.mech.utsunomiya-u.ac.jp>
  * All rights reserved.
  *
@@ -325,7 +327,7 @@ int		genfbwrite(genfb_softc_t *sc, video_adapter_t *adp,
 int		genfbioctl(genfb_softc_t *sc, video_adapter_t *adp,
 			   u_long cmd, caddr_t arg, int flag, struct thread *td);
 int		genfbmmap(genfb_softc_t *sc, video_adapter_t *adp,
-			  vm_ooffset_t offset, vm_offset_t *paddr,
+			  vm_ooffset_t offset, vm_paddr_t *paddr,
 			  int prot, vm_memattr_t *memattr);
 
 #endif /* FB_INSTALL_CDEV */

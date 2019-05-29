@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2007, 2008 Rui Paulo <rpaulo@FreeBSD.org>
  * All rights reserved.
  *
@@ -34,21 +36,22 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
 #include <sys/bus.h>
-#include <sys/systm.h>
-#include <sys/types.h>
-#include <sys/module.h>
 #include <sys/conf.h>
 #include <sys/kernel.h>
-#include <sys/sysctl.h>
+#include <sys/lock.h>
+#include <sys/module.h>
+#include <sys/mutex.h>
 #include <sys/proc.h>	/* for curthread */
 #include <sys/sched.h>
+#include <sys/sysctl.h>
+#include <sys/systm.h>
 
 #include <machine/specialreg.h>
 #include <machine/cpufunc.h>
 #include <machine/cputypes.h>
 #include <machine/md_var.h>
 
-#define	TZ_ZEROC			2732
+#define	TZ_ZEROC			2731
 
 #define	THERM_STATUS_LOG		0x02
 #define	THERM_STATUS			0x01
@@ -142,6 +145,9 @@ coretemp_probe(device_t dev)
 		return (ENXIO);
 
 	device_set_desc(dev, "CPU On-Die Thermal Sensors");
+
+	if (!bootverbose && device_get_unit(dev) != 0)
+		device_quiet(dev);
 
 	return (BUS_PROBE_GENERIC);
 }

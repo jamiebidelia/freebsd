@@ -27,6 +27,18 @@
 #include "ntp_libopts.h"
 #include "ntpd-opts.h"
 
+/* there's a short treatise below what the thread stuff is for.
+ * [Bug 2954] enable the threading warm-up only for Linux.
+ */
+#if defined(HAVE_PTHREADS) && HAVE_PTHREADS && !defined(NO_THREADS)
+# ifdef HAVE_PTHREAD_H
+#  include <pthread.h>
+# endif
+# if defined(linux)
+#  define NEED_PTHREAD_WARMUP
+# endif
+#endif
+
 #ifdef HAVE_UNISTD_H
 # include <unistd.h>
 #endif
@@ -92,6 +104,10 @@
 #endif
 #endif
 
+#ifdef SYS_WINNT
+# include "ntservice.h"
+#endif
+
 #ifdef _AIX
 # include <ulimit.h>
 #endif /* _AIX */
@@ -111,6 +127,9 @@
 #if defined(HAVE_PRIV_H) && defined(HAVE_SOLARIS_PRIVS)
 # include <priv.h>
 #endif /* HAVE_PRIV_H */
+#if defined(HAVE_TRUSTEDBSD_MAC)
+# include <sys/mac.h>
+#endif /* HAVE_TRUSTEDBSD_MAC */
 #endif /* HAVE_DROPROOT */
 
 #if defined (LIBSECCOMP) && (KERN_SECCOMP)
@@ -170,7 +189,6 @@ char *group;		/* group to switch to */
 const char *chrootdir;	/* directory to chroot to */
 uid_t sw_uid;
 gid_t sw_gid;
-char *endp;
 struct group *gr;
 struct passwd *pw;
 #endif /* HAVE_DROPROOT */
@@ -178,12 +196,6 @@ struct passwd *pw;
 #ifdef HAVE_WORKING_FORK
 int	waitsync_fd_to_close = -1;	/* -w/--wait-sync */
 #endif
-
-/*
- * Initializing flag.  All async routines watch this and only do their
- * thing when it is clear.
- */
-int initializing;
 
 /*
  * Version declaration
@@ -203,6 +215,11 @@ extern int syscall	(int, ...);
 
 
 #if !defined(SIM) && defined(SIGDIE1)
+static volatile int signalled	= 0;
+static volatile int signo	= 0;
+
+/* In an ideal world, 'finish_safe()' would declared as noreturn... */
+static	void		finish_safe	(int);
 static	RETSIGTYPE	finish		(int);
 #endif
 
@@ -219,8 +236,10 @@ static	RETSIGTYPE	no_debug	(int);
 # endif	/* !DEBUG */
 #endif	/* !SIM && !SYS_WINNT */
 
+#ifndef WORK_FORK
 int	saved_argc;
 char **	saved_argv;
+#endif
 
 #ifndef SIM
 int		ntpdmain		(int, char **);
@@ -238,7 +257,104 @@ static void	library_unexpected_error(const char *, int,
 #endif	/* !SIM */
 
 
+/* Bug2332 unearthed a problem in the interaction of reduced user
+ * privileges, the limits on memory usage and some versions of the
+ * pthread library on Linux systems. The 'pthread_cancel()' function and
+ * likely some others need to track the stack of the thread involved,
+ * and uses a function that comes from GCC (--> libgcc_s.so) to do
+ * this. Unfortunately the developers of glibc decided to load the
+ * library on demand, which speeds up program start but can cause
+ * trouble here: Due to all the things NTPD does to limit its resource
+ * usage, this deferred load of libgcc_s does not always work once the
+ * restrictions are in effect.
+ *
+ * One way out of this was attempting a forced link against libgcc_s
+ * when possible because it makes the library available immediately
+ * without deferred load. (The symbol resolution would still be dynamic
+ * and on demand, but the code would already be in the process image.)
+ *
+ * This is a tricky thing to do, since it's not necessary everywhere,
+ * not possible everywhere, has shown to break the build of other
+ * programs in the NTP suite and is now generally frowned upon.
+ *
+ * So we take a different approach here: We creat a worker thread that does
+ * actually nothing except waiting for cancellation and cancel it. If
+ * this is done before all the limitations are put in place, the
+ * machinery is pre-heated and all the runtime stuff should be in place
+ * and useable when needed.
+ *
+ * This uses only the standard pthread API and should work with all
+ * implementations of pthreads. It is not necessary everywhere, but it's
+ * cheap enough to go on nearly unnoticed.
+ *
+ * Addendum: Bug 2954 showed that the assumption that this should work
+ * with all OS is wrong -- at least FreeBSD bombs heavily.
+ */
+#ifdef NEED_PTHREAD_WARMUP
 
+/* simple thread function: sleep until cancelled, just to exercise
+ * thread cancellation.
+ */
+static void*
+my_pthread_warmup_worker(
+	void *thread_args)
+{
+	(void)thread_args;
+	for (;;)
+		sleep(10);
+	return NULL;
+}
+	
+/* pre-heat threading: create a thread and cancel it, just to exercise
+ * thread cancellation.
+ */
+static void
+my_pthread_warmup(void)
+{
+	pthread_t 	thread;
+	pthread_attr_t	thr_attr;
+	int       	rc;
+	
+	pthread_attr_init(&thr_attr);
+#if defined(HAVE_PTHREAD_ATTR_GETSTACKSIZE) && \
+    defined(HAVE_PTHREAD_ATTR_SETSTACKSIZE) && \
+    defined(PTHREAD_STACK_MIN)
+	{
+		size_t ssmin = 32*1024;	/* 32kB should be minimum */
+		if (ssmin < PTHREAD_STACK_MIN)
+			ssmin = PTHREAD_STACK_MIN;
+		rc = pthread_attr_setstacksize(&thr_attr, ssmin);
+		if (0 != rc)
+			msyslog(LOG_ERR,
+				"my_pthread_warmup: pthread_attr_setstacksize() -> %s",
+				strerror(rc));
+	}
+#endif
+	rc = pthread_create(
+		&thread, &thr_attr, my_pthread_warmup_worker, NULL);
+	pthread_attr_destroy(&thr_attr);
+	if (0 != rc) {
+		msyslog(LOG_ERR,
+			"my_pthread_warmup: pthread_create() -> %s",
+			strerror(rc));
+	} else {
+		pthread_cancel(thread);
+		pthread_join(thread, NULL);
+	}
+}
+
+#endif /*defined(NEED_PTHREAD_WARMUP)*/
+
+#ifdef NEED_EARLY_FORK
+static void
+dummy_callback(void) { return; }
+
+static void
+fork_nonchroot_worker(void) {
+	getaddrinfo_sometime("localhost", "ntp", NULL, INITIAL_DNS_RETRY,
+			     (gai_sometime_callback)&dummy_callback, NULL);
+}
+#endif /* NEED_EARLY_FORK */
 
 void
 parse_cmdline_opts(
@@ -413,6 +529,236 @@ set_process_priority(void)
 }
 #endif	/* !SIM */
 
+#if !defined(SIM) && !defined(SYS_WINNT)
+/*
+ * Detach from terminal (much like daemon())
+ * Nothe that this function calls exit()
+ */
+# ifdef HAVE_WORKING_FORK
+static void
+detach_from_terminal(
+	int pipe_fds[2],
+	long wait_sync,
+	const char *logfilename
+	)
+{
+	int rc;
+	int exit_code;
+#  if !defined(HAVE_SETSID) && !defined (HAVE_SETPGID) && defined(TIOCNOTTY)
+	int		fid;
+#  endif
+#  ifdef _AIX
+	struct sigaction sa;
+#  endif
+
+	rc = fork();
+	if (-1 == rc) {
+		exit_code = (errno) ? errno : -1;
+		msyslog(LOG_ERR, "fork: %m");
+		exit(exit_code);
+	}
+	if (rc > 0) {
+		/* parent */
+		exit_code = wait_child_sync_if(pipe_fds[0],
+					       wait_sync);
+		exit(exit_code);
+	}
+
+	/*
+	 * child/daemon
+	 * close all open files excepting waitsync_fd_to_close.
+	 * msyslog() unreliable until after init_logging().
+	 */
+	closelog();
+	if (syslog_file != NULL) {
+		fclose(syslog_file);
+		syslog_file = NULL;
+		syslogit = TRUE;
+	}
+	close_all_except(waitsync_fd_to_close);
+	INSIST(0 == open("/dev/null", 0) && 1 == dup2(0, 1) \
+		&& 2 == dup2(0, 2));
+
+	init_logging(progname, 0, TRUE);
+	/* we lost our logfile (if any) daemonizing */
+	setup_logfile(logfilename);
+
+#  ifdef SYS_DOMAINOS
+	{
+		uid_$t puid;
+		status_$t st;
+
+		proc2_$who_am_i(&puid);
+		proc2_$make_server(&puid, &st);
+	}
+#  endif	/* SYS_DOMAINOS */
+#  ifdef HAVE_SETSID
+	if (setsid() == (pid_t)-1)
+		msyslog(LOG_ERR, "setsid(): %m");
+#  elif defined(HAVE_SETPGID)
+	if (setpgid(0, 0) == -1)
+		msyslog(LOG_ERR, "setpgid(): %m");
+#  else		/* !HAVE_SETSID && !HAVE_SETPGID follows */
+#   ifdef TIOCNOTTY
+	fid = open("/dev/tty", 2);
+	if (fid >= 0) {
+		ioctl(fid, (u_long)TIOCNOTTY, NULL);
+		close(fid);
+	}
+#   endif	/* TIOCNOTTY */
+	ntp_setpgrp(0, getpid());
+#  endif	/* !HAVE_SETSID && !HAVE_SETPGID */
+#  ifdef _AIX
+	/* Don't get killed by low-on-memory signal. */
+	sa.sa_handler = catch_danger;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = SA_RESTART;
+	sigaction(SIGDANGER, &sa, NULL);
+#  endif	/* _AIX */
+
+	return;
+}
+# endif /* HAVE_WORKING_FORK */
+
+#ifdef HAVE_DROPROOT
+/*
+ * Map user name/number to user ID
+*/
+static int
+map_user(
+	)
+{
+	char *endp;
+
+	if (isdigit((unsigned char)*user)) {
+		sw_uid = (uid_t)strtoul(user, &endp, 0);
+		if (*endp != '\0')
+			goto getuser;
+
+		if ((pw = getpwuid(sw_uid)) != NULL) {
+			free(user);
+			user = estrdup(pw->pw_name);
+			sw_gid = pw->pw_gid;
+		} else {
+			errno = 0;
+			msyslog(LOG_ERR, "Cannot find user ID %s", user);
+			return 0;
+		}
+
+	} else {
+getuser:
+		errno = 0;
+		if ((pw = getpwnam(user)) != NULL) {
+			sw_uid = pw->pw_uid;
+			sw_gid = pw->pw_gid;
+		} else {
+			if (errno)
+				msyslog(LOG_ERR, "getpwnam(%s) failed: %m", user);
+			else
+				msyslog(LOG_ERR, "Cannot find user `%s'", user);
+			return 0;
+		}
+	}
+
+	return 1;
+}
+
+/*
+ * Map group name/number to group ID
+*/
+static int
+map_group(void)
+{
+	char *endp;
+
+	if (isdigit((unsigned char)*group)) {
+		sw_gid = (gid_t)strtoul(group, &endp, 0);
+		if (*endp != '\0')
+			goto getgroup;
+	} else {
+getgroup:
+		if ((gr = getgrnam(group)) != NULL) {
+			sw_gid = gr->gr_gid;
+		} else {
+			errno = 0;
+			msyslog(LOG_ERR, "Cannot find group `%s'", group);
+			return 0;
+		}
+	}
+
+	return 1;
+}
+
+static int
+set_group_ids(void)
+{
+	if (user && initgroups(user, sw_gid)) {
+		msyslog(LOG_ERR, "Cannot initgroups() to user `%s': %m", user);
+		return 0;
+	}
+	if (group && setgid(sw_gid)) {
+		msyslog(LOG_ERR, "Cannot setgid() to group `%s': %m", group);
+		return 0;
+	}
+	if (group && setegid(sw_gid)) {
+		msyslog(LOG_ERR, "Cannot setegid() to group `%s': %m", group);
+		return 0;
+	}
+	if (group) {
+		if (0 != setgroups(1, &sw_gid)) {
+			msyslog(LOG_ERR, "setgroups(1, %d) failed: %m", sw_gid);
+			return 0;
+		}
+	}
+	else if (pw)
+		if (0 != initgroups(pw->pw_name, pw->pw_gid)) {
+			msyslog(LOG_ERR, "initgroups(<%s>, %d) filed: %m", pw->pw_name, pw->pw_gid);
+			return 0;
+		}
+	return 1;
+}
+
+static int
+set_user_ids(void)
+{
+	if (user && setuid(sw_uid)) {
+		msyslog(LOG_ERR, "Cannot setuid() to user `%s': %m", user);
+		return 0;
+	}
+	if (user && seteuid(sw_uid)) {
+		msyslog(LOG_ERR, "Cannot seteuid() to user `%s': %m", user);
+		return 0;
+	}
+	return 1;
+}
+
+/*
+ * Change (effective) user and group IDs, also initialize the supplementary group access list
+ */
+int set_user_group_ids(void);
+int
+set_user_group_ids(void)
+{
+	/* If the the user was already mapped, no need to map it again */
+	if ((NULL != user) && (0 == sw_uid)) {
+		if (0 == map_user())
+			exit (-1);
+	}
+	/* same applies for the group */
+	if ((NULL != group) && (0 == sw_gid)) {
+		if (0 == map_group())
+			exit (-1);
+	}
+
+	if (getegid() != sw_gid && 0 == set_group_ids())
+		return 0;
+	if (geteuid() != sw_uid && 0 == set_user_ids())
+		return 0;
+
+	return 1;
+}
+#endif /* HAVE_DROPROOT */
+#endif /* !SIM */
 
 /*
  * Main program.  Initialize us, disconnect us from the tty if necessary,
@@ -439,18 +785,16 @@ ntpdmain(
 	int		pipe_fds[2];
 	int		rc;
 	int		exit_code;
-#  ifdef _AIX
-	struct sigaction sa;
-#  endif
-#  if !defined(HAVE_SETSID) && !defined (HAVE_SETPGID) && defined(TIOCNOTTY)
-	int		fid;
-#  endif
 # endif	/* HAVE_WORKING_FORK*/
 # ifdef SCO5_CLOCK
 	int		fd;
 	int		zero;
 # endif
 
+# ifdef NEED_PTHREAD_WARMUP
+	my_pthread_warmup();
+# endif
+	
 # ifdef HAVE_UMASK
 	uv = umask(0);
 	if (uv)
@@ -520,7 +864,12 @@ ntpdmain(
 	/* MPE lacks the concept of root */
 # if defined(HAVE_GETUID) && !defined(MPE)
 	uid = getuid();
-	if (uid && !HAVE_OPT( SAVECONFIGQUIT )) {
+	if (uid && !HAVE_OPT( SAVECONFIGQUIT )
+#  if defined(HAVE_TRUSTEDBSD_MAC)
+	    /* We can run as non-root if the mac_ntpd policy is enabled. */
+	    && mac_is_present("ntpd") != 1
+#  endif
+	    ) {
 		msyslog_term = TRUE;
 		msyslog(LOG_ERR,
 			"must be run as root, not uid %ld", (long)uid);
@@ -578,6 +927,9 @@ ntpdmain(
 # endif
 
 # ifdef HAVE_WORKING_FORK
+	/* make sure the FDs are initialised */
+	pipe_fds[0] = -1;
+	pipe_fds[1] = -1;
 	do {					/* 'loop' once */
 		if (!HAVE_OPT( WAIT_SYNC ))
 			break;
@@ -601,6 +953,11 @@ ntpdmain(
 	init_lib();
 # ifdef SYS_WINNT
 	/*
+	 * Make sure the service is initialized before we do anything else
+	 */
+	ntservice_init();
+
+	/*
 	 * Start interpolation thread, must occur before first
 	 * get_systime()
 	 */
@@ -619,70 +976,7 @@ ntpdmain(
 	if (!nofork) {
 
 # ifdef HAVE_WORKING_FORK
-		rc = fork();
-		if (-1 == rc) {
-			exit_code = (errno) ? errno : -1;
-			msyslog(LOG_ERR, "fork: %m");
-			exit(exit_code);
-		}
-		if (rc > 0) {	
-			/* parent */
-			exit_code = wait_child_sync_if(pipe_fds[0],
-						       wait_sync);
-			exit(exit_code);
-		}
-		
-		/*
-		 * child/daemon 
-		 * close all open files excepting waitsync_fd_to_close.
-		 * msyslog() unreliable until after init_logging().
-		 */
-		closelog();
-		if (syslog_file != NULL) {
-			fclose(syslog_file);
-			syslog_file = NULL;
-			syslogit = TRUE;
-		}
-		close_all_except(waitsync_fd_to_close);
-		INSIST(0 == open("/dev/null", 0) && 1 == dup2(0, 1) \
-			&& 2 == dup2(0, 2));
-
-		init_logging(progname, 0, TRUE);
-		/* we lost our logfile (if any) daemonizing */
-		setup_logfile(logfilename);
-
-#  ifdef SYS_DOMAINOS
-		{
-			uid_$t puid;
-			status_$t st;
-
-			proc2_$who_am_i(&puid);
-			proc2_$make_server(&puid, &st);
-		}
-#  endif	/* SYS_DOMAINOS */
-#  ifdef HAVE_SETSID
-		if (setsid() == (pid_t)-1)
-			msyslog(LOG_ERR, "setsid(): %m");
-#  elif defined(HAVE_SETPGID)
-		if (setpgid(0, 0) == -1)
-			msyslog(LOG_ERR, "setpgid(): %m");
-#  else		/* !HAVE_SETSID && !HAVE_SETPGID follows */
-#   ifdef TIOCNOTTY
-		fid = open("/dev/tty", 2);
-		if (fid >= 0) {
-			ioctl(fid, (u_long)TIOCNOTTY, NULL);
-			close(fid);
-		}
-#   endif	/* TIOCNOTTY */
-		ntp_setpgrp(0, getpid());
-#  endif	/* !HAVE_SETSID && !HAVE_SETPGID */
-#  ifdef _AIX
-		/* Don't get killed by low-on-memory signal. */
-		sa.sa_handler = catch_danger;
-		sigemptyset(&sa.sa_mask);
-		sa.sa_flags = SA_RESTART;
-		sigaction(SIGDANGER, &sa, NULL);
-#  endif	/* _AIX */
+		detach_from_terminal(pipe_fds, wait_sync, logfilename);
 # endif		/* HAVE_WORKING_FORK */
 	}
 
@@ -791,13 +1085,16 @@ ntpdmain(
 	 */
 	getconfig(argc, argv);
 
-	if (do_memlock) {
+	if (-1 == cur_memlock) {
 # if defined(HAVE_MLOCKALL)
 		/*
 		 * lock the process into memory
 		 */
-		if (!HAVE_OPT(SAVECONFIGQUIT) &&
-		    0 != mlockall(MCL_CURRENT|MCL_FUTURE))
+		if (   !HAVE_OPT(SAVECONFIGQUIT)
+#  ifdef RLIMIT_MEMLOCK
+		    && -1 != DFLT_RLIMIT_MEMLOCK
+#  endif
+		    && 0 != mlockall(MCL_CURRENT|MCL_FUTURE))
 			msyslog(LOG_ERR, "mlockall(): %m");
 # else	/* !HAVE_MLOCKALL follows */
 #  ifdef HAVE_PLOCK
@@ -828,6 +1125,11 @@ ntpdmain(
 
 # ifdef HAVE_DROPROOT
 	if (droproot) {
+
+#ifdef NEED_EARLY_FORK
+		fork_nonchroot_worker();
+#endif
+
 		/* Drop super-user privileges and chroot now if the OS supports this */
 
 #  ifdef HAVE_LINUX_CAPABILITIES
@@ -847,51 +1149,12 @@ ntpdmain(
 #  endif	/* HAVE_LINUX_CAPABILITIES || HAVE_SOLARIS_PRIVS */
 
 		if (user != NULL) {
-			if (isdigit((unsigned char)*user)) {
-				sw_uid = (uid_t)strtoul(user, &endp, 0);
-				if (*endp != '\0')
-					goto getuser;
-
-				if ((pw = getpwuid(sw_uid)) != NULL) {
-					free(user);
-					user = estrdup(pw->pw_name);
-					sw_gid = pw->pw_gid;
-				} else {
-					errno = 0;
-					msyslog(LOG_ERR, "Cannot find user ID %s", user);
-					exit (-1);
-				}
-
-			} else {
-getuser:
-				errno = 0;
-				if ((pw = getpwnam(user)) != NULL) {
-					sw_uid = pw->pw_uid;
-					sw_gid = pw->pw_gid;
-				} else {
-					if (errno)
-						msyslog(LOG_ERR, "getpwnam(%s) failed: %m", user);
-					else
-						msyslog(LOG_ERR, "Cannot find user `%s'", user);
-					exit (-1);
-				}
-			}
+			if (0 == map_user())
+				exit (-1);
 		}
 		if (group != NULL) {
-			if (isdigit((unsigned char)*group)) {
-				sw_gid = (gid_t)strtoul(group, &endp, 0);
-				if (*endp != '\0')
-					goto getgroup;
-			} else {
-getgroup:
-				if ((gr = getgrnam(group)) != NULL) {
-					sw_gid = gr->gr_gid;
-				} else {
-					errno = 0;
-					msyslog(LOG_ERR, "Cannot find group `%s'", group);
-					exit (-1);
-				}
-			}
+			if (0 == map_group())
+				exit (-1);
 		}
 
 		if (chrootdir ) {
@@ -925,32 +1188,20 @@ getgroup:
 			exit(-1);
 		}
 #  endif /* HAVE_SOLARIS_PRIVS */
-		if (user && initgroups(user, sw_gid)) {
-			msyslog(LOG_ERR, "Cannot initgroups() to user `%s': %m", user);
-			exit (-1);
-		}
-		if (group && setgid(sw_gid)) {
-			msyslog(LOG_ERR, "Cannot setgid() to group `%s': %m", group);
-			exit (-1);
-		}
-		if (group && setegid(sw_gid)) {
-			msyslog(LOG_ERR, "Cannot setegid() to group `%s': %m", group);
-			exit (-1);
-		}
-		if (group)
-			setgroups(1, &sw_gid);
-		else
-			initgroups(pw->pw_name, pw->pw_gid);
-		if (user && setuid(sw_uid)) {
-			msyslog(LOG_ERR, "Cannot setuid() to user `%s': %m", user);
-			exit (-1);
-		}
-		if (user && seteuid(sw_uid)) {
-			msyslog(LOG_ERR, "Cannot seteuid() to user `%s': %m", user);
-			exit (-1);
-		}
+		if (0 == set_user_group_ids())
+			exit(-1);
 
-#  if !defined(HAVE_LINUX_CAPABILITIES) && !defined(HAVE_SOLARIS_PRIVS)
+#  if defined(HAVE_TRUSTEDBSD_MAC)
+		/*
+		 * To manipulate system time and (re-)bind to NTP_PORT as needed
+		 * following interface changes, we must either run as uid 0 or
+		 * the mac_ntpd policy module must be enabled.
+		 */
+		if (sw_uid != 0 && mac_is_present("ntpd") != 1) {
+			msyslog(LOG_ERR, "Need MAC 'ntpd' policy enabled to drop root privileges");
+			exit (-1);
+		}
+#  elif !defined(HAVE_LINUX_CAPABILITIES) && !defined(HAVE_SOLARIS_PRIVS)
 		/*
 		 * for now assume that the privilege to bind to privileged ports
 		 * is associated with running with uid 0 - should be refined on
@@ -1113,9 +1364,17 @@ int scmp_sc[] = {
 	}
 #endif /* LIBSECCOMP and KERN_SECCOMP */
 
+#ifdef SYS_WINNT
+	ntservice_isup();
+#endif
+
 # ifdef HAVE_IO_COMPLETION_PORT
 
 	for (;;) {
+#if !defined(SIM) && defined(SIGDIE1)
+		if (signalled)
+			finish_safe(signo);
+#endif
 		GetReceivedBuffers();
 # else /* normal I/O */
 
@@ -1123,11 +1382,19 @@ int scmp_sc[] = {
 	was_alarmed = FALSE;
 
 	for (;;) {
+#if !defined(SIM) && defined(SIGDIE1)
+		if (signalled)
+			finish_safe(signo);
+#endif		
 		if (alarm_flag) {	/* alarmed? */
 			was_alarmed = TRUE;
 			alarm_flag = FALSE;
 		}
 
+		/* collect async name/addr results */
+		if (!was_alarmed)
+		    harvest_blocking_responses();
+		
 		if (!was_alarmed && !has_full_recv_buffer()) {
 			/*
 			 * Nothing to do.  Wait for something.
@@ -1242,9 +1509,9 @@ int scmp_sc[] = {
 /*
  * finish - exit gracefully
  */
-static RETSIGTYPE
-finish(
-	int sig
+static void
+finish_safe(
+	int	sig
 	)
 {
 	const char *sig_desc;
@@ -1265,6 +1532,16 @@ finish(
 	peer_cleanup();
 	exit(0);
 }
+
+static RETSIGTYPE
+finish(
+	int	sig
+	)
+{
+	signalled = 1;
+	signo = sig;
+}
+
 #endif	/* !SIM && SIGDIE1 */
 
 

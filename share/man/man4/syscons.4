@@ -26,7 +26,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd July 3, 2014
+.Dd June 2, 2018
 .Dt SYSCONS 4
 .Os
 .Sh NAME
@@ -38,6 +38,7 @@
 .Cd "options SC_ALT_MOUSE_IMAGE"
 .Cd "options SC_CUT_SEPCHARS=_characters_"
 .Cd "options SC_CUT_SPACES2TABS"
+.Cd "options SC_DFLT_TERM"
 .Cd "options SC_DISABLE_KDBKEY"
 .Cd "options SC_DISABLE_REBOOT"
 .Cd "options SC_HISTORY_SIZE=N"
@@ -48,11 +49,15 @@
 .Cd "options SC_NO_PALETTE_LOADING"
 .Cd "options SC_NO_SUSPEND_VTYSWITCH"
 .Cd "options SC_NO_SYSMOUSE"
+.Cd "options SC_NO_TERM_DUMB"
+.Cd "options SC_NO_TERM_SC"
+.Cd "options SC_NO_TERM_SCTEKEN"
 .Cd "options SC_PIXEL_MODE"
 .Cd "options SC_TWOBUTTON_MOUSE"
 .Cd "options SC_NORM_ATTR=_attribute_"
 .Cd "options SC_NORM_REV_ATTR=_attribute_"
 .Cd "options SC_KERNEL_CONS_ATTR=_attribute_"
+.Cd "options SC_KERNEL_CONS_ATTRS=_attributes_"
 .Cd "options SC_KERNEL_CONS_REV_ATTR=_attribute_"
 .Cd "options SC_DFLT_FONT"
 .Cd "makeoptions SC_DFLT_FONT=_font_name_"
@@ -284,6 +289,8 @@ This options instructs the driver to convert leading spaces into tabs
 when copying data into cut buffer.
 This might be useful to preserve
 indentation when copying tab-indented text.
+.It Dv SC_DFLT_TERM=_name_
+This option specifies the name of the preferred terminal emulator.
 .It Dv SC_DISABLE_KDBKEY
 This option disables the ``debug'' key combination (by default, it is
 .Dv Alt-Esc ,
@@ -341,6 +348,7 @@ above.
 .It Dv SC_NORM_ATTR=_attribute_
 .It Dv SC_NORM_REV_ATTR=_attribute_
 .It Dv SC_KERNEL_CONS_ATTR=_attribute_
+.It Dv SC_KERNEL_CONS_ATTRS=_attributes_
 .It Dv SC_KERNEL_CONS_REV_ATTR=_attribute_
 These options will set the default colors.
 Available colors are defined in
@@ -348,6 +356,11 @@ Available colors are defined in
 See
 .Sx EXAMPLES
 below.
+.Dv SC_KERNEL_CONS_ATTRS
+is a character string giving a sequence of attributes in binary format.
+The sequence will be repeated up to the number of CPUs.
+Beware that the string must not be null,
+since the kernel divides by its length.
 .It Dv SC_DFLT_FONT
 This option will specify the default font.
 Available fonts are: iso, iso2, koi8-r, koi8-u, cp437, cp850, cp865,
@@ -402,6 +415,15 @@ will fail if this option is defined.
 This option implies the
 .Dv SC_NO_CUTPASTE
 option too.
+.It Dv SC_NO_TERM_DUMB
+.It Dv SC_NO_TERM_SC
+.It Dv SC_NO_TERM_SCTEKEN
+These options remove the
+.Qq dumb ,
+.Qq sc ,
+and
+.Qq scteken 
+terminal emulators, respectively.
 .El
 .Ss Driver Flags
 The following driver flags can be used to control the
@@ -468,9 +490,11 @@ be selected by setting this variable to
 .Ql sc
 or
 .Ql vt .
-If not set,
-.Nm
-provides the default system console.
+The
+.Pa GENERIC
+kernel uses
+.Xr vt 4
+when this value is not set.
 .El
 .Sh FILES
 .Bl -tag -width /usr/share/syscons/xxxxyyyyzzz -compact
@@ -536,6 +560,23 @@ The reversed message will be black on red background.
 .Pp
 .Dl "options SC_KERNEL_CONS_ATTR=(FG_LIGHTRED|BG_BLACK)"
 .Dl "options SC_KERNEL_CONS_REV_ATTR=(FG_BLACK|BG_RED)"
+.Pp
+Provided
+.Dv SC_KERNEL_CONS_ATTR
+is not set, or is set to its default of bright white on black,
+the following line will set 4 red-ish colors
+for printing kernel messages in colors depending on the CPU.
+.Pp
+.Dl options SC_KERNEL_CONS_ATTRS=\e"\ex0c\ex04\ex40\ex0e\e"
+.Pp
+The default scheme is probably better for up to 8 CPUs.
+Use a long string to get unique colors for more than 8 CPUs.
+.Pp
+To turn off all per-CPU coloring of kernel messages,
+set SC_KERNEL_CONS_ATTR to a non-default value,
+or use the default in a pattern of length 1.
+.Pp
+.Dl options SC_KERNEL_CONS_ATTRS=\e"\ex0f\e"
 .Pp
 The following example adds the font files
 .Pa cp850-8x16.fnt ,

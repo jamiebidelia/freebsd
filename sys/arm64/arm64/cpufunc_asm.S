@@ -29,8 +29,12 @@
  *
  */
 
+#include <sys/errno.h>
 #include <machine/asm.h>
 #include <machine/param.h>
+
+#include "assym.inc"
+
 __FBSDID("$FreeBSD$");
 
 /*
@@ -61,18 +65,18 @@ __FBSDID("$FreeBSD$");
 	add	x1, x1, x2		/* Add these to the size */
 	bic	x0, x0, x4		/* Clear the low bit of the address */
 1:
+	dc	\dcop, x0
+	dsb	ish
 .if \ic != 0
 	ic	\icop, x0
+	dsb	ish
 .endif
-	dc	\dcop, x0
 	add	x0, x0, x3		/* Move to the next line */
 	subs	x1, x1, x3		/* Reduce the size */
 	b.hi	1b			/* Check if we are done */
 .if \ic != 0
 	isb
 .endif
-	dsb	ish
-	ret
 .endm
 
 ENTRY(arm64_nullop)
@@ -92,6 +96,7 @@ ENTRY(arm64_setttb)
 END(arm64_setttb)
 
 ENTRY(arm64_tlb_flushID)
+	dsb	ishst
 #ifdef SMP
 	tlbi	vmalle1is
 #else
@@ -102,24 +107,12 @@ ENTRY(arm64_tlb_flushID)
 	ret
 END(arm64_tlb_flushID)
 
-ENTRY(arm64_tlb_flushID_SE)
-	ldr	x1, .Lpage_mask
-	bic	x0, x0, x1
-#ifdef SMP
-	tlbi	vae1is, x0
-#else
-	tlbi	vae1, x0
-#endif
-	dsb	ish
-	isb
-	ret
-END(arm64_tlb_flushID_SE)
-
 /*
  * void arm64_dcache_wb_range(vm_offset_t, vm_size_t)
  */
 ENTRY(arm64_dcache_wb_range)
 	cache_handle_range	dcop = cvac
+	ret
 END(arm64_dcache_wb_range)
 
 /*
@@ -127,6 +120,7 @@ END(arm64_dcache_wb_range)
  */
 ENTRY(arm64_dcache_wbinv_range)
 	cache_handle_range	dcop = civac
+	ret
 END(arm64_dcache_wbinv_range)
 
 /*
@@ -137,6 +131,7 @@ END(arm64_dcache_wbinv_range)
  */
 ENTRY(arm64_dcache_inv_range)
 	cache_handle_range	dcop = ivac
+	ret
 END(arm64_dcache_inv_range)
 
 /*
@@ -144,11 +139,43 @@ END(arm64_dcache_inv_range)
  */
 ENTRY(arm64_idcache_wbinv_range)
 	cache_handle_range	dcop = civac, ic = 1, icop = ivau
+	ret
 END(arm64_idcache_wbinv_range)
 
 /*
  * void arm64_icache_sync_range(vm_offset_t, vm_size_t)
  */
 ENTRY(arm64_icache_sync_range)
-	cache_handle_range	dcop = cvac, ic = 1, icop = ivau
+	/*
+	 * XXX Temporary solution - I-cache flush should be range based for
+	 * PIPT cache or IALLUIS for VIVT or VIPT caches
+	 */
+/*	cache_handle_range	dcop = cvau, ic = 1, icop = ivau */
+	cache_handle_range	dcop = cvau
+	ic	ialluis
+	dsb	ish
+	isb
+	ret
 END(arm64_icache_sync_range)
+
+/*
+ * int arm64_icache_sync_range_checked(vm_offset_t, vm_size_t)
+ */
+ENTRY(arm64_icache_sync_range_checked)
+	adr	x5, cache_maint_fault
+	SET_FAULT_HANDLER(x5, x6)
+	/* XXX: See comment in arm64_icache_sync_range */
+	cache_handle_range	dcop = cvau
+	ic	ialluis
+	dsb	ish
+	isb
+	SET_FAULT_HANDLER(xzr, x6)
+	mov	x0, #0
+	ret
+END(arm64_icache_sync_range_checked)
+
+ENTRY(cache_maint_fault)
+	SET_FAULT_HANDLER(xzr, x1)
+	mov	x0, #EFAULT
+	ret
+END(cache_maint_fault)

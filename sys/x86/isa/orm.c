@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2000 Nikolai Saoukh
  * All rights reserved.
  *
@@ -90,6 +92,9 @@ orm_identify(driver_t* driver, device_t parent)
 	u_int32_t		rom_size;
 	struct orm_softc	*sc;
 	u_int8_t		buf[3];
+
+	if (resource_disabled("orm", 0))
+		return;
 
 	child = BUS_ADD_CHILD(parent, ISA_ORDER_SENSITIVE, "orm", -1);
 	device_set_driver(child, driver);
@@ -183,3 +188,4 @@ static driver_t orm_driver = {
 static devclass_t orm_devclass;
 
 DRIVER_MODULE(orm, isa, orm_driver, orm_devclass, 0, 0);
+ISA_PNP_INFO(orm_ids);

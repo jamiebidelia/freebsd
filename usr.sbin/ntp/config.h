@@ -120,7 +120,7 @@
 #define CLOCK_PST 1
 
 /* DCF77 raw time code */
-/* #undef CLOCK_RAWDCF */
+#define CLOCK_RAWDCF 1
 
 /* RCC 8000 clock */
 /* #undef CLOCK_RCC8000 */
@@ -182,7 +182,7 @@
 /* #undef C_ALLOCA */
 
 /* Enable debugging code? */
-#define DEBUG 1
+/* #undef DEBUG */
 
 /* Enable processing time debugging? */
 /* #undef DEBUG_TIMING */
@@ -304,8 +304,17 @@
 /* The number of minutes in a DST adjustment */
 #define DSTMINUTES 60
 
+/* support dynamic interleave? */
+#define DYNAMIC_INTERLEAVE 0
+
 /* number of args to el_init() */
 #define EL_INIT_ARGS 4
+
+/* Provide the explicit 127.0.0.0/8 martian filter? */
+#define ENABLE_BUG3020_FIX 1
+
+/* Enable CMAC support? */
+#define ENABLE_CMAC 1
 
 /* nls support in libopts */
 /* #undef ENABLE_NLS */
@@ -334,6 +343,9 @@
 
 /* Define to 1 if you have the <arpa/nameser.h> header file. */
 #define HAVE_ARPA_NAMESER_H 1
+
+/* Define to 1 if you have the `atomic_thread_fence' function. */
+/* #undef HAVE_ATOMIC_THREAD_FENCE */
 
 /* Do we have audio support? */
 #define HAVE_AUDIO /**/
@@ -365,6 +377,14 @@
 /* Define to 1 if you have the `daemon' function. */
 #define HAVE_DAEMON 1
 
+/* Define to 1 if you have the declaration of `siglongjmp', and to 0 if you
+   don't. */
+#define HAVE_DECL_SIGLONGJMP 1
+
+/* Define to 1 if you have the declaration of `sigsetjmp', and to 0 if you
+   don't. */
+#define HAVE_DECL_SIGSETJMP 1
+
 /* Define to 1 if you have the declaration of `strerror_r', and to 0 if you
    don't. */
 #define HAVE_DECL_STRERROR_R 1
@@ -383,10 +403,13 @@
 /* #undef HAVE_DOPRNT */
 
 /* Can we drop root privileges? */
-/* #undef HAVE_DROPROOT */
+#define HAVE_DROPROOT
 
 /* Define to 1 if you have the <errno.h> header file. */
 #define HAVE_ERRNO_H 1
+
+/* Define to 1 if you have the `EVP_MD_do_all_sorted' function. */
+#define HAVE_EVP_MD_DO_ALL_SORTED 1
 
 /* Define to 1 if you have the `fchmod' function. */
 #define HAVE_FCHMOD 1
@@ -613,6 +636,9 @@
 /* Define to 1 if you have the <net/if.h> header file. */
 #define HAVE_NET_IF_H 1
 
+/* Define to 1 if you have the <net/if_var.h> header file. */
+#define HAVE_NET_IF_VAR_H 1
+
 /* Define to 1 if you have the <net/route.h> header file. */
 #define HAVE_NET_ROUTE_H 1
 
@@ -639,6 +665,12 @@
 
 /* if you have NT Threads */
 /* #undef HAVE_NT_THREADS */
+
+/* Define to 1 if you have the <openssl/cmac.h> header file. */
+#define HAVE_OPENSSL_CMAC_H 1
+
+/* Define to 1 if you have the <openssl/hmac.h> header file. */
+#define HAVE_OPENSSL_HMAC_H 1
 
 /* Define to 1 if the system has the type `pid_t'. */
 #define HAVE_PID_T 1
@@ -820,7 +852,10 @@
 /* Define to 1 if you have the <stdarg.h> header file. */
 #define HAVE_STDARG_H 1
 
-/* Define to 1 if you have the <stdbool.h> header file. */
+/* Define to 1 if you have the <stdatomic.h> header file. */
+#define HAVE_STDATOMIC_H 1
+
+/* Define to 1 if stdbool.h conforms to C99. */
 #define HAVE_STDBOOL_H 1
 
 /* Define to 1 if you have the <stddef.h> header file. */
@@ -940,6 +975,9 @@
 
 /* Define to 1 if you have the <sys/lock.h> header file. */
 #define HAVE_SYS_LOCK_H 1
+
+/* Define to 1 if you have the <sys/mac.h> header file. */
+#define HAVE_SYS_MAC_H 1
 
 /* Define to 1 if you have the <sys/mman.h> header file. */
 #define HAVE_SYS_MMAN_H 1
@@ -1101,6 +1139,9 @@
 /* Do we have the TIO serial stuff? */
 /* #undef HAVE_TIO_SERIAL_STUFF */
 
+/* Are TrustedBSD MAC policy privileges available? */
+#define HAVE_TRUSTEDBSD_MAC 1
+
 /* Define to 1 if the system has the type `uint16_t'. */
 #define HAVE_UINT16_T 1
 
@@ -1132,7 +1173,7 @@
 /* #undef HAVE_UNIXWARE_SIGWAIT */
 
 /* Define to 1 if the system has the type `unsigned long long int'. */
-/* #undef HAVE_UNSIGNED_LONG_LONG_INT */
+#define HAVE_UNSIGNED_LONG_LONG_INT 1
 
 /* Define to 1 if you have the `updwtmp' function. */
 /* #undef HAVE_UPDWTMP */
@@ -1190,6 +1231,9 @@
 
 /* define if select implicitly yields */
 #define HAVE_YIELDING_SELECT 1
+
+/* Define to 1 if the system has the type `_Bool'. */
+#define HAVE__BOOL 1
 
 /* Define to 1 if you have the `_exit' function. */
 #define HAVE__EXIT 1
@@ -1314,14 +1358,16 @@
 /* define to 1 if library is thread safe */
 #define LDAP_API_FEATURE_X_OPENLDAP_THREAD_SAFE 1
 
+/* leap smear mechanism */
+#define LEAP_SMEAR 1
+
 /* Define to any value to include libseccomp sandboxing. */
 /* #undef LIBSECCOMP */
 
 /* Should we align with the NIST lockclock scheme? */
 /* #undef LOCKCLOCK */
 
-/* Define to the sub-directory in which libtool stores uninstalled libraries.
-   */
+/* Define to the sub-directory where libtool stores uninstalled libraries. */
 #define LT_OBJDIR ".libs/"
 
 /* Does the target support multicast IP? */
@@ -1329,6 +1375,13 @@
 
 /* Should we recommend a minimum value for tickadj? */
 /* #undef MIN_REC_TICKADJ */
+
+/* Define to 1 if the compiler does not support C99's structure
+   initialization. */
+/* #undef MISSING_C99_STRUCT_INIT */
+
+/* having to fork the DNS worker early when doing chroot? */
+/* #undef NEED_EARLY_FORK */
 
 /* Do we need HPUX adjtime() library support? */
 /* #undef NEED_HPUX_ADJTIME */
@@ -1366,9 +1419,6 @@
 /* Should we NOT read /dev/kmem? */
 #define NOKMEM 1
 
-/* Define to 1 if your C compiler doesn't accept -c and -o together. */
-/* #undef NO_MINUS_C_MINUS_O */
-
 /* Should we avoid #warning on option name collisions? */
 /* #undef NO_OPTION_NAME_WARNINGS */
 
@@ -1379,7 +1429,7 @@
 /* #undef NO_THREADS */
 
 /* Default location of crypto key info */
-#define NTP_KEYSDIR "/usr/local/etc"
+#define NTP_KEYSDIR "/etc/ntp"
 
 /* Path to sign daemon rendezvous socket */
 #define NTP_SIGND_PATH "/var/run/ntp_signd"
@@ -1418,7 +1468,7 @@
 #define PACKAGE_NAME "ntp"
 
 /* Define to the full name and version of this package. */
-#define PACKAGE_STRING "ntp 4.2.8p2"
+#define PACKAGE_STRING "ntp 4.2.8p12"
 
 /* Define to the one symbol short name of this package. */
 #define PACKAGE_TARNAME "ntp"
@@ -1427,13 +1477,13 @@
 #define PACKAGE_URL "http://www.ntp.org./"
 
 /* Define to the version of this package. */
-#define PACKAGE_VERSION "4.2.8p2"
+#define PACKAGE_VERSION "4.2.8p12"
 
 /* data dir */
-#define PERLLIBDIR "/usr/local/share/ntp/lib"
+#define PERLLIBDIR "/usr/share/ntp/lib"
 
 /* define to a working POSIX compliant shell */
-#define POSIX_SHELL "/bin/bash"
+#define POSIX_SHELL "/bin/sh"
 
 /* PARSE kernel PLL PPS support */
 /* #undef PPS_SYNC */
@@ -1468,8 +1518,8 @@
 /* Do we want the SCO clock hacks? */
 /* #undef SCO5_CLOCK */
 
-/* The size of `char*', as computed by sizeof. */
-#if defined(__alpha__) || defined(__sparc64__) || defined(__amd64__)
+/* The size of `char *', as computed by sizeof. */
+#ifdef __LP64__
 #define SIZEOF_CHARP 8
 #else
 #define SIZEOF_CHARP 4
@@ -1479,7 +1529,7 @@
 #define SIZEOF_INT 4
 
 /* The size of `long', as computed by sizeof. */
-#if defined(__alpha__) || defined(__sparc64__) || defined(__amd64__)
+#ifdef __LP64__
 #define SIZEOF_LONG 8
 #else
 #define SIZEOF_LONG 4
@@ -1498,10 +1548,10 @@
 #define SIZEOF_SIGNED_CHAR 1
 
 /* The size of `time_t', as computed by sizeof. */
-#if defined(__alpha__) || defined(__sparc64__) || defined(__amd64__)
-#define SIZEOF_TIME_T 8
-#else
+#if defined(__i386__) || defined(__powerpc__)
 #define SIZEOF_TIME_T 4
+#else
+#define SIZEOF_TIME_T 8
 #endif
 
 /* Does SIOCGIFCONF return size in the buffer? */
@@ -1534,6 +1584,24 @@
 #define STR_SYSTEM "sparc64-undermydesk-freebsd"
 #elif defined(__amd64__)
 #define STR_SYSTEM "amd64-undermydesk-freebsd"
+#elif defined(__powerpc64__)
+#define STR_SYSTEM "powerpc64-undermydesk-freebsd"
+#elif defined(__powerpc__)
+#define STR_SYSTEM "powerpc-undermydesk-freebsd"
+#elif defined(__mips64)
+#define STR_SYSTEM "mips64-undermydesk-freebsd"
+#elif defined(__mips__)
+#define STR_SYSTEM "mips-undermydesk-freebsd"
+#elif defined(__aarch64__)
+#define STR_SYSTEM "arm64-undermydesk-freebsd"
+#elif defined(__arm__)
+#define STR_SYSTEM "arm-undermydesk-freebsd"
+#elif defined(__sparc64__)
+#define STR_SYSTEM "sparc64-undermydesk-freebsd"
+#elif defined(__sparc__)
+#define STR_SYSTEM "sparc-undermydesk-freebsd"
+#elif defined(__ia64__)
+#define STR_SYSTEM "ia64-undermydesk-freebsd"
 #else
 #define STR_SYSTEM "i386-undermydesk-freebsd"
 #endif
@@ -1590,24 +1658,19 @@ typedef unsigned int	uintptr_t;
 /* #undef USE_UDP_SIGPOLL */
 
 /* Version number of package */
-#define VERSION "4.2.8p2"
+#define VERSION "4.2.8p12"
 
 /* vsnprintf expands "%m" to strerror(errno) */
-/* #undef VSNPRINTF_PERCENT_M */
+#define VSNPRINTF_PERCENT_M 1
 
 /* configure --enable-ipv6 */
 #define WANT_IPV6 1
 
 /* Define WORDS_BIGENDIAN to 1 if your processor stores words with the most
    significant byte first (like Motorola and SPARC, unlike Intel). */
-#if defined AC_APPLE_UNIVERSAL_BUILD
-# if defined __BIG_ENDIAN__
-#  define WORDS_BIGENDIAN 1
-# endif
-#else
-# ifndef WORDS_BIGENDIAN
-/* #  undef WORDS_BIGENDIAN */
-# endif
+#if defined(__ARMEB__) || defined(__MIPSEB__) || defined(__powerpc__) || \
+    defined(__powerpc64__) || defined(__sparc64__)
+#define WORDS_BIGENDIAN 1
 #endif
 
 /* routine worker child proc uses to exit. */
@@ -1769,3 +1832,8 @@ typedef union mpinfou {
 	# endif
 	#endif	/* !defined(_KERNEL) && !defined(PARSESTREAM) */
 	
+/*
+ * FreeBSD specific: Explicitly specify date/time for reproducible build.
+ */
+#define	MKREPRO_DATE "Aug 19 2018"
+#define	MKREPRO_TIME "01:24:29"

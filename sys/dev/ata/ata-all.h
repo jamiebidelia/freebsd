@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 1998 - 2008 Søren Schmidt <sos@FreeBSD.org>
  * All rights reserved.
  *
@@ -83,7 +85,6 @@
 
 #define ATA_CTLOFFSET                   0x206   /* control register offset */
 #define ATA_PCCARD_CTLOFFSET            0x0e    /* do for PCCARD devices */
-#define ATA_PC98_CTLOFFSET              0x10c   /* do for PC98 devices */
 #define         ATA_A_IDS               0x02    /* disable interrupts */
 #define         ATA_A_RESET             0x04    /* RESET controller */
 #ifdef	ATA_LEGACY_SUPPORT			
@@ -178,17 +179,12 @@
 /* misc defines */
 #define ATA_PRIMARY                     0x1f0
 #define ATA_SECONDARY                   0x170
-#define ATA_PC98_BANK                   0x432
 #define ATA_IOSIZE                      0x08
-#define ATA_PC98_IOSIZE                 0x10
 #define ATA_CTLIOSIZE                   0x01
 #define ATA_BMIOSIZE                    0x08
-#define ATA_PC98_BANKIOSIZE             0x01
 #define ATA_IOADDR_RID                  0
 #define ATA_CTLADDR_RID                 1
 #define ATA_BMADDR_RID                  0x20
-#define ATA_PC98_CTLADDR_RID            8
-#define ATA_PC98_BANKADDR_RID           9
 #define ATA_IRQ_RID                     0
 #define ATA_DEV(unit)                   ((unit > 0) ? 0x10 : 0)
 #define ATA_CFA_MAGIC1                  0x844A
@@ -206,10 +202,6 @@
 #define ATA_OP_CONTINUES                0
 #define ATA_OP_FINISHED                 1
 #define ATA_MAX_28BIT_LBA               268435455UL
-
-#ifndef	ATA_REQUEST_TIMEOUT
-#define	ATA_REQUEST_TIMEOUT		10
-#endif
 
 /* structure used for composite atomic operations */
 #define MAX_COMPOSITES          32              /* u_int32_t bits */
@@ -450,6 +442,7 @@ struct ata_channel {
 	struct ata_cam_device	curr[16];       /* Current settings */
 	int			requestsense;	/* CCB waiting for SENSE. */
 	struct callout		poll_callout;	/* Periodic status poll. */
+	struct ata_request	request;
 };
 
 /* disk bay/enclosure related */
@@ -506,14 +499,6 @@ int ata_sata_setmode(device_t dev, int target, int mode);
 int ata_sata_getrev(device_t dev, int target);
 int ata_request2fis_h2d(struct ata_request *request, u_int8_t *fis);
 void ata_pm_identify(device_t dev);
-
-/* macros for alloc/free of struct ata_request */
-extern uma_zone_t ata_request_zone;
-#define ata_alloc_request() uma_zalloc(ata_request_zone, M_NOWAIT | M_ZERO)
-#define ata_free_request(request) { \
-	if (!(request->flags & ATA_R_DANGER2)) \
-	    uma_zfree(ata_request_zone, request); \
-	}
 
 MALLOC_DECLARE(M_ATA);
 

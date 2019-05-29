@@ -37,4 +37,12 @@ struct spi_command {
 	uint32_t rx_data_sz;
 };
 
+#define	SPI_COMMAND_INITIALIZER	{ 0 }
+
 #define	SPI_CHIP_SELECT_HIGH	0x1		/* Chip select high (else low) */
+
+#ifdef FDT
+#define	SPIBUS_FDT_PNP_INFO(t)	FDTCOMPAT_PNP_INFO(t, spibus)
+#else
+#define	SPIBUS_FDT_PNP_INFO(t)
+#endif

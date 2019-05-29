@@ -3,6 +3,8 @@
 /* $FreeBSD$ */
 
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright 2002 Niels Provos <provos@citi.umich.edu>
  * All rights reserved.
  *
@@ -123,7 +125,7 @@ struct type *name##_SPLAY_INSERT(struct name *, struct type *);		\
 struct type *name##_SPLAY_REMOVE(struct name *, struct type *);		\
 									\
 /* Finds the node with the same key as elm */				\
-static __inline struct type *						\
+static __unused __inline struct type *					\
 name##_SPLAY_FIND(struct name *head, struct type *elm)			\
 {									\
 	if (SPLAY_EMPTY(head))						\
@@ -134,7 +136,7 @@ name##_SPLAY_FIND(struct name *head, struct type *elm)			\
 	return (NULL);							\
 }									\
 									\
-static __inline struct type *						\
+static __unused __inline struct type *					\
 name##_SPLAY_NEXT(struct name *head, struct type *elm)			\
 {									\
 	name##_SPLAY(head, elm);					\
@@ -148,7 +150,7 @@ name##_SPLAY_NEXT(struct name *head, struct type *elm)			\
 	return (elm);							\
 }									\
 									\
-static __inline struct type *						\
+static __unused __inline struct type *					\
 name##_SPLAY_MIN_MAX(struct name *head, int val)			\
 {									\
 	name##_SPLAY_MINMAX(head, val);					\

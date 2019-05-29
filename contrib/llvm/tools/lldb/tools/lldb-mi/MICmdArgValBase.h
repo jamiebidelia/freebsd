@@ -1,4 +1,4 @@
-//===-- Platform.h ----------------------------------------------*- C++ -*-===//
+//===-- MICmdArgValBase.h ---------------------------------------*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -7,25 +7,13 @@
 //
 //===----------------------------------------------------------------------===//
 
-//++
-// File:        MICmdArgValBase.h
-//
-// Overview:    CMICmdArgValBase interface.
-//
-// Environment: Compilers:  Visual C++ 12.
-//                          gcc (Ubuntu/Linaro 4.8.1-10ubuntu9) 4.8.1
-//              Libraries:  See MIReadmetxt.
-//
-// Copyright:   None.
-//--
-
 #pragma once
 
-// In-house headers:
-#include "MIUtilString.h"
 #include "MICmdArgSet.h"
+#include "MIUtilString.h"
 
-//++ ============================================================================
+//++
+//============================================================================
 // Details: MI common code class. Command argument base class. Arguments objects
 //          needing specialization derived from *this class. An argument knows
 //          what type of argument it is and how it is to interpret the options
@@ -36,120 +24,95 @@
 //          deleted when the container goes out of scope. Allocate argument
 //          objects on the heap and pass in to the Add().
 //          Note the code is written such that a command will produce an error
-//          should it be presented with arguments or options it does not understand.
+//          should it be presented with arguments or options it does not
+//          understand.
 //          A command can recognise an option or argument then ignore if it
 //          wishes (a warning is sent to the MI's Log file). This is so it is
 //          hardwired to fail and catch arguments or options that presented by
 //          different driver clients.
 //          Based on the Interpreter pattern.
-// Gotchas: None.
-// Authors: Illya Rudkin 14/04/2014.
-// Changes: None.
 //--
-class CMICmdArgValBase : public CMICmdArgSet::IArg
-{
-    // Methods:
-  public:
-    /* ctor */ CMICmdArgValBase(void);
-    /* ctor */ CMICmdArgValBase(const CMIUtilString &vrArgName, const bool vbMandatory, const bool vbHandleByCmd);
+class CMICmdArgValBase : public CMICmdArgSet::IArg {
+  // Methods:
+public:
+  CMICmdArgValBase();
+  CMICmdArgValBase(const CMIUtilString &vrArgName, const bool vbMandatory,
+                   const bool vbHandleByCmd);
 
-    // Overrideable:
-  public:
-    /* dtor */ virtual ~CMICmdArgValBase(void);
+  // Overrideable:
+  ~CMICmdArgValBase() override = default;
 
-    // Overridden:
-  public:
-    // From CMICmdArgSet::IArg
-    virtual bool GetFound(void) const;
-    virtual bool GetIsHandledByCmd(void) const;
-    virtual bool GetIsMandatory(void) const;
-    virtual bool GetIsMissingOptions(void) const;
-    virtual const CMIUtilString &GetName(void) const;
-    virtual bool GetValid(void) const;
-    virtual bool Validate(CMICmdArgContext &vwArgContext);
+  // Overridden:
+  // From CMICmdArgSet::IArg
+  bool GetFound() const override;
+  bool GetIsHandledByCmd() const override;
+  bool GetIsMandatory() const override;
+  bool GetIsMissingOptions() const override;
+  const CMIUtilString &GetName() const override;
+  bool GetValid() const override;
+  bool Validate(CMICmdArgContext &vwArgContext) override;
 
-    // Attributes:
-  protected:
-    bool m_bFound;     // True = yes found in arguments options text, false = not found
-    bool m_bValid;     // True = yes argument parsed and valid, false = not valid
-    bool m_bMandatory; // True = yes arg must be present, false = optional argument
-    CMIUtilString m_strArgName;
-    bool m_bHandled;          // True = Command processes *this option, false = not handled
-    bool m_bIsMissingOptions; // True = Command needs more information, false = ok
+  // Attributes:
+protected:
+  bool
+      m_bFound; // True = yes found in arguments options text, false = not found
+  bool m_bValid; // True = yes argument parsed and valid, false = not valid
+  bool
+      m_bMandatory; // True = yes arg must be present, false = optional argument
+  CMIUtilString m_strArgName;
+  bool m_bHandled; // True = Command processes *this option, false = not handled
+  bool m_bIsMissingOptions; // True = Command needs more information, false = ok
 };
 
-//++ ============================================================================
+//++
+//============================================================================
 // Details: MI common code class. Templated command argument base class.
-// Gotchas: None.
-// Authors: Illya Rudkin 14/04/2014.
-// Changes: None.
 //--
-template <class T> class CMICmdArgValBaseTemplate : public CMICmdArgValBase
-{
-    // Methods:
-  public:
-    /* ctor */ CMICmdArgValBaseTemplate(void);
-    /* ctor */ CMICmdArgValBaseTemplate(const CMIUtilString &vrArgName, const bool vbMandatory, const bool vbHandleByCmd);
-    //
-    const T &GetValue(void) const;
+template <class T> class CMICmdArgValBaseTemplate : public CMICmdArgValBase {
+  // Methods:
+public:
+  CMICmdArgValBaseTemplate() = default;
+  CMICmdArgValBaseTemplate(const CMIUtilString &vrArgName,
+                           const bool vbMandatory, const bool vbHandleByCmd);
+  //
+  const T &GetValue() const;
 
-    // Overrideable:
-  public:
-    /* dtor */ virtual ~CMICmdArgValBaseTemplate(void);
+  // Overrideable:
+  ~CMICmdArgValBaseTemplate() override = default;
 
-    // Attributes:
-  protected:
-    T m_argValue;
+  // Attributes:
+protected:
+  T m_argValue;
 };
 
-//++ ------------------------------------------------------------------------------------
-// Details: CMICmdArgValBaseTemplate constructor.
-// Type:    Method.
-// Args:    None.
-// Return:  None.
-// Throws:  None.
-//--
-template <class T> CMICmdArgValBaseTemplate<T>::CMICmdArgValBaseTemplate(void)
-{
-}
-
-//++ ------------------------------------------------------------------------------------
+//++
+//------------------------------------------------------------------------------------
 // Details: CMICmdArgValBaseTemplate constructor.
 // Type:    Method.
 // Args:    vrArgName       - (R) Argument's name to search by.
-//          vbMandatory     - (R) True = Yes must be present, false = optional argument.
-//          vbHandleByCmd   - (R) True = Command processes *this option, false = not handled.
+//          vbMandatory     - (R) True = Yes must be present, false = optional
+//          argument.
+//          vbHandleByCmd   - (R) True = Command processes *this option, false =
+//          not handled.
 // Return:  None.
 // Throws:  None.
 //--
 template <class T>
-CMICmdArgValBaseTemplate<T>::CMICmdArgValBaseTemplate(const CMIUtilString &vrArgName, const bool vbMandatory, const bool vbHandleByCmd)
-    : CMICmdArgValBase(vrArgName, vbMandatory, vbHandleByCmd)
-{
-}
+CMICmdArgValBaseTemplate<T>::CMICmdArgValBaseTemplate(
+    const CMIUtilString &vrArgName, const bool vbMandatory,
+    const bool vbHandleByCmd)
+    : CMICmdArgValBase(vrArgName, vbMandatory, vbHandleByCmd) {}
 
-//++ ------------------------------------------------------------------------------------
-// Details: CMICmdArgValBaseTemplate destructor.
-// Type:    Overrideable.
-// Args:    None.
-// Return:  None.
-// Throws:  None.
-//--
-template <class T> CMICmdArgValBaseTemplate<T>::~CMICmdArgValBaseTemplate(void)
-{
-}
-
-//++ ------------------------------------------------------------------------------------
-// Details: Retrieve the value the argument parsed from the command's argument / options
+//++
+//------------------------------------------------------------------------------------
+// Details: Retrieve the value the argument parsed from the command's argument /
+// options
 //          text string.
 // Type:    Method.
 // Args:    None.
 // Return:  Template type & - The arg value of *this object.
 // Throws:  None.
 //--
-template <class T>
-const T &
-CMICmdArgValBaseTemplate<T>::GetValue(void) const
-{
-    return m_argValue;
+template <class T> const T &CMICmdArgValBaseTemplate<T>::GetValue() const {
+  return m_argValue;
 }

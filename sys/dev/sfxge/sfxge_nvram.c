@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2010-2015 Solarflare Communications, Inc.
+ * Copyright (c) 2010-2016 Solarflare Communications, Inc.
  * All rights reserved.
  *
  * This software was developed in part by OKTET Labs Ltd. under contract for
@@ -75,10 +75,6 @@ sfxge_nvram_rw(struct sfxge_softc *sc, sfxge_ioc_t *ip, efx_nvram_type_t type,
 		goto fail1;
 
 	buf = malloc(chunk_size, M_TEMP, M_WAITOK);
-	if (buf == NULL) {
-		rc = ENOMEM;
-		goto fail2;
-	}
 
 	off = 0;
 	while (total_size) {
@@ -108,8 +104,7 @@ sfxge_nvram_rw(struct sfxge_softc *sc, sfxge_ioc_t *ip, efx_nvram_type_t type,
 
 fail3:
 	free(buf, M_TEMP);
-fail2:
-	efx_nvram_rw_finish(enp, type);
+	efx_nvram_rw_finish(enp, type, NULL);
 fail1:
 	return (rc);
 }
@@ -130,7 +125,7 @@ sfxge_nvram_erase(struct sfxge_softc *sc, efx_nvram_type_t type)
 
 	rc = efx_nvram_erase(enp, type);
 
-	efx_nvram_rw_finish(enp, type);
+	efx_nvram_rw_finish(enp, type, NULL);
 	return (rc);
 }
 

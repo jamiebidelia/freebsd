@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (C) 2008 John Birrell <jb@freebsd.org>
  * 
  * Redistribution and use in source and binary forms, with or without
@@ -32,7 +34,6 @@
 #include <sys/kernel.h>
 #include <sys/module.h>
 #include <sys/errno.h>
-#include "opt_compat.h"
 #include "opt_nfs.h"
 
 static int
@@ -69,13 +70,14 @@ MODULE_DEPEND(dtraceall, dtmalloc, 1, 1, 1);
 #if defined(NFSCL)
 MODULE_DEPEND(dtraceall, dtnfscl, 1, 1, 1);
 #endif
-#if defined(__amd64__) || defined(__i386__) || defined(__powerpc__) || defined(__arm__)
+#if defined(__aarch64__) || defined(__amd64__) || defined(__arm__) || \
+    defined(__i386__) || defined(__mips__) || \
+    defined(__powerpc__) || defined(__riscv)
 MODULE_DEPEND(dtraceall, fbt, 1, 1, 1);
 #endif
 #if defined(__amd64__) || defined(__i386__)
 MODULE_DEPEND(dtraceall, fasttrap, 1, 1, 1);
 #endif
-MODULE_DEPEND(dtraceall, lockstat, 1, 1, 1);
 MODULE_DEPEND(dtraceall, sdt, 1, 1, 1);
 MODULE_DEPEND(dtraceall, systrace, 1, 1, 1);
 #if defined(COMPAT_FREEBSD32)

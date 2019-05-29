@@ -41,6 +41,7 @@ __FBSDID("$FreeBSD$");
 #include <machine/cpufunc.h>
 #include <machine/cpu.h>
 #include <machine/intr_machdep.h>
+#include <machine/md_var.h>
 #include <machine/smp.h>
 
 #include <x86/apicreg.h>
@@ -72,12 +73,6 @@ static driver_filter_t xen_ipi_bitmap_handler;
 static driver_filter_t xen_cpustop_handler;
 static driver_filter_t xen_cpususpend_handler;
 static driver_filter_t xen_cpustophard_handler;
-#endif
-
-/*---------------------------- Extern Declarations ---------------------------*/
-/* Variables used by mp_machdep to perform the MMU related IPIs */
-#ifdef __amd64__
-extern int pmap_pcid_enabled;
 #endif
 
 /*---------------------------------- Macros ----------------------------------*/
@@ -143,6 +138,13 @@ static void
 xen_pv_lapic_disable(void)
 {
 
+}
+
+static bool
+xen_pv_lapic_is_x2apic(void)
+{
+
+	return (false);
 }
 
 static void
@@ -302,6 +304,7 @@ xen_pv_lapic_ipi_wait(int delay)
 	XEN_APIC_UNSUPPORTED;
 	return (0);
 }
+#endif	/* SMP */
 
 static int
 xen_pv_lapic_ipi_alloc(inthand_t *ipifunc)
@@ -317,7 +320,6 @@ xen_pv_lapic_ipi_free(int vector)
 
 	XEN_APIC_UNSUPPORTED;
 }
-#endif	/* SMP */
 
 static int
 xen_pv_lapic_set_lvt_mask(u_int apic_id, u_int lvt, u_char masked)
@@ -357,6 +359,7 @@ struct apic_ops xen_apic_ops = {
 	.create			= xen_pv_lapic_create,
 	.init			= xen_pv_lapic_init,
 	.xapic_mode		= xen_pv_lapic_disable,
+	.is_x2apic		= xen_pv_lapic_is_x2apic,
 	.setup			= xen_pv_lapic_setup,
 	.dump			= xen_pv_lapic_dump,
 	.disable		= xen_pv_lapic_disable,
@@ -378,9 +381,9 @@ struct apic_ops xen_apic_ops = {
 	.ipi_raw		= xen_pv_lapic_ipi_raw,
 	.ipi_vectored		= xen_pv_lapic_ipi_vectored,
 	.ipi_wait		= xen_pv_lapic_ipi_wait,
+#endif
 	.ipi_alloc		= xen_pv_lapic_ipi_alloc,
 	.ipi_free		= xen_pv_lapic_ipi_free,
-#endif
 	.set_lvt_mask		= xen_pv_lapic_set_lvt_mask,
 	.set_lvt_mode		= xen_pv_lapic_set_lvt_mode,
 	.set_lvt_polarity	= xen_pv_lapic_set_lvt_polarity,
@@ -435,6 +438,46 @@ xen_invltlb_pcid(void *arg)
 {
 
 	invltlb_pcid_handler();
+	return (FILTER_HANDLED);
+}
+
+static int
+xen_invltlb_invpcid_pti(void *arg)
+{
+
+	invltlb_invpcid_pti_handler();
+	return (FILTER_HANDLED);
+}
+
+static int
+xen_invlpg_invpcid_handler(void *arg)
+{
+
+	invlpg_invpcid_handler();
+	return (FILTER_HANDLED);
+}
+
+static int
+xen_invlpg_pcid_handler(void *arg)
+{
+
+	invlpg_pcid_handler();
+	return (FILTER_HANDLED);
+}
+
+static int
+xen_invlrng_invpcid_handler(void *arg)
+{
+
+	invlrng_invpcid_handler();
+	return (FILTER_HANDLED);
+}
+
+static int
+xen_invlrng_pcid_handler(void *arg)
+{
+
+	invlrng_pcid_handler();
 	return (FILTER_HANDLED);
 }
 #endif
@@ -498,12 +541,9 @@ xen_cpu_ipi_init(int cpu)
 {
 	xen_intr_handle_t *ipi_handle;
 	const struct xen_ipi_handler *ipi;
-	device_t dev;
 	int idx, rc;
 
 	ipi_handle = DPCPU_ID_GET(cpu, ipi_handle);
-	dev = pcpu_find(cpu)->pc_device;
-	KASSERT((dev != NULL), ("NULL pcpu device_t"));
 
 	for (ipi = xen_ipis, idx = 0; idx < nitems(xen_ipis); ipi++, idx++) {
 
@@ -512,7 +552,7 @@ xen_cpu_ipi_init(int cpu)
 			continue;
 		}
 
-		rc = xen_intr_alloc_and_bind_ipi(dev, cpu, ipi->filter,
+		rc = xen_intr_alloc_and_bind_ipi(cpu, ipi->filter,
 		    INTR_TYPE_TTY, &ipi_handle[idx]);
 		if (rc != 0)
 			panic("Unable to allocate a XEN IPI port");
@@ -530,8 +570,18 @@ xen_setup_cpus(void)
 
 #ifdef __amd64__
 	if (pmap_pcid_enabled) {
-		xen_ipis[IPI_TO_IDX(IPI_INVLTLB)].filter = invpcid_works ?
-		    xen_invltlb_invpcid : xen_invltlb_pcid;
+		if (pti)
+			xen_ipis[IPI_TO_IDX(IPI_INVLTLB)].filter =
+			    invpcid_works ? xen_invltlb_invpcid_pti :
+			    xen_invltlb_pcid;
+		else
+			xen_ipis[IPI_TO_IDX(IPI_INVLTLB)].filter =
+			    invpcid_works ? xen_invltlb_invpcid :
+			    xen_invltlb_pcid;
+		xen_ipis[IPI_TO_IDX(IPI_INVLPG)].filter = invpcid_works ?
+		    xen_invlpg_invpcid_handler : xen_invlpg_pcid_handler;
+		xen_ipis[IPI_TO_IDX(IPI_INVLRNG)].filter = invpcid_works ?
+		    xen_invlrng_invpcid_handler : xen_invlrng_pcid_handler;
 	}
 #endif
 	CPU_FOREACH(i)
@@ -542,6 +592,6 @@ xen_setup_cpus(void)
 		apic_ops.ipi_vectored = xen_pv_lapic_ipi_vectored;
 }
 
-/* We need to setup IPIs before APs are started */
-SYSINIT(xen_setup_cpus, SI_SUB_SMP-1, SI_ORDER_FIRST, xen_setup_cpus, NULL);
+/* Switch to using PV IPIs as soon as the vcpu_id is set. */
+SYSINIT(xen_setup_cpus, SI_SUB_SMP, SI_ORDER_SECOND, xen_setup_cpus, NULL);
 #endif /* SMP */

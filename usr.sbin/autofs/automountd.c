@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2014 The FreeBSD Foundation
  * All rights reserved.
  *
@@ -46,6 +48,7 @@ __FBSDID("$FreeBSD$");
 #include <errno.h>
 #include <fcntl.h>
 #include <libgen.h>
+#include <libutil.h>
 #include <netdb.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -54,8 +57,6 @@ __FBSDID("$FreeBSD$");
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-
-#include <libutil.h>
 
 #include "autofs_ioctl.h"
 
@@ -98,7 +99,7 @@ pick_option(const char *option, char **optionsp)
 
 	tofree = *optionsp;
 
-	newoptions = calloc(strlen(*optionsp) + 1, 1);
+	newoptions = calloc(1, strlen(*optionsp) + 1);
 	if (newoptions == NULL)
 		log_err(1, "calloc");
 

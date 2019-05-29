@@ -68,7 +68,7 @@
 	lwzu	sr,PM_SR(pmap); \
 	RESTORE_SRS(pmap,sr) \
 	/* Restore SR 12 */ \
-	lwz	sr,12*4(pmap);	mtsr	12,sr
+	lwz	sr,12*4(pmap);	mtsr	12,sr; isync
 
 /*
  * Kernel SRs are loaded directly from kernel_pmap_
@@ -406,7 +406,7 @@ im0:
 	mtctr %r1			/* load counter */
 im1:
 	lwzu %r1, 8(%r2)		/* get next pte */
-	cmp 0, %r1, %r3			/* see if found pte */
+	cmp 0, 0, %r1, %r3		/* see if found pte */
 	bdnzf 2, im1			/* dec count br if cmp ne and if
 					 * count not zero */
 	bne instr_sec_hash		/* if not found set up second hash
@@ -799,6 +799,7 @@ CNAME(trapexit):
 	mfmsr	%r3
 	andi.	%r3,%r3,~PSL_EE@l
 	mtmsr	%r3
+	isync
 /* Test AST pending: */
 	lwz	%r5,FRAME_SRR1+8(%r1)
 	mtcr	%r5
@@ -864,8 +865,8 @@ dbtrap:
 	mtsprg3	%r1
 
 	lwz	%r1,TRAP_TOCBASE(0)		/* get new SP */
-	lwz	%r1,tmpstk@got(%r1)
-	addi	%r1,%r1,TMPSTKSZ-16
+	lwz	%r1,trapstk@got(%r1)
+	addi	%r1,%r1,TRAPSTKSZ-16
 
 	FRAME_SETUP(PC_DBSAVE)
 /* Call C trap code: */

@@ -1,5 +1,7 @@
 /* $Id: osm_bsd.c,v 1.36 2010/05/11 03:12:11 lcn Exp $ */
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * HighPoint RAID Driver for FreeBSD
  * Copyright (C) 2005-2011 HighPoint Technologies, Inc.
  * All rights reserved.
@@ -32,7 +34,7 @@
 #include <dev/hptnr/hptintf.h>
 int msi = 0;
 int debug_flag = 0;
-static HIM *hpt_match(device_t dev)
+static HIM *hpt_match(device_t dev, int scan)
 {
 	PCI_ID pci_id;
 	HIM *him;
@@ -40,7 +42,7 @@ static HIM *hpt_match(device_t dev)
 
 	for (him = him_list; him; him = him->next) {
 		for (i=0; him->get_supported_device_id(i, &pci_id); i++) {
-			if (him->get_controller_count)
+			if (scan && him->get_controller_count)
 				him->get_controller_count(&pci_id,0,0);
 			if ((pci_get_vendor(dev) == pci_id.vid) &&
 				(pci_get_device(dev) == pci_id.did)){
@@ -56,7 +58,7 @@ static int hpt_probe(device_t dev)
 {
 	HIM *him;
 
-	him = hpt_match(dev);
+	him = hpt_match(dev, 0);
 	if (him != NULL) {
 		KdPrint(("hpt_probe: adapter at PCI %d:%d:%d, IRQ %d",
 			pci_get_bus(dev), pci_get_slot(dev), pci_get_function(dev), pci_get_irq(dev)
@@ -79,7 +81,7 @@ static int hpt_attach(device_t dev)
 	
 	KdPrint(("hpt_attach(%d/%d/%d)", pci_get_bus(dev), pci_get_slot(dev), pci_get_function(dev)));
 
-	him = hpt_match(dev);
+	him = hpt_match(dev, 1);
 	hba->ext_type = EXT_TYPE_HBA;
 	hba->ldm_adapter.him = him;
 
@@ -294,7 +296,7 @@ static int hpt_flush_vdev(PVBUS_EXT vbus_ext, PVDEV vd)
 	hpt_assert_vbus_locked(vbus_ext);
 
 	if (mIsArray(vd->type) && vd->u.array.transform)
-		count = MAX(vd->u.array.transform->source->cmds_per_request,
+		count = max(vd->u.array.transform->source->cmds_per_request,
 					vd->u.array.transform->target->cmds_per_request);
 	else
 		count = vd->cmds_per_request;
@@ -621,7 +623,7 @@ static void hpt_scsi_io(PVBUS_EXT vbus_ext, union ccb *ccb)
 		PassthroughCmd *passthru;	
 		
 		if (mIsArray(vd->type)) {
-			ccb->ccb_h.status = CAM_PATH_INVALID;
+			ccb->ccb_h.status = CAM_REQ_INVALID;
 			break;
 		}
 		
@@ -757,7 +759,7 @@ static void hpt_scsi_io(PVBUS_EXT vbus_ext, union ccb *ccb)
 		return;
 error:
 		ldm_free_cmds(pCmd);
-		ccb->ccb_h.status = CAM_PATH_INVALID;
+		ccb->ccb_h.status = CAM_REQ_INVALID;
 		break;
 	}
 
@@ -916,6 +918,14 @@ error:
 		break;
 	}
 	
+	case REPORT_LUNS:
+	{
+		HPT_U8 *rbuf = ccb->csio.data_ptr;
+		memset(rbuf, 0, 16);
+		rbuf[3] = 8;
+		ccb->ccb_h.status = CAM_REQ_CMP;
+		break;				
+	}
 	case SERVICE_ACTION_IN: 
 	{
 		HPT_U8 *rbuf = ccb->csio.data_ptr;
@@ -953,6 +963,12 @@ error:
 		rbuf[9] = 0;
 		rbuf[10] = 2 << sector_size_shift;
 		rbuf[11] = 0;
+		
+		if(!mIsArray(vd->type)){
+			rbuf[13] = vd->u.raw.logicalsectors_per_physicalsector;
+			rbuf[14] = (HPT_U8)((vd->u.raw.lowest_aligned >> 8) & 0x3f);
+			rbuf[15] = (HPT_U8)(vd->u.raw.lowest_aligned);
+		}
 		
 		ccb->ccb_h.status = CAM_REQ_CMP;
 		break;	
@@ -1067,7 +1083,7 @@ error:
 	}
 
 	default:
-		ccb->ccb_h.status = CAM_SEL_TIMEOUT;
+		ccb->ccb_h.status = CAM_REQ_INVALID;
 		break;
 	}
 
@@ -1120,9 +1136,9 @@ static void hpt_action(struct cam_sim *sim, union ccb *ccb)
 		cpi->initiator_id = osm_max_targets;
 		cpi->base_transfer_speed = 3300;
 
-		strncpy(cpi->sim_vid, "FreeBSD", SIM_IDLEN);
-		strncpy(cpi->hba_vid, "HPT   ", HBA_IDLEN);
-		strncpy(cpi->dev_name, cam_sim_name(sim), DEV_IDLEN);
+		strlcpy(cpi->sim_vid, "FreeBSD", SIM_IDLEN);
+		strlcpy(cpi->hba_vid, "HPT   ", HBA_IDLEN);
+		strlcpy(cpi->dev_name, cam_sim_name(sim), DEV_IDLEN);
 		cpi->transport = XPORT_SPI;
 		cpi->transport_version = 2;
 		cpi->protocol = PROTO_SCSI;
@@ -1431,8 +1447,8 @@ static void hpt_final_init(void *dummy)
 
 		for (hba = vbus_ext->hba_list; hba; hba = hba->next) {
 			int rid = 0;
-			if ((hba->irq_res = bus_alloc_resource(hba->pcidev,
-				SYS_RES_IRQ, &rid, 0, ~0ul, 1, RF_SHAREABLE | RF_ACTIVE)) == NULL)
+			if ((hba->irq_res = bus_alloc_resource_any(hba->pcidev,
+				SYS_RES_IRQ, &rid, RF_SHAREABLE | RF_ACTIVE)) == NULL)
 			{
 				os_printk("can't allocate interrupt");
 				return ;
@@ -1570,7 +1586,7 @@ static int hpt_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag, stru
 {
 	PHPT_IOCTL_PARAM piop=(PHPT_IOCTL_PARAM)data;
 	IOCTL_ARG ioctl_args;
-	HPT_U32 bytesReturned;
+	HPT_U32 bytesReturned = 0;
 
 	switch (cmd){
 	case HPT_DO_IOCONTROL:
@@ -1600,7 +1616,7 @@ static int hpt_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag, stru
 		}
 	
 		if (ioctl_args.nOutBufferSize) {
-			ioctl_args.lpOutBuffer = malloc(ioctl_args.nOutBufferSize, M_DEVBUF, M_WAITOK);
+			ioctl_args.lpOutBuffer = malloc(ioctl_args.nOutBufferSize, M_DEVBUF, M_WAITOK | M_ZERO);
 			if (!ioctl_args.lpOutBuffer)
 				goto invalid;
 		}

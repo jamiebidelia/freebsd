@@ -64,6 +64,7 @@ AC_REQUIRE([NTP_ENABLE_LOCAL_LIBEVENT])dnl
 ntp_libevent_min_version=m4_default([$1], [2.0.9])
 ntp_libevent_tearoff=m4_default([$2], [libevent])
 
+AC_SUBST([CFLAGS_LIBEVENT])
 AC_SUBST([CPPFLAGS_LIBEVENT])
 AC_SUBST([LDADD_LIBEVENT])
 
@@ -77,7 +78,13 @@ case "$ntp_use_local_libevent" in
 	if $PKG_CONFIG --atleast-version=$ntp_libevent_min_version libevent
 	then
 	    ntp_use_local_libevent=no
-	    AC_MSG_NOTICE([Using the installed libevent])
+	    ntp_libevent_version="`$PKG_CONFIG --modversion libevent`"
+	    case "$ntp_libevent_version" in
+	     *.*) ;;
+	     *) ntp_libevent_version='(unknown)' ;;
+	    esac
+	    AC_MSG_RESULT([yes, version $ntp_libevent_version])
+	    CFLAGS_LIBEVENT=`$PKG_CONFIG --cflags libevent_pthreads`
 	    CPPFLAGS_LIBEVENT=`$PKG_CONFIG --cflags-only-I libevent`
 	    # HMS: I hope the following is accurate.
 	    # We don't need -levent, we only need  -levent_core.
@@ -87,9 +94,10 @@ case "$ntp_use_local_libevent" in
 	    # LDADD_LIBEVENT=`$PKG_CONFIG --libs libevent | sed 's:-levent::'`
 	    # So now we dance...
 	    LDADD_LIBEVENT=
-	    for i in `$PKG_CONFIG --libs libevent`
+	    for i in `$PKG_CONFIG --libs libevent` `$PKG_CONFIG --cflags-only-other libevent_pthreads`
 	    do
 		case "$i" in
+		 -D*) ;;
 		 -levent*) ;;
 		 *) case "$LDADD_LIBEVENT" in
 		     '') LDADD_LIBEVENT="$i" ;;
@@ -103,9 +111,11 @@ case "$ntp_use_local_libevent" in
 		LDADD_LIBEVENT="$LDADD_LIBEVENT -levent_pthreads"
 	    esac
 	    LDADD_LIBEVENT="$LDADD_LIBEVENT -levent_core"
-	    AC_MSG_RESULT([yes])
 	else
 	    ntp_use_local_libevent=yes
+	    # HMS: do we only need to do this if LIBISC_PTHREADS_NOTHREADS
+	    # is "pthreads"?
+	    CFLAGS_LIBEVENT=`$PKG_CONFIG --cflags libevent_pthreads`
 	    AC_MSG_RESULT([no])
 	fi
 	;;
@@ -128,6 +138,22 @@ case "$ntp_use_local_libevent" in
 	LDADD_LIBEVENT="\$(top_builddir)/$ntp_libevent_tearoff/libevent_core.la"
     esac
 esac
+
+dnl AC_ARG_ENABLE(
+dnl     [cflags-libevent],
+dnl     [AC_HELP_STRING(
+dnl 	[--enable-cflags-libevent=-pthread],
+dnl 	[CFLAGS value to build with pthreads]
+dnl     )],
+dnl     [CFLAGS_LIBEVENT=$enableval],
+dnl     [# See above about LIBISC_PTHREADS_NOTHREADS
+dnl     case "$CFLAGS_LIBEVENT" in
+dnl      '') CFLAGS_LIBEVENT="-pthread" ;;	
+dnl      *) ;;
+dnl     esac]
+dnl )
+dnl AC_MSG_NOTICE([LIBISC_PTHREADS_NOTHREADS is <$LIBISC_PTHREADS_NOTHREADS>])
+dnl AC_MSG_NOTICE([CFLAGS_LIBEVENT is <$CFLAGS_LIBEVENT>])
 
 AM_CONDITIONAL([BUILD_LIBEVENT], [test "x$ntp_use_local_libevent" = "xyes"])
 
@@ -160,6 +186,9 @@ case "$ntp_use_local_libevent" in
     ac_configure_args=" --disable-libevent-install${ac_configure_args}"
     ac_configure_args=" --enable-silent-rules${ac_configure_args}"
     ac_configure_args=" --enable-function-sections${ac_configure_args}"
+    ac_configure_args=" LEP_CFLAGS='${NTP_HARD_CFLAGS}'${ac_configure_args}"
+    ac_configure_args=" LEP_CPPFLAGS='${NTP_HARD_CPPFLAGS}'${ac_configure_args}"
+    ac_configure_args=" LEP_LDFLAGS='${NTP_HARD_LDFLAGS}'${ac_configure_args}"
     AC_CONFIG_SUBDIRS([libevent])
     ;;
  *)

@@ -1,6 +1,8 @@
 /*	$NetBSD: tmpfs_vfsops.c,v 1.10 2005/12/11 12:24:29 christos Exp $	*/
 
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-NetBSD
+ *
  * Copyright (c) 2005 The NetBSD Foundation, Inc.
  * All rights reserved.
  *
@@ -40,22 +42,33 @@
  * memory-specific data structures and algorithms to automatically
  * allocate and release resources.
  */
+
+#include "opt_tmpfs.h"
+
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
+#include <sys/systm.h>
+#include <sys/dirent.h>
 #include <sys/limits.h>
 #include <sys/lock.h>
+#include <sys/mount.h>
 #include <sys/mutex.h>
 #include <sys/proc.h>
 #include <sys/jail.h>
 #include <sys/kernel.h>
 #include <sys/rwlock.h>
 #include <sys/stat.h>
-#include <sys/systm.h>
+#include <sys/sx.h>
 #include <sys/sysctl.h>
+#include <sys/vnode.h>
 
 #include <vm/vm.h>
+#include <vm/vm_param.h>
+#include <vm/pmap.h>
+#include <vm/vm_extern.h>
+#include <vm/vm_map.h>
 #include <vm/vm_object.h>
 #include <vm/vm_param.h>
 
@@ -75,14 +88,15 @@ static int	tmpfs_root(struct mount *, int flags, struct vnode **);
 static int	tmpfs_fhtovp(struct mount *, struct fid *, int,
 		    struct vnode **);
 static int	tmpfs_statfs(struct mount *, struct statfs *);
+static void	tmpfs_susp_clean(struct mount *);
 
 static const char *tmpfs_opts[] = {
 	"from", "size", "maxfilesize", "inodes", "uid", "gid", "mode", "export",
-	"union", NULL
+	"union", "nonc", NULL
 };
 
 static const char *tmpfs_updateopts[] = {
-	"from", "export", NULL
+	"from", "export", "size", NULL
 };
 
 static int
@@ -128,6 +142,227 @@ tmpfs_node_fini(void *mem, int size)
 	mtx_destroy(&node->tn_interlock);
 }
 
+/*
+ * Handle updates of time from writes to mmaped regions.  Use
+ * MNT_VNODE_FOREACH_ALL instead of MNT_VNODE_FOREACH_ACTIVE, since
+ * unmap of the tmpfs-backed vnode does not call vinactive(), due to
+ * vm object type is OBJT_SWAP.
+ * If lazy, only handle delayed update of mtime due to the writes to
+ * mapped files.
+ */
+static void
+tmpfs_update_mtime(struct mount *mp, bool lazy)
+{
+	struct vnode *vp, *mvp;
+	struct vm_object *obj;
+
+	MNT_VNODE_FOREACH_ALL(vp, mp, mvp) {
+		if (vp->v_type != VREG) {
+			VI_UNLOCK(vp);
+			continue;
+		}
+		obj = vp->v_object;
+		KASSERT((obj->flags & (OBJ_TMPFS_NODE | OBJ_TMPFS)) ==
+		    (OBJ_TMPFS_NODE | OBJ_TMPFS), ("non-tmpfs obj"));
+
+		/*
+		 * In lazy case, do unlocked read, avoid taking vnode
+		 * lock if not needed.  Lost update will be handled on
+		 * the next call.
+		 * For non-lazy case, we must flush all pending
+		 * metadata changes now.
+		 */
+		if (!lazy || (obj->flags & OBJ_TMPFS_DIRTY) != 0) {
+			if (vget(vp, LK_EXCLUSIVE | LK_INTERLOCK,
+			    curthread) != 0)
+				continue;
+			tmpfs_check_mtime(vp);
+			if (!lazy)
+				tmpfs_update(vp);
+			vput(vp);
+		} else {
+			VI_UNLOCK(vp);
+			continue;
+		}
+	}
+}
+
+struct tmpfs_check_rw_maps_arg {
+	bool found;
+};
+
+static bool
+tmpfs_check_rw_maps_cb(struct mount *mp __unused, vm_map_t map __unused,
+    vm_map_entry_t entry __unused, void *arg)
+{
+	struct tmpfs_check_rw_maps_arg *a;
+
+	a = arg;
+	a->found = true;
+	return (true);
+}
+
+/*
+ * Revoke write permissions from all mappings of regular files
+ * belonging to the specified tmpfs mount.
+ */
+static bool
+tmpfs_revoke_rw_maps_cb(struct mount *mp __unused, vm_map_t map,
+    vm_map_entry_t entry, void *arg __unused)
+{
+
+	/*
+	 * XXXKIB: might be invalidate the mapping
+	 * instead ?  The process is not going to be
+	 * happy in any case.
+	 */
+	entry->max_protection &= ~VM_PROT_WRITE;
+	if ((entry->protection & VM_PROT_WRITE) != 0) {
+		entry->protection &= ~VM_PROT_WRITE;
+		pmap_protect(map->pmap, entry->start, entry->end,
+		    entry->protection);
+	}
+	return (false);
+}
+
+static void
+tmpfs_all_rw_maps(struct mount *mp, bool (*cb)(struct mount *mp, vm_map_t,
+    vm_map_entry_t, void *), void *cb_arg)
+{
+	struct proc *p;
+	struct vmspace *vm;
+	vm_map_t map;
+	vm_map_entry_t entry;
+	vm_object_t object;
+	struct vnode *vp;
+	int gen;
+	bool terminate;
+
+	terminate = false;
+	sx_slock(&allproc_lock);
+again:
+	gen = allproc_gen;
+	FOREACH_PROC_IN_SYSTEM(p) {
+		PROC_LOCK(p);
+		if (p->p_state != PRS_NORMAL || (p->p_flag & (P_INEXEC |
+		    P_SYSTEM | P_WEXIT)) != 0) {
+			PROC_UNLOCK(p);
+			continue;
+		}
+		vm = vmspace_acquire_ref(p);
+		_PHOLD_LITE(p);
+		PROC_UNLOCK(p);
+		if (vm == NULL) {
+			PRELE(p);
+			continue;
+		}
+		sx_sunlock(&allproc_lock);
+		map = &vm->vm_map;
+
+		vm_map_lock(map);
+		if (map->busy)
+			vm_map_wait_busy(map);
+		for (entry = map->header.next; entry != &map->header;
+		    entry = entry->next) {
+			if ((entry->eflags & (MAP_ENTRY_GUARD |
+			    MAP_ENTRY_IS_SUB_MAP | MAP_ENTRY_COW)) != 0 ||
+			    (entry->max_protection & VM_PROT_WRITE) == 0)
+				continue;
+			object = entry->object.vm_object;
+			if (object == NULL || object->type != OBJT_SWAP ||
+			    (object->flags & OBJ_TMPFS_NODE) == 0)
+				continue;
+			/*
+			 * No need to dig into shadow chain, mapping
+			 * of the object not at top is readonly.
+			 */
+
+			VM_OBJECT_RLOCK(object);
+			if (object->type == OBJT_DEAD) {
+				VM_OBJECT_RUNLOCK(object);
+				continue;
+			}
+			MPASS(object->ref_count > 1);
+			if ((object->flags & (OBJ_TMPFS_NODE | OBJ_TMPFS)) !=
+			    (OBJ_TMPFS_NODE | OBJ_TMPFS)) {
+				VM_OBJECT_RUNLOCK(object);
+				continue;
+			}
+			vp = object->un_pager.swp.swp_tmpfs;
+			if (vp->v_mount != mp) {
+				VM_OBJECT_RUNLOCK(object);
+				continue;
+			}
+
+			terminate = cb(mp, map, entry, cb_arg);
+			VM_OBJECT_RUNLOCK(object);
+			if (terminate)
+				break;
+		}
+		vm_map_unlock(map);
+
+		vmspace_free(vm);
+		sx_slock(&allproc_lock);
+		PRELE(p);
+		if (terminate)
+			break;
+	}
+	if (!terminate && gen != allproc_gen)
+		goto again;
+	sx_sunlock(&allproc_lock);
+}
+
+static bool
+tmpfs_check_rw_maps(struct mount *mp)
+{
+	struct tmpfs_check_rw_maps_arg ca;
+
+	ca.found = false;
+	tmpfs_all_rw_maps(mp, tmpfs_check_rw_maps_cb, &ca);
+	return (ca.found);
+}
+
+static int
+tmpfs_rw_to_ro(struct mount *mp)
+{
+	int error, flags;
+	bool forced;
+
+	forced = (mp->mnt_flag & MNT_FORCE) != 0;
+	flags = WRITECLOSE | (forced ? FORCECLOSE : 0);
+
+	if ((error = vn_start_write(NULL, &mp, V_WAIT)) != 0)
+		return (error);
+	error = vfs_write_suspend_umnt(mp);
+	if (error != 0)
+		return (error);
+	if (!forced && tmpfs_check_rw_maps(mp)) {
+		error = EBUSY;
+		goto out;
+	}
+	VFS_TO_TMPFS(mp)->tm_ronly = 1;
+	MNT_ILOCK(mp);
+	mp->mnt_flag |= MNT_RDONLY;
+	MNT_IUNLOCK(mp);
+	for (;;) {
+		tmpfs_all_rw_maps(mp, tmpfs_revoke_rw_maps_cb, NULL);
+		tmpfs_update_mtime(mp, false);
+		error = vflush(mp, 0, flags, curthread);
+		if (error != 0) {
+			VFS_TO_TMPFS(mp)->tm_ronly = 0;
+			MNT_ILOCK(mp);
+			mp->mnt_flag &= ~MNT_RDONLY;
+			MNT_IUNLOCK(mp);
+			goto out;
+		}
+		if (!tmpfs_check_rw_maps(mp))
+			break;
+	}
+out:
+	vfs_write_resume(mp, 0);
+	return (error);
+}
+
 static int
 tmpfs_mount(struct mount *mp)
 {
@@ -135,8 +370,8 @@ tmpfs_mount(struct mount *mp)
 	    sizeof(struct tmpfs_dirent) + sizeof(struct tmpfs_node));
 	struct tmpfs_mount *tmp;
 	struct tmpfs_node *root;
-	struct thread *td = curthread;
 	int error;
+	bool nonc;
 	/* Size counters. */
 	u_quad_t pages;
 	off_t nodes_max, size_max, maxfilesize;
@@ -148,9 +383,6 @@ tmpfs_mount(struct mount *mp)
 
 	struct vattr va;
 
-	if (!prison_allow(td->td_ucred, PR_ALLOW_MOUNT_TMPFS))
-		return (EPERM);
-
 	if (vfs_filteropt(mp->mnt_optnew, tmpfs_opts))
 		return (EINVAL);
 
@@ -158,9 +390,29 @@ tmpfs_mount(struct mount *mp)
 		/* Only support update mounts for certain options. */
 		if (vfs_filteropt(mp->mnt_optnew, tmpfs_updateopts) != 0)
 			return (EOPNOTSUPP);
-		if (vfs_flagopt(mp->mnt_optnew, "ro", NULL, 0) !=
-		    ((struct tmpfs_mount *)mp->mnt_data)->tm_ronly)
-			return (EOPNOTSUPP);
+		if (vfs_getopt_size(mp->mnt_optnew, "size", &size_max) == 0) {
+			/*
+			 * On-the-fly resizing is not supported (yet). We still
+			 * need to have "size" listed as "supported", otherwise
+			 * trying to update fs that is listed in fstab with size
+			 * parameter, say trying to change rw to ro or vice
+			 * versa, would cause vfs_filteropt() to bail.
+			 */
+			if (size_max != VFS_TO_TMPFS(mp)->tm_size_max)
+				return (EOPNOTSUPP);
+		}
+		if (vfs_flagopt(mp->mnt_optnew, "ro", NULL, 0) &&
+		    !(VFS_TO_TMPFS(mp)->tm_ronly)) {
+			/* RW -> RO */
+			return (tmpfs_rw_to_ro(mp));
+		} else if (!vfs_flagopt(mp->mnt_optnew, "ro", NULL, 0) &&
+		    VFS_TO_TMPFS(mp)->tm_ronly) {
+			/* RO -> RW */
+			VFS_TO_TMPFS(mp)->tm_ronly = 0;
+			MNT_ILOCK(mp);
+			mp->mnt_flag &= ~MNT_RDONLY;
+			MNT_IUNLOCK(mp);
+		}
 		return (0);
 	}
 
@@ -185,11 +437,12 @@ tmpfs_mount(struct mount *mp)
 		size_max = 0;
 	if (vfs_getopt_size(mp->mnt_optnew, "maxfilesize", &maxfilesize) != 0)
 		maxfilesize = 0;
+	nonc = vfs_getopt(mp->mnt_optnew, "nonc", NULL, NULL) == 0;
 
 	/* Do not allow mounts if we do not have enough memory to preserve
 	 * the minimum reserved pages. */
 	if (tmpfs_mem_avail() < TMPFS_PAGES_MINRESERVED)
-		return ENOSPC;
+		return (ENOSPC);
 
 	/* Get the maximum number of memory pages this file system is
 	 * allowed to use, based on the maximum size the user passed in
@@ -218,37 +471,35 @@ tmpfs_mount(struct mount *mp)
 	tmp = (struct tmpfs_mount *)malloc(sizeof(struct tmpfs_mount),
 	    M_TMPFSMNT, M_WAITOK | M_ZERO);
 
-	mtx_init(&tmp->allnode_lock, "tmpfs allnode lock", NULL, MTX_DEF);
+	mtx_init(&tmp->tm_allnode_lock, "tmpfs allnode lock", NULL, MTX_DEF);
 	tmp->tm_nodes_max = nodes_max;
 	tmp->tm_nodes_inuse = 0;
+	tmp->tm_refcount = 1;
 	tmp->tm_maxfilesize = maxfilesize > 0 ? maxfilesize : OFF_MAX;
 	LIST_INIT(&tmp->tm_nodes_used);
 
+	tmp->tm_size_max = size_max;
 	tmp->tm_pages_max = pages;
 	tmp->tm_pages_used = 0;
-	tmp->tm_ino_unr = new_unrhdr(2, INT_MAX, &tmp->allnode_lock);
+	new_unrhdr64(&tmp->tm_ino_unr, 2);
 	tmp->tm_dirent_pool = uma_zcreate("TMPFS dirent",
-	    sizeof(struct tmpfs_dirent),
-	    NULL, NULL, NULL, NULL,
+	    sizeof(struct tmpfs_dirent), NULL, NULL, NULL, NULL,
 	    UMA_ALIGN_PTR, 0);
 	tmp->tm_node_pool = uma_zcreate("TMPFS node",
-	    sizeof(struct tmpfs_node),
-	    tmpfs_node_ctor, tmpfs_node_dtor,
-	    tmpfs_node_init, tmpfs_node_fini,
-	    UMA_ALIGN_PTR, 0);
+	    sizeof(struct tmpfs_node), tmpfs_node_ctor, tmpfs_node_dtor,
+	    tmpfs_node_init, tmpfs_node_fini, UMA_ALIGN_PTR, 0);
 	tmp->tm_ronly = (mp->mnt_flag & MNT_RDONLY) != 0;
+	tmp->tm_nonc = nonc;
 
 	/* Allocate the root node. */
-	error = tmpfs_alloc_node(mp, tmp, VDIR, root_uid,
-	    root_gid, root_mode & ALLPERMS, NULL, NULL,
-	    VNOVAL, &root);
+	error = tmpfs_alloc_node(mp, tmp, VDIR, root_uid, root_gid,
+	    root_mode & ALLPERMS, NULL, NULL, VNOVAL, &root);
 
 	if (error != 0 || root == NULL) {
-	    uma_zdestroy(tmp->tm_node_pool);
-	    uma_zdestroy(tmp->tm_dirent_pool);
-	    delete_unrhdr(tmp->tm_ino_unr);
-	    free(tmp, M_TMPFSMNT);
-	    return error;
+		uma_zdestroy(tmp->tm_node_pool);
+		uma_zdestroy(tmp->tm_dirent_pool);
+		free(tmp, M_TMPFSMNT);
+		return (error);
 	}
 	KASSERT(root->tn_id == 2,
 	    ("tmpfs root with invalid ino: %ju", (uintmax_t)root->tn_id));
@@ -256,7 +507,7 @@ tmpfs_mount(struct mount *mp)
 
 	MNT_ILOCK(mp);
 	mp->mnt_flag |= MNT_LOCAL;
-	mp->mnt_kern_flag |= MNTK_LOOKUP_SHARED | MNTK_SUSPENDABLE;
+	mp->mnt_kern_flag |= MNTK_LOOKUP_SHARED | MNTK_EXTENDED_SHARED;
 	MNT_IUNLOCK(mp);
 
 	mp->mnt_data = tmp;
@@ -307,25 +558,17 @@ tmpfs_unmount(struct mount *mp, int mntflags)
 
 	TMPFS_LOCK(tmp);
 	while ((node = LIST_FIRST(&tmp->tm_nodes_used)) != NULL) {
-		TMPFS_UNLOCK(tmp);
+		TMPFS_NODE_LOCK(node);
 		if (node->tn_type == VDIR)
 			tmpfs_dir_destroy(tmp, node);
-		tmpfs_free_node(tmp, node);
-		TMPFS_LOCK(tmp);
+		if (tmpfs_free_node_locked(tmp, node, true))
+			TMPFS_LOCK(tmp);
+		else
+			TMPFS_NODE_UNLOCK(node);
 	}
-	TMPFS_UNLOCK(tmp);
 
-	uma_zdestroy(tmp->tm_dirent_pool);
-	uma_zdestroy(tmp->tm_node_pool);
-	delete_unrhdr(tmp->tm_ino_unr);
-
-	mtx_destroy(&tmp->allnode_lock);
-	MPASS(tmp->tm_pages_used == 0);
-	MPASS(tmp->tm_nodes_inuse == 0);
-
-	/* Throw away the tmpfs_mount structure. */
-	free(mp->mnt_data, M_TMPFSMNT);
 	mp->mnt_data = NULL;
+	tmpfs_free_tmp(tmp);
 	vfs_write_resume(mp, VR_START_WRITE);
 
 	MNT_ILOCK(mp);
@@ -335,52 +578,73 @@ tmpfs_unmount(struct mount *mp, int mntflags)
 	return (0);
 }
 
+void
+tmpfs_free_tmp(struct tmpfs_mount *tmp)
+{
+
+	MPASS(tmp->tm_refcount > 0);
+	tmp->tm_refcount--;
+	if (tmp->tm_refcount > 0) {
+		TMPFS_UNLOCK(tmp);
+		return;
+	}
+	TMPFS_UNLOCK(tmp);
+
+	uma_zdestroy(tmp->tm_dirent_pool);
+	uma_zdestroy(tmp->tm_node_pool);
+
+	mtx_destroy(&tmp->tm_allnode_lock);
+	MPASS(tmp->tm_pages_used == 0);
+	MPASS(tmp->tm_nodes_inuse == 0);
+
+	free(tmp, M_TMPFSMNT);
+}
+
 static int
 tmpfs_root(struct mount *mp, int flags, struct vnode **vpp)
 {
 	int error;
+
 	error = tmpfs_alloc_vp(mp, VFS_TO_TMPFS(mp)->tm_root, flags, vpp);
-
-	if (!error)
+	if (error == 0)
 		(*vpp)->v_vflag |= VV_ROOT;
-
-	return error;
+	return (error);
 }
 
 static int
 tmpfs_fhtovp(struct mount *mp, struct fid *fhp, int flags,
     struct vnode **vpp)
 {
-	boolean_t found;
 	struct tmpfs_fid *tfhp;
 	struct tmpfs_mount *tmp;
 	struct tmpfs_node *node;
+	int error;
 
 	tmp = VFS_TO_TMPFS(mp);
 
 	tfhp = (struct tmpfs_fid *)fhp;
 	if (tfhp->tf_len != sizeof(struct tmpfs_fid))
-		return EINVAL;
+		return (EINVAL);
 
 	if (tfhp->tf_id >= tmp->tm_nodes_max)
-		return EINVAL;
-
-	found = FALSE;
+		return (EINVAL);
 
 	TMPFS_LOCK(tmp);
 	LIST_FOREACH(node, &tmp->tm_nodes_used, tn_entries) {
 		if (node->tn_id == tfhp->tf_id &&
 		    node->tn_gen == tfhp->tf_gen) {
-			found = TRUE;
+			tmpfs_ref_node(node);
 			break;
 		}
 	}
 	TMPFS_UNLOCK(tmp);
 
-	if (found)
-		return (tmpfs_alloc_vp(mp, node, LK_EXCLUSIVE, vpp));
-
-	return (EINVAL);
+	if (node != NULL) {
+		error = tmpfs_alloc_vp(mp, node, LK_EXCLUSIVE, vpp);
+		tmpfs_free_node(tmp, node);
+	} else
+		error = EINVAL;
+	return (error);
 }
 
 /* ARGSUSED2 */
@@ -396,7 +660,7 @@ tmpfs_statfs(struct mount *mp, struct statfs *sbp)
 	sbp->f_bsize = PAGE_SIZE;
 
 	used = tmpfs_pages_used(tmp);
-	if (tmp->tm_pages_max != SIZE_MAX)
+	if (tmp->tm_pages_max != ULONG_MAX)
 		 sbp->f_blocks = tmp->tm_pages_max;
 	else
 		 sbp->f_blocks = used + tmpfs_mem_avail();
@@ -419,47 +683,23 @@ tmpfs_statfs(struct mount *mp, struct statfs *sbp)
 static int
 tmpfs_sync(struct mount *mp, int waitfor)
 {
-	struct vnode *vp, *mvp;
-	struct vm_object *obj;
 
 	if (waitfor == MNT_SUSPEND) {
 		MNT_ILOCK(mp);
 		mp->mnt_kern_flag |= MNTK_SUSPEND2 | MNTK_SUSPENDED;
 		MNT_IUNLOCK(mp);
 	} else if (waitfor == MNT_LAZY) {
-		/*
-		 * Handle lazy updates of mtime from writes to mmaped
-		 * regions.  Use MNT_VNODE_FOREACH_ALL instead of
-		 * MNT_VNODE_FOREACH_ACTIVE, since unmap of the
-		 * tmpfs-backed vnode does not call vinactive(), due
-		 * to vm object type is OBJT_SWAP.
-		 */
-		MNT_VNODE_FOREACH_ALL(vp, mp, mvp) {
-			if (vp->v_type != VREG) {
-				VI_UNLOCK(vp);
-				continue;
-			}
-			obj = vp->v_object;
-			KASSERT((obj->flags & (OBJ_TMPFS_NODE | OBJ_TMPFS)) ==
-			    (OBJ_TMPFS_NODE | OBJ_TMPFS), ("non-tmpfs obj"));
-
-			/*
-			 * Unlocked read, avoid taking vnode lock if
-			 * not needed.  Lost update will be handled on
-			 * the next call.
-			 */
-			if ((obj->flags & OBJ_TMPFS_DIRTY) == 0) {
-				VI_UNLOCK(vp);
-				continue;
-			}
-			if (vget(vp, LK_EXCLUSIVE | LK_RETRY | LK_INTERLOCK,
-			    curthread) != 0)
-				continue;
-			tmpfs_check_mtime(vp);
-			vput(vp);
-		}
+		tmpfs_update_mtime(mp, true);
 	}
 	return (0);
+}
+
+/*
+ * The presence of a susp_clean method tells the VFS to track writes.
+ */
+static void
+tmpfs_susp_clean(struct mount *mp __unused)
+{
 }
 
 /*
@@ -473,5 +713,6 @@ struct vfsops tmpfs_vfsops = {
 	.vfs_statfs =			tmpfs_statfs,
 	.vfs_fhtovp =			tmpfs_fhtovp,
 	.vfs_sync =			tmpfs_sync,
+	.vfs_susp_clean =		tmpfs_susp_clean,
 };
 VFS_SET(tmpfs_vfsops, tmpfs, VFCF_JAIL);

@@ -26,7 +26,6 @@ void get_pri_sec_chan(struct wpa_scan_res *bss, int *pri_chan, int *sec_chan);
 int check_40mhz_5g(struct hostapd_hw_modes *mode,
 		   struct wpa_scan_results *scan_res, int pri_chan,
 		   int sec_chan);
-int check_20mhz_bss(struct wpa_scan_res *bss, int pri_freq, int start, int end);
 int check_40mhz_2g4(struct hostapd_hw_modes *mode,
 		    struct wpa_scan_results *scan_res, int pri_chan,
 		    int sec_chan);
@@ -36,5 +35,13 @@ int hostapd_set_freq_params(struct hostapd_freq_params *data,
 			    int vht_enabled, int sec_channel_offset,
 			    int vht_oper_chwidth, int center_segment0,
 			    int center_segment1, u32 vht_caps);
+void set_disable_ht40(struct ieee80211_ht_capabilities *htcaps,
+		      int disabled);
+int ieee80211ac_cap_check(u32 hw, u32 conf);
+
+u32 num_chan_to_bw(int num_chans);
+int chan_bw_allowed(const struct hostapd_channel_data *chan, u32 bw,
+		    int ht40_plus, int pri);
+int chan_pri_allowed(const struct hostapd_channel_data *chan);
 
 #endif /* HW_FEATURES_COMMON_H */

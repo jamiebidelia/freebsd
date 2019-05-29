@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (C) 2009 Gabor Kovesdan <gabor@FreeBSD.org>
  * Copyright (C) 2012 Oleg Moskalenko <mom040267@gmail.com>
  * All rights reserved.
@@ -105,11 +107,26 @@ clean_keys_array(const struct bwstring *s, struct keys_array *ka)
 {
 
 	if (ka) {
-		for (size_t i = 0; i < keys_num; ++i)
-			if (ka->key[i].k && ka->key[i].k != s)
-				bwsfree(ka->key[i].k);
+		for (size_t i = 0; i < keys_num; ++i) {
+			const struct key_value *kv;
+
+			kv = get_key_from_keys_array(ka, i);
+			if (kv->k && kv->k != s)
+				bwsfree(kv->k);
+		}
 		memset(ka, 0, keys_array_size());
 	}
+}
+
+/*
+ * Get pointer to a key value in the keys set
+ */
+struct key_value *
+get_key_from_keys_array(struct keys_array *ka, size_t ind)
+{
+
+	return ((struct key_value *)((caddr_t)ka->key +
+	    ind * (sizeof(struct key_value) + key_hint_size())));
 }
 
 /*
@@ -122,7 +139,7 @@ set_key_on_keys_array(struct keys_array *ka, struct bwstring *s, size_t ind)
 	if (ka && keys_num > ind) {
 		struct key_value *kv;
 
-		kv = &(ka->key[ind]);
+		kv = get_key_from_keys_array(ka, ind);
 
 		if (kv->k && kv->k != s)
 			bwsfree(kv->k);
@@ -156,9 +173,9 @@ sort_list_item_size(struct sort_list_item *si)
 		if (si->str)
 			ret += bws_memsize(si->str);
 		for (size_t i = 0; i < keys_num; ++i) {
-			struct key_value *kv;
+			const struct key_value *kv;
 
-			kv = &(si->ka.key[i]);
+			kv = get_key_from_keys_array(&si->ka, i);
 
 			if (kv->k != si->str)
 				ret += bws_memsize(kv->k);
@@ -315,8 +332,6 @@ find_field_end(const struct bwstring *s, struct key_specs *ks)
 	size_t f2, next_field_start, pos_end;
 	bool empty_field, empty_key;
 
-	pos_end = 0;
-	next_field_start = 0;
 	empty_field = false;
 	empty_key = false;
 	f2 = ks->f2;
@@ -475,16 +490,19 @@ get_sort_func(struct sort_mods *sm)
 int
 key_coll(struct keys_array *ps1, struct keys_array *ps2, size_t offset)
 {
+	struct key_value *kv1, *kv2;
 	struct sort_mods *sm;
 	int res = 0;
 
 	for (size_t i = 0; i < keys_num; ++i) {
+		kv1 = get_key_from_keys_array(ps1, i);
+		kv2 = get_key_from_keys_array(ps2, i);
 		sm = &(keys[i].sm);
 
 		if (sm->rflag)
-			res = sm->func(&(ps2->key[i]), &(ps1->key[i]), offset);
+			res = sm->func(kv2, kv1, offset);
 		else
-			res = sm->func(&(ps1->key[i]), &(ps2->key[i]), offset);
+			res = sm->func(kv1, kv2, offset);
 
 		if (res)
 			break;
@@ -688,7 +706,7 @@ static void setsuffix(wchar_t c, unsigned char *si)
 		break;
 	default:
 		*si = 0;
-	};
+	}
 }
 
 /*
@@ -809,7 +827,6 @@ numcoll_impl(struct key_value *kv1, struct key_value *kv2,
 	main1 = main2 = 0;
 	frac1 = frac2 = 0;
 
-	cmp_res = 0;
 	key1_read = key2_read = false;
 
 	if (debug_sort) {
@@ -964,6 +981,15 @@ hnumcoll(struct key_value *kv1, struct key_value *kv2, size_t offset)
 	return (numcoll_impl(kv1, kv2, offset, true));
 }
 
+/* Use hint space to memoize md5 computations, at least. */
+static void
+randomcoll_init_hint(struct key_value *kv, void *hash)
+{
+
+	memcpy(kv->hint->v.Rh.cached, hash, sizeof(kv->hint->v.Rh.cached));
+	kv->hint->status = HS_INITIALIZED;
+}
+
 /*
  * Implements random sort (-R).
  */
@@ -973,7 +999,8 @@ randomcoll(struct key_value *kv1, struct key_value *kv2,
 {
 	struct bwstring *s1, *s2;
 	MD5_CTX ctx1, ctx2;
-	char *b1, *b2;
+	unsigned char hash1[MD5_DIGEST_LENGTH], hash2[MD5_DIGEST_LENGTH];
+	int cmp;
 
 	s1 = kv1->k;
 	s2 = kv2->k;
@@ -986,35 +1013,29 @@ randomcoll(struct key_value *kv1, struct key_value *kv2,
 	if (s1 == s2)
 		return (0);
 
-	memcpy(&ctx1,&md5_ctx,sizeof(MD5_CTX));
-	memcpy(&ctx2,&md5_ctx,sizeof(MD5_CTX));
+	if (kv1->hint->status == HS_INITIALIZED &&
+	    kv2->hint->status == HS_INITIALIZED) {
+		cmp = memcmp(kv1->hint->v.Rh.cached,
+		    kv2->hint->v.Rh.cached, sizeof(kv1->hint->v.Rh.cached));
+		if (cmp != 0)
+			return (cmp);
+	}
+
+	memcpy(&ctx1, &md5_ctx, sizeof(MD5_CTX));
+	memcpy(&ctx2, &md5_ctx, sizeof(MD5_CTX));
 
 	MD5Update(&ctx1, bwsrawdata(s1), bwsrawlen(s1));
 	MD5Update(&ctx2, bwsrawdata(s2), bwsrawlen(s2));
-	b1 = MD5End(&ctx1, NULL);
-	b2 = MD5End(&ctx2, NULL);
-	if (b1 == NULL) {
-		if (b2 == NULL)
-			return (0);
-		else {
-			sort_free(b2);
-			return (-1);
-		}
-	} else if (b2 == NULL) {
-		sort_free(b1);
-		return (+1);
-	} else {
-		int cmp_res;
 
-		cmp_res = strcmp(b1,b2);
-		sort_free(b1);
-		sort_free(b2);
+	MD5Final(hash1, &ctx1);
+	MD5Final(hash2, &ctx2);
 
-		if (!cmp_res)
-			cmp_res = bwscoll(s1, s2, 0);
+	if (kv1->hint->status == HS_UNINITIALIZED)
+		randomcoll_init_hint(kv1, hash1);
+	if (kv2->hint->status == HS_UNINITIALIZED)
+		randomcoll_init_hint(kv2, hash2);
 
-		return (cmp_res);
-	}
+	return (memcmp(hash1, hash2, sizeof(hash1)));
 }
 
 /*
@@ -1087,7 +1108,7 @@ cmp_nans(double d1, double d2)
 
 	if (d1 < d2)
 		return (-1);
-	if (d2 > d2)
+	if (d1 > d2)
 		return (+1);
 	return (0);
 }

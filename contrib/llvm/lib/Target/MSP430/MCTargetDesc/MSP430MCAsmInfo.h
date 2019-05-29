@@ -2,7 +2,7 @@
 //
 //                     The LLVM Compiler Infrastructure
 //
-// This file is distributed under the University of Illinois Open Source 
+// This file is distributed under the University of Illinois Open Source
 // License. See LICENSE.TXT for details.
 //
 //===----------------------------------------------------------------------===//
@@ -17,13 +17,14 @@
 #include "llvm/MC/MCAsmInfoELF.h"
 
 namespace llvm {
-  class StringRef;
+class Triple;
 
-  class MSP430MCAsmInfo : public MCAsmInfoELF {
-    void anchor() override;
-  public:
-    explicit MSP430MCAsmInfo(StringRef TT);
-  };
+class MSP430MCAsmInfo : public MCAsmInfoELF {
+  void anchor() override;
+
+public:
+  explicit MSP430MCAsmInfo(const Triple &TT);
+};
 
 } // namespace llvm
 

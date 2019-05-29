@@ -49,7 +49,6 @@ __FBSDID("$FreeBSD$");
 #include <machine/bus.h>
 #include <machine/cpu.h>
 #include <machine/intr_machdep.h>
-#include <machine/pmap.h>
 
 #include <dev/pci/pcivar.h>
 #include <dev/pci/pcireg.h>
@@ -272,7 +271,6 @@ qca955x_pci_attach(device_t dev)
 {
 	struct ar71xx_pci_softc *sc = device_get_softc(dev);
 	int unit = device_get_unit(dev);
-	int busno = 0;
 	int rid = 0;
 
 	/* Dirty; maybe these could all just be hints */
@@ -362,7 +360,7 @@ qca955x_pci_attach(device_t dev)
 	    | PCIM_CMD_SERRESPEN | PCIM_CMD_BACKTOBACK
 	    | PCIM_CMD_PERRESPEN | PCIM_CMD_MWRICEN, 2);
 
-	device_add_child(dev, "pci", busno);
+	device_add_child(dev, "pci", -1);
 	return (bus_generic_attach(dev));
 }
 
@@ -399,7 +397,7 @@ qca955x_pci_write_ivar(device_t dev, device_t child, int which, uintptr_t result
 
 static struct resource *
 qca955x_pci_alloc_resource(device_t bus, device_t child, int type, int *rid,
-    u_long start, u_long end, u_long count, u_int flags)
+    rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
 {
 	struct ar71xx_pci_softc *sc = device_get_softc(bus);
 	struct resource *rv;
@@ -525,11 +523,12 @@ qca955x_pci_intr(void *arg)
 	struct intr_event *event;
 	uint32_t reg, irq, mask;
 
-	/* XXX TODO - may need to flush a different handler? */
-	ar71xx_device_ddr_flush_ip2();
+	/* There's only one PCIe DDR flush for both PCIe EPs */
+	ar71xx_device_flush_ddr(AR71XX_CPU_DDR_FLUSH_PCIE);
 
 	reg = ATH_READ_REG(sc->sc_pci_ctrl_base + QCA955X_PCI_INTR_STATUS);
 	mask = ATH_READ_REG(sc->sc_pci_ctrl_base + QCA955X_PCI_INTR_MASK);
+
 	/*
 	 * Handle only unmasked interrupts
 	 */
@@ -540,7 +539,7 @@ qca955x_pci_intr(void *arg)
 	if (reg & QCA955X_PCI_INTR_DEV0) {
 		irq = AR71XX_PCI_IRQ_START;
 		event = sc->sc_eventstab[irq];
-		if (!event || TAILQ_EMPTY(&event->ie_handlers)) {
+		if (!event || CK_SLIST_EMPTY(&event->ie_handlers)) {
 			printf("Stray IRQ %d\n", irq);
 			return (FILTER_STRAY);
 		}
@@ -590,6 +589,7 @@ static device_method_t qca955x_pci_methods[] = {
 	DEVMETHOD(pcib_read_config,	qca955x_pci_read_config),
 	DEVMETHOD(pcib_write_config,	qca955x_pci_write_config),
 	DEVMETHOD(pcib_route_interrupt,	qca955x_pci_route_interrupt),
+	DEVMETHOD(pcib_request_feature,	pcib_request_feature_allow),
 
 	DEVMETHOD_END
 };

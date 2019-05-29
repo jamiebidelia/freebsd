@@ -1,6 +1,5 @@
 /*-
  * Copyright (c) 2014 John Baldwin <jhb@FreeBSD.org>
- * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -121,4 +120,49 @@ devctl_set_driver(const char *device, const char *driver, bool force)
 	if (force)
 		req.dr_flags |= DEVF_SET_DRIVER_DETACH;
 	return (devctl_request(DEV_SET_DRIVER, &req));
+}
+
+int
+devctl_clear_driver(const char *device, bool force)
+{
+
+	return (devctl_simple_request(DEV_CLEAR_DRIVER, device, force ?
+	    DEVF_CLEAR_DRIVER_DETACH : 0));
+}
+
+int
+devctl_rescan(const char *device)
+{
+
+	return (devctl_simple_request(DEV_RESCAN, device, 0));
+}
+
+int
+devctl_delete(const char *device, bool force)
+{
+
+	return (devctl_simple_request(DEV_DELETE, device, force ?
+	    DEVF_FORCE_DELETE : 0));
+}
+
+int
+devctl_freeze(void)
+{
+
+	return (devctl_simple_request(DEV_FREEZE, "", 0));
+}
+
+int
+devctl_thaw(void)
+{
+
+	return (devctl_simple_request(DEV_THAW, "", 0));
+}
+
+int
+devctl_reset(const char *device, bool detach)
+{
+
+	return (devctl_simple_request(DEV_RESET, device, detach ?
+	    DEVF_RESET_DETACH : 0));
 }

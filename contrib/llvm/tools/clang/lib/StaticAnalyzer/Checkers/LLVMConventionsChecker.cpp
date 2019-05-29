@@ -12,7 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "ClangSACheckers.h"
+#include "clang/StaticAnalyzer/Checkers/BuiltinCheckerRegistration.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/StmtVisitor.h"
 #include "clang/StaticAnalyzer/Core/BugReporter/BugReporter.h"
@@ -32,8 +32,7 @@ static bool IsLLVMStringRef(QualType T) {
   if (!RT)
     return false;
 
-  return StringRef(QualType(RT, 0).getAsString()) ==
-          "class StringRef";
+  return StringRef(QualType(RT, 0).getAsString()) == "class StringRef";
 }
 
 /// Check whether the declaration is semantically inside the top-level
@@ -124,10 +123,9 @@ public:
                           const CheckerBase *checker)
       : DeclWithIssue(declWithIssue), BR(br), Checker(checker) {}
   void VisitChildren(Stmt *S) {
-    for (Stmt::child_iterator I = S->child_begin(), E = S->child_end() ;
-      I != E; ++I)
-      if (Stmt *child = *I)
-        Visit(child);
+    for (Stmt *Child : S->children())
+      if (Child)
+        Visit(Child);
   }
   void VisitStmt(Stmt *S) { VisitChildren(S); }
   void VisitDeclStmt(DeclStmt *DS);
@@ -277,7 +275,6 @@ void ASTFieldVisitor::ReportError(QualType T) {
     }
   }
   os << " (type " << FieldChain.back()->getType().getAsString() << ")";
-  os.flush();
 
   // Note that this will fire for every translation unit that uses this
   // class.  This is suboptimal, but at least scan-build will merge

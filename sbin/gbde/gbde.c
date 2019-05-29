@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2002 Poul-Henning Kamp
  * Copyright (c) 2002 Networks Associates Technology, Inc.
  * All rights reserved.
@@ -84,7 +86,7 @@
 #include <sys/disk.h>
 #include <sys/stat.h>
 #include <crypto/rijndael/rijndael-api-fst.h>
-#include <crypto/sha2/sha2.h>
+#include <crypto/sha2/sha512.h>
 #include <sys/param.h>
 #include <sys/linker.h>
 
@@ -172,18 +174,7 @@ g_read_data(struct g_consumer *cp, off_t offset, off_t length, int *error)
 static void
 random_bits(void *p, u_int len)
 {
-	static int fdr = -1;
-	int i;
-
-	if (fdr < 0) {
-		fdr = open("/dev/urandom", O_RDONLY);
-		if (fdr < 0)
-			err(1, "/dev/urandom");
-	}
-
-	i = read(fdr, p, len);
-	if (i != (int)len)
-		err(1, "read from /dev/urandom");
+	arc4random_buf(p, len);
 }
 
 /* XXX: not nice */

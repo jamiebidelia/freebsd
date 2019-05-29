@@ -7,12 +7,15 @@ sbin_PROGRAMS=	$(NTPD_DS) $(NTPDSIM_DS)
 noinst_LIBRARIES=	libntpd.a
 
 AM_CFLAGS = $(CFLAGS_NTP)
+AM_CFLAGS += $(NTP_HARD_CFLAGS)
 
 AM_CPPFLAGS  = $(NTP_INCS)
 AM_CPPFLAGS += $(LIBOPTS_CFLAGS)
 AM_CPPFLAGS += $(CPPFLAGS_NTP)
+AM_CPPFLAGS += $(NTP_HARD_CPPFLAGS)
 
 AM_LDFLAGS = $(LDFLAGS_NTP)
+AM_LDFLAGS += $(NTP_HARD_LDFLAGS)
 
 # LDADD might need RESLIB and ADJLIB.
 LDADD = version.o libntpd.a $(LIBPARSE)
@@ -232,6 +235,7 @@ libntpd_a_SOURCES =		\
 	ntp_timer.c		\
 	ntp_util.c		\
 	ppsapi_timepps.h	\
+	rc_cmdlength.c		\
 	refclock_acts.c		\
 	refclock_arbiter.c	\
 	refclock_arc.c		\
@@ -430,6 +434,9 @@ version.c: $(ntpd_OBJECTS) ../libntp/libntp.a @LIBPARSE@ Makefile $(top_srcdir)/
 
 version.o: version.c
 	env CCACHE_DISABLE=1 $(COMPILE) -c version.c -o version.o
+
+$(srcdir)/Makefile.am:
+	@: do-nothing
 
 include $(top_srcdir)/bincheck.mf
 include $(top_srcdir)/check-libopts.mf

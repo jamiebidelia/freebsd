@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, Juniper Networks, Inc.
+ * Copyright (c) 2014-2019, Juniper Networks, Inc.
  * All rights reserved.
  * This SOFTWARE is licensed under the LICENSE provided in the
  * ../Copyright file. By downloading, installing, copying, or otherwise
@@ -8,11 +8,10 @@
  * Phil Shafer, July 2014
  */
 
-#include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <unistd.h>
-#include <errno.h>
 
 #include "xo.h"
 
@@ -48,9 +47,8 @@ main (int argc, char **argv)
 	{ "on-order", "number", "Number of items on order" },
 	{ "sku", "string", "Stock Keeping Unit" },
 	{ "sold", "number", "Number of items sold" },
-	{ NULL, NULL, NULL },
+	{ XO_INFO_NULL },
     };
-    int info_count = (sizeof(info) / sizeof(info[0])) - 1;
     
     argc = xo_parse_args(argc, argv);
     if (argc < 0)
@@ -77,10 +75,36 @@ main (int argc, char **argv)
         }
     }
 
-    xo_set_info(NULL, info, info_count);
+    xo_set_info(NULL, info, -1);
     xo_set_flags(NULL, XOF_KEYS);
 
     xo_open_container_h(NULL, "top");
+
+    xo_emit("static {:type/ethernet} {:type/bridge} {:type/%4du} {:type/%3d}",
+	    18, 24);
+
+    xo_emit("anchor {[:/%d}{:address/%p}..{:port/%u}{]:}\n", 18, NULL, 1);
+    xo_emit("anchor {[:18}{:address/%p}..{:port/%u}{]:}\n", NULL, 1);
+    xo_emit("anchor {[:/18}{:address/%p}..{:port/%u}{]:}\n", NULL, 1);
+
+    xo_emit("df {:used-percent/%5.0f}{U:%%}\n", (double) 12);
+
+    xo_emit("{e:kve_start/%#jx}", (uintmax_t) 0xdeadbeef);
+    xo_emit("{e:kve_end/%#jx}", (uintmax_t) 0xcabb1e);
+
+    xo_emit("testing argument modifier {a:}.{a:}...\n",
+	    "host", "my-box", "domain", "example.com");
+
+    xo_emit("testing argument modifier with encoding to {ea:}.{a:}...\n",
+	    "host", "my-box", "domain", "example.com");
+
+    xo_emit("{La:} {a:}\n", "Label text", "label", "value");
+
+    xo_emit_field("Vt", "max-chaos", NULL, NULL, "  very  ");
+    xo_emit_field("V", "min-chaos", "%d", NULL, 42);
+    xo_emit_field("V", "some-chaos", "%d\n", "[%d]", 42);
+
+    xo_emit("Connecting to {:host}.{:domain}...\n", "my-box", "example.com");
 
     xo_attr("test", "value");
     xo_open_container("data");
@@ -109,7 +133,7 @@ main (int argc, char **argv)
 
     xo_emit("\n\n");
 
-    xo_open_container("data");
+    xo_open_container("data2");
     xo_open_list("item");
 
     for (ip = list; ip->i_title; ip++) {
@@ -128,9 +152,9 @@ main (int argc, char **argv)
     }
 
     xo_close_list("item");
-    xo_close_container("data");
+    xo_close_container("data2");
 
-    xo_open_container("data");
+    xo_open_container("data3");
     xo_open_list("item");
 
     for (ip = list2; ip->i_title; ip++) {
@@ -149,9 +173,9 @@ main (int argc, char **argv)
     }
 
     xo_close_list("item");
-    xo_close_container("data");
+    xo_close_container("data3");
 
-    xo_open_container("data");
+    xo_open_container("data4");
     xo_open_list("item");
 
     for (ip = list; ip->i_title; ip++) {
@@ -160,7 +184,7 @@ main (int argc, char **argv)
     }
 
     xo_close_list("item");
-    xo_close_container("data");
+    xo_close_container("data4");
 
     xo_emit("X{P:}X", "epic fail");
     xo_emit("X{T:}X", "epic fail");
@@ -169,6 +193,18 @@ main (int argc, char **argv)
 
     xo_emit("X{P:        }X{Lwc:Cost}{:cost/%u}\n", 425);
     xo_emit("X{P:/%30s}X{Lwc:Cost}{:cost/%u}\n", "", 455);
+
+    xo_emit("{e:mode/%s}{e:mode_octal/%s} {t:links/%s} "
+	    "{t:user/%s}  {t:group/%s}  \n",
+	    "mode", "octal", "links",
+	    "user", "group", "extra1", "extra2", "extra3");
+
+    xo_emit("{e:pre/%s}{t:links/%-*u}{t:post/%-*s}\n", "that", 8, 3, 8, "this");
+
+    xo_emit("{t:mode/%s}{e:mode_octal/%03o} {t:links/%*u} "
+	    "{t:user/%-*s}  {t:group/%-*s}  \n",
+	    "/some/file", (int) 0640, 8, 1,
+	    10, "user", 12, "group");
 
     xo_close_container_h(NULL, "top");
 

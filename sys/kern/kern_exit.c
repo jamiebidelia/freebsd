@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1982, 1986, 1989, 1991, 1993
  *	The Regents of the University of California.  All rights reserved.
  * (c) UNIX System Laboratories, Inc.
@@ -15,7 +17,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 4. Neither the name of the University nor the names of its contributors
+ * 3. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -37,7 +39,6 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
-#include "opt_compat.h"
 #include "opt_ktrace.h"
 
 #include <sys/param.h>
@@ -46,6 +47,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/capsicum.h>
 #include <sys/eventhandler.h>
 #include <sys/kernel.h>
+#include <sys/ktr.h>
 #include <sys/malloc.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
@@ -93,7 +95,7 @@ dtrace_execexit_func_t	dtrace_fasttrap_exit;
 #endif
 
 SDT_PROVIDER_DECLARE(proc);
-SDT_PROBE_DEFINE1(proc, kernel, , exit, "int");
+SDT_PROBE_DEFINE1(proc, , , exit, "int");
 
 /* Hook for NFS teardown procedure. */
 void (*nlminfo_release_p)(struct proc *p);
@@ -104,14 +106,9 @@ proc_realparent(struct proc *child)
 	struct proc *p, *parent;
 
 	sx_assert(&proctree_lock, SX_LOCKED);
-	if ((child->p_treeflag & P_TREE_ORPHANED) == 0) {
-		if (child->p_oppid == 0 ||
-		    child->p_pptr->p_pid == child->p_oppid)
-			parent = child->p_pptr;
-		else
-			parent = initproc;
-		return (parent);
-	}
+	if ((child->p_treeflag & P_TREE_ORPHANED) == 0)
+		return (child->p_pptr->p_pid == child->p_oppid ?
+			    child->p_pptr : initproc);
 	for (p = child; (p->p_treeflag & P_TREE_FIRST_ORPHAN) == 0;) {
 		/* Cannot use LIST_PREV(), since the list head is not known. */
 		p = __containerof(p->p_orphan.le_prev, struct proc,
@@ -141,12 +138,33 @@ reaper_abandon_children(struct proc *p, bool exiting)
 		LIST_INSERT_HEAD(&p1->p_reaplist, p2, p_reapsibling);
 		if (exiting && p2->p_pptr == p) {
 			PROC_LOCK(p2);
-			proc_reparent(p2, p1);
+			proc_reparent(p2, p1, true);
 			PROC_UNLOCK(p2);
 		}
 	}
 	KASSERT(LIST_EMPTY(&p->p_reaplist), ("p_reaplist not empty"));
 	p->p_treeflag &= ~P_TREE_REAPER;
+}
+
+static void
+reaper_clear(struct proc *p)
+{
+	struct proc *p1;
+	bool clear;
+
+	sx_assert(&proctree_lock, SX_LOCKED);
+	LIST_REMOVE(p, p_reapsibling);
+	if (p->p_reapsubtree == 1)
+		return;
+	clear = true;
+	LIST_FOREACH(p1, &p->p_reaper->p_reaplist, p_reapsibling) {
+		if (p1->p_reapsubtree == p->p_reapsubtree) {
+			clear = false;
+			break;
+		}
+	}
+	if (clear)
+		proc_id_clear(PROC_ID_REAP, p->p_reapsubtree);
 }
 
 static void
@@ -174,7 +192,7 @@ void
 sys_sys_exit(struct thread *td, struct sys_exit_args *uap)
 {
 
-	exit1(td, W_EXITCODE(uap->rval, 0));
+	exit1(td, uap->rval, 0);
 	/* NOTREACHED */
 }
 
@@ -184,13 +202,15 @@ sys_sys_exit(struct thread *td, struct sys_exit_args *uap)
  * and rusage for wait().  Check for child processes and orphan them.
  */
 void
-exit1(struct thread *td, int rv)
+exit1(struct thread *td, int rval, int signo)
 {
 	struct proc *p, *nq, *q, *t;
 	struct thread *tdt;
-	struct vnode *ttyvp = NULL;
+	ksiginfo_t *ksi, *ksi1;
+	int signal_parent;
 
 	mtx_assert(&Giant, MA_NOTOWNED);
+	KASSERT(rval == 0 || signo == 0, ("exit1 rv %d sig %d", rval, signo));
 
 	p = td->td_proc;
 	/*
@@ -199,16 +219,14 @@ exit1(struct thread *td, int rv)
 	 * shutdown on sparc64 when the gmirror worker process exists.
 	 */
 	if (p == initproc && rebooting == 0) {
-		printf("init died (signal %d, exit %d)\n",
-		    WTERMSIG(rv), WEXITSTATUS(rv));
+		printf("init died (signal %d, exit %d)\n", signo, rval);
 		panic("Going nowhere without my init!");
 	}
 
 	/*
 	 * Deref SU mp, since the thread does not return to userspace.
 	 */
-	if (softdep_ast_cleanup != NULL)
-		softdep_ast_cleanup();
+	td_softdep_cleanup(td);
 
 	/*
 	 * MUST abort all other threads before proceeding past here.
@@ -256,6 +274,11 @@ exit1(struct thread *td, int rv)
 	KASSERT(p->p_numthreads == 1,
 	    ("exit1: proc %p exiting with %d threads", p, p->p_numthreads));
 	racct_sub(p, RACCT_NTHR, 1);
+
+	/* Let event handler change exit status */
+	p->p_xexit = rval;
+	p->p_xsig = signo;
+
 	/*
 	 * Wakeup anyone in procfs' PIOCWAIT.  They should have a hold
 	 * on our vmspace, so we should block below until they have
@@ -263,7 +286,7 @@ exit1(struct thread *td, int rv)
 	 * requested S_EXIT stops we will block here until they ack
 	 * via PIOCCONT.
 	 */
-	_STOPEVENT(p, S_EXIT, rv);
+	_STOPEVENT(p, S_EXIT, 0);
 
 	/*
 	 * Ignore any pending request to stop due to a stop signal.
@@ -288,7 +311,6 @@ exit1(struct thread *td, int rv)
 	while (p->p_lock > 0)
 		msleep(&p->p_lock, &p->p_mtx, PWAIT, "exithold", 0);
 
-	p->p_xstat = rv;	/* Let event handler change exit status */
 	PROC_UNLOCK(p);
 	/* Drain the limit callout while we don't have the proc locked */
 	callout_drain(&p->p_limco);
@@ -300,7 +322,7 @@ exit1(struct thread *td, int rv)
 	 * it was.  The exit status is WEXITSTATUS(rv), but it's not clear
 	 * what the return value is.
 	 */
-	AUDIT_ARG_EXIT(WEXITSTATUS(rv), 0);
+	AUDIT_ARG_EXIT(rval, 0);
 	AUDIT_SYSCALL_EXIT(0, td);
 #endif
 
@@ -321,32 +343,36 @@ exit1(struct thread *td, int rv)
 
 	/*
 	 * Check if any loadable modules need anything done at process exit.
-	 * E.g. SYSV IPC stuff
+	 * E.g. SYSV IPC stuff.
+	 * Event handler could change exit status.
 	 * XXX what if one of these generates an error?
 	 */
-	EVENTHANDLER_INVOKE(process_exit, p);
+	EVENTHANDLER_DIRECT_INVOKE(process_exit, p);
 
 	/*
 	 * If parent is waiting for us to exit or exec,
 	 * P_PPWAIT is set; we will wakeup the parent below.
 	 */
 	PROC_LOCK(p);
-	rv = p->p_xstat;	/* Event handler could change exit status */
 	stopprofclock(p);
 	p->p_flag &= ~(P_TRACED | P_PPWAIT | P_PPTRACE);
+	p->p_ptevents = 0;
 
 	/*
 	 * Stop the real interval timer.  If the handler is currently
 	 * executing, prevent it from rearming itself and let it finish.
 	 */
 	if (timevalisset(&p->p_realtimer.it_value) &&
-	    callout_stop(&p->p_itcallout) == 0) {
+	    _callout_stop_safe(&p->p_itcallout, CS_EXECUTING, NULL) == 0) {
 		timevalclear(&p->p_realtimer.it_interval);
 		msleep(&p->p_itcallout, &p->p_mtx, PWAIT, "ritwait", 0);
 		KASSERT(!timevalisset(&p->p_realtimer.it_value),
 		    ("realtime timer is still armed"));
 	}
+
 	PROC_UNLOCK(p);
+
+	umtx_thread_exit(td);
 
 	/*
 	 * Reset any sigio structures pointing to us as a result of
@@ -389,60 +415,9 @@ exit1(struct thread *td, int rv)
 	}
 
 	vmspace_exit(td);
-
-	sx_xlock(&proctree_lock);
-	if (SESS_LEADER(p)) {
-		struct session *sp = p->p_session;
-		struct tty *tp;
-
-		/*
-		 * s_ttyp is not zero'd; we use this to indicate that
-		 * the session once had a controlling terminal. (for
-		 * logging and informational purposes)
-		 */
-		SESS_LOCK(sp);
-		ttyvp = sp->s_ttyvp;
-		tp = sp->s_ttyp;
-		sp->s_ttyvp = NULL;
-		sp->s_ttydp = NULL;
-		sp->s_leader = NULL;
-		SESS_UNLOCK(sp);
-
-		/*
-		 * Signal foreground pgrp and revoke access to
-		 * controlling terminal if it has not been revoked
-		 * already.
-		 *
-		 * Because the TTY may have been revoked in the mean
-		 * time and could already have a new session associated
-		 * with it, make sure we don't send a SIGHUP to a
-		 * foreground process group that does not belong to this
-		 * session.
-		 */
-
-		if (tp != NULL) {
-			tty_lock(tp);
-			if (tp->t_session == sp)
-				tty_signal_pgrp(tp, SIGHUP);
-			tty_unlock(tp);
-		}
-
-		if (ttyvp != NULL) {
-			sx_xunlock(&proctree_lock);
-			if (vn_lock(ttyvp, LK_EXCLUSIVE) == 0) {
-				VOP_REVOKE(ttyvp, REVOKEALL);
-				VOP_UNLOCK(ttyvp, 0);
-			}
-			sx_xlock(&proctree_lock);
-		}
-	}
-	fixjobc(p, p->p_pgrp, 0);
-	sx_xunlock(&proctree_lock);
+	killjobc();
 	(void)acct_process(td);
 
-	/* Release the TTY now we've unlocked everything. */
-	if (ttyvp != NULL)
-		vrele(ttyvp);
 #ifdef KTRACE
 	ktrprocexit(td);
 #endif
@@ -463,16 +438,6 @@ exit1(struct thread *td, int rv)
 	tidhash_remove(td);
 
 	/*
-	 * Remove proc from allproc queue and pidhash chain.
-	 * Place onto zombproc.  Unlink from parent's child list.
-	 */
-	sx_xlock(&allproc_lock);
-	LIST_REMOVE(p, p_list);
-	LIST_INSERT_HEAD(&zombproc, p, p_list);
-	LIST_REMOVE(p, p_hash);
-	sx_xunlock(&allproc_lock);
-
-	/*
 	 * Call machine-dependent code to release any
 	 * machine-dependent resources other than the address space.
 	 * The address space is released by "vmspace_exitfree(p)" in
@@ -483,21 +448,61 @@ exit1(struct thread *td, int rv)
 	WITNESS_WARN(WARN_PANIC, NULL, "process (pid %d) exiting", p->p_pid);
 
 	/*
+	 * Move proc from allproc queue to zombproc.
+	 */
+	sx_xlock(&allproc_lock);
+	sx_xlock(&zombproc_lock);
+	LIST_REMOVE(p, p_list);
+	LIST_INSERT_HEAD(&zombproc, p, p_list);
+	sx_xunlock(&zombproc_lock);
+	sx_xunlock(&allproc_lock);
+
+	sx_xlock(&proctree_lock);
+
+	/*
 	 * Reparent all children processes:
 	 * - traced ones to the original parent (or init if we are that parent)
 	 * - the rest to init
 	 */
-	sx_xlock(&proctree_lock);
 	q = LIST_FIRST(&p->p_children);
 	if (q != NULL)		/* only need this if any child is S_ZOMB */
 		wakeup(q->p_reaper);
 	for (; q != NULL; q = nq) {
 		nq = LIST_NEXT(q, p_sibling);
+		ksi = ksiginfo_alloc(TRUE);
 		PROC_LOCK(q);
 		q->p_sigparent = SIGCHLD;
 
 		if (!(q->p_flag & P_TRACED)) {
-			proc_reparent(q, q->p_reaper);
+			proc_reparent(q, q->p_reaper, true);
+			if (q->p_state == PRS_ZOMBIE) {
+				/*
+				 * Inform reaper about the reparented
+				 * zombie, since wait(2) has something
+				 * new to report.  Guarantee queueing
+				 * of the SIGCHLD signal, similar to
+				 * the _exit() behaviour, by providing
+				 * our ksiginfo.  Ksi is freed by the
+				 * signal delivery.
+				 */
+				if (q->p_ksi == NULL) {
+					ksi1 = NULL;
+				} else {
+					ksiginfo_copy(q->p_ksi, ksi);
+					ksi->ksi_flags |= KSI_INS;
+					ksi1 = ksi;
+					ksi = NULL;
+				}
+				PROC_LOCK(q->p_reaper);
+				pksignal(q->p_reaper, SIGCHLD, ksi1);
+				PROC_UNLOCK(q->p_reaper);
+			} else if (q->p_pdeathsig > 0) {
+				/*
+				 * The child asked to received a signal
+				 * when we exit.
+				 */
+				kern_psignal(q, q->p_pdeathsig);
+			}
 		} else {
 			/*
 			 * Traced processes are killed since their existence
@@ -505,10 +510,10 @@ exit1(struct thread *td, int rv)
 			 */
 			t = proc_realparent(q);
 			if (t == p) {
-				proc_reparent(q, q->p_reaper);
+				proc_reparent(q, q->p_reaper, true);
 			} else {
 				PROC_LOCK(t);
-				proc_reparent(q, t);
+				proc_reparent(q, t, true);
 				PROC_UNLOCK(t);
 			}
 			/*
@@ -519,11 +524,17 @@ exit1(struct thread *td, int rv)
 			 */
 			clear_orphan(q);
 			q->p_flag &= ~(P_TRACED | P_STOPPED_TRACE);
-			FOREACH_THREAD_IN_PROC(q, tdt)
-				tdt->td_dbgflags &= ~TDB_SUSPEND;
+			q->p_flag2 &= ~P2_PTRACE_FSTP;
+			q->p_ptevents = 0;
+			FOREACH_THREAD_IN_PROC(q, tdt) {
+				tdt->td_dbgflags &= ~(TDB_SUSPEND | TDB_XSIG |
+				    TDB_FSTP);
+			}
 			kern_psignal(q, SIGKILL);
 		}
 		PROC_UNLOCK(q);
+		if (ksi != NULL)
+			ksiginfo_free(ksi);
 	}
 
 	/*
@@ -531,18 +542,38 @@ exit1(struct thread *td, int rv)
 	 */
 	while ((q = LIST_FIRST(&p->p_orphans)) != NULL) {
 		PROC_LOCK(q);
+		KASSERT(q->p_oppid == p->p_pid,
+		    ("orphan %p of %p has unexpected oppid %d", q, p,
+		    q->p_oppid));
+		q->p_oppid = q->p_reaper->p_pid;
+
+		/*
+		 * If we are the real parent of this process
+		 * but it has been reparented to a debugger, then
+		 * check if it asked for a signal when we exit.
+		 */
+		if (q->p_pdeathsig > 0)
+			kern_psignal(q, q->p_pdeathsig);
 		CTR2(KTR_PTRACE, "exit: pid %d, clearing orphan %d", p->p_pid,
 		    q->p_pid);
 		clear_orphan(q);
 		PROC_UNLOCK(q);
 	}
 
+#ifdef KDTRACE_HOOKS
+	if (SDT_PROBES_ENABLED()) {
+		int reason = CLD_EXITED;
+		if (WCOREDUMP(signo))
+			reason = CLD_DUMPED;
+		else if (WIFSIGNALED(signo))
+			reason = CLD_KILLED;
+		SDT_PROBE1(proc, , , exit, reason);
+	}
+#endif
+
 	/* Save exit status. */
 	PROC_LOCK(p);
 	p->p_xthread = td;
-
-	/* Tell the prison that we are gone. */
-	prison_proc_free(p->p_ucred->cr_prison);
 
 #ifdef KDTRACE_HOOKS
 	/*
@@ -556,23 +587,7 @@ exit1(struct thread *td, int rv)
 	/*
 	 * Notify interested parties of our demise.
 	 */
-	KNOTE_LOCKED(&p->p_klist, NOTE_EXIT);
-
-#ifdef KDTRACE_HOOKS
-	int reason = CLD_EXITED;
-	if (WCOREDUMP(rv))
-		reason = CLD_DUMPED;
-	else if (WIFSIGNALED(rv))
-		reason = CLD_KILLED;
-	SDT_PROBE(proc, kernel, , exit, reason, 0, 0, 0, 0);
-#endif
-
-	/*
-	 * Just delete all entries in the p_klist. At this point we won't
-	 * report any more events, and there are nasty race conditions that
-	 * can beat us if we don't.
-	 */
-	knlist_clear(&p->p_klist, 1);
+	KNOTE_LOCKED(p->p_klist, NOTE_EXIT);
 
 	/*
 	 * If this is a process with a descriptor, we may not need to deliver
@@ -580,6 +595,7 @@ exit1(struct thread *td, int rv)
 	 * procdesc_exit() to serialize concurrent calls to close() and
 	 * exit().
 	 */
+	signal_parent = 0;
 	if (p->p_procdesc == NULL || procdesc_exit(p)) {
 		/*
 		 * Notify parent that we're gone.  If parent has the
@@ -596,7 +612,7 @@ exit1(struct thread *td, int rv)
 			mtx_unlock(&p->p_pptr->p_sigacts->ps_mtx);
 			pp = p->p_pptr;
 			PROC_UNLOCK(pp);
-			proc_reparent(p, p->p_reaper);
+			proc_reparent(p, p->p_reaper, true);
 			p->p_sigparent = SIGCHLD;
 			PROC_LOCK(p->p_pptr);
 
@@ -609,17 +625,27 @@ exit1(struct thread *td, int rv)
 		} else
 			mtx_unlock(&p->p_pptr->p_sigacts->ps_mtx);
 
-		if (p->p_pptr == p->p_reaper || p->p_pptr == initproc)
-			childproc_exited(p);
-		else if (p->p_sigparent != 0) {
-			if (p->p_sigparent == SIGCHLD)
-				childproc_exited(p);
-			else	/* LINUX thread */
-				kern_psignal(p->p_pptr, p->p_sigparent);
+		if (p->p_pptr == p->p_reaper || p->p_pptr == initproc) {
+			signal_parent = 1;
+		} else if (p->p_sigparent != 0) {
+			if (p->p_sigparent == SIGCHLD) {
+				signal_parent = 1;
+			} else { /* LINUX thread */
+				signal_parent = 2;
+			}
 		}
 	} else
 		PROC_LOCK(p->p_pptr);
 	sx_xunlock(&proctree_lock);
+
+	if (signal_parent == 1) {
+		childproc_exited(p);
+	} else if (signal_parent == 2) {
+		kern_psignal(p->p_pptr, p->p_sigparent);
+	}
+
+	/* Tell the prison that we are gone. */
+	prison_proc_free(p->p_ucred->cr_prison);
 
 	/*
 	 * The state PRS_ZOMBIE prevents other proesses from sending
@@ -642,16 +668,9 @@ exit1(struct thread *td, int rv)
 	wakeup(p->p_pptr);
 	cv_broadcast(&p->p_pwait);
 	sched_exit(p->p_pptr, td);
-	umtx_thread_exit(td);
 	PROC_SLOCK(p);
 	p->p_state = PRS_ZOMBIE;
 	PROC_UNLOCK(p->p_pptr);
-
-	/*
-	 * Hopefully no one will try to deliver a signal to the process this
-	 * late in the game.
-	 */
-	knlist_destroy(&p->p_klist);
 
 	/*
 	 * Save our children's rusage information in our exit rusage.
@@ -741,7 +760,7 @@ out:
 	sbuf_finish(sb);
 	log(LOG_INFO, "%s", sbuf_data(sb));
 	sbuf_delete(sb);
-	exit1(td, W_EXITCODE(0, sig));
+	exit1(td, 0, sig);
 	return (0);
 }
 
@@ -776,9 +795,9 @@ sys_wait4(struct thread *td, struct wait4_args *uap)
 	else
 		rup = NULL;
 	error = kern_wait(td, uap->pid, &status, uap->options, rup);
-	if (uap->status != NULL && error == 0)
+	if (uap->status != NULL && error == 0 && td->td_retval[0] != 0)
 		error = copyout(&status, uap->status, sizeof(status));
-	if (uap->rusage != NULL && error == 0)
+	if (uap->rusage != NULL && error == 0 && td->td_retval[0] != 0)
 		error = copyout(&ru, uap->rusage, sizeof(struct rusage));
 	return (error);
 }
@@ -812,9 +831,9 @@ sys_wait6(struct thread *td, struct wait6_args *uap)
 	 */
 	error = kern_wait6(td, idtype, id, &status, uap->options, wrup, sip);
 
-	if (uap->status != NULL && error == 0)
+	if (uap->status != NULL && error == 0 && td->td_retval[0] != 0)
 		error = copyout(&status, uap->status, sizeof(status));
-	if (uap->wrusage != NULL && error == 0)
+	if (uap->wrusage != NULL && error == 0 && td->td_retval[0] != 0)
 		error = copyout(&wru, uap->wrusage, sizeof(wru));
 	if (uap->info != NULL && error == 0)
 		error = copyout(&si, uap->info, sizeof(si));
@@ -833,15 +852,14 @@ proc_reap(struct thread *td, struct proc *p, int *status, int options)
 
 	sx_assert(&proctree_lock, SA_XLOCKED);
 	PROC_LOCK_ASSERT(p, MA_OWNED);
-	PROC_SLOCK_ASSERT(p, MA_OWNED);
 	KASSERT(p->p_state == PRS_ZOMBIE, ("proc_reap: !PRS_ZOMBIE"));
+
+	mtx_spin_wait_unlocked(&p->p_slock);
 
 	q = td->td_proc;
 
-	PROC_SUNLOCK(p);
-	td->td_retval[0] = p->p_pid;
 	if (status)
-		*status = p->p_xstat;	/* convert to int */
+		*status = KW_EXITCODE(p->p_xexit, p->p_xsig);
 	if (options & WNOWAIT) {
 		/*
 		 *  Only poll, returning the status.  Caller does not wish to
@@ -860,7 +878,7 @@ proc_reap(struct thread *td, struct proc *p, int *status, int options)
 	 * If we got the child via a ptrace 'attach', we need to give it back
 	 * to the old parent.
 	 */
-	if (p->p_oppid != 0 && p->p_oppid != p->p_pptr->p_pid) {
+	if (p->p_oppid != p->p_pptr->p_pid) {
 		PROC_UNLOCK(p);
 		t = proc_realparent(p);
 		PROC_LOCK(t);
@@ -868,8 +886,7 @@ proc_reap(struct thread *td, struct proc *p, int *status, int options)
 		CTR2(KTR_PTRACE,
 		    "wait: traced child %d moved back to parent %d", p->p_pid,
 		    t->p_pid);
-		proc_reparent(p, t);
-		p->p_oppid = 0;
+		proc_reparent(p, t, false);
 		PROC_UNLOCK(p);
 		pksignal(t, SIGCHLD, p->p_ksi);
 		wakeup(t);
@@ -878,19 +895,22 @@ proc_reap(struct thread *td, struct proc *p, int *status, int options)
 		sx_xunlock(&proctree_lock);
 		return;
 	}
-	p->p_oppid = 0;
 	PROC_UNLOCK(p);
 
 	/*
 	 * Remove other references to this process to ensure we have an
 	 * exclusive reference.
 	 */
-	sx_xlock(&allproc_lock);
+	sx_xlock(&zombproc_lock);
 	LIST_REMOVE(p, p_list);	/* off zombproc */
-	sx_xunlock(&allproc_lock);
+	sx_xunlock(&zombproc_lock);
+	sx_xlock(PIDHASHLOCK(p->p_pid));
+	LIST_REMOVE(p, p_hash);
+	sx_xunlock(PIDHASHLOCK(p->p_pid));
 	LIST_REMOVE(p, p_sibling);
 	reaper_abandon_children(p, true);
-	LIST_REMOVE(p, p_reapsibling);
+	reaper_clear(p);
+	proc_id_clear(PROC_ID_PID, p->p_pid);
 	PROC_LOCK(p);
 	clear_orphan(p);
 	PROC_UNLOCK(p);
@@ -899,13 +919,18 @@ proc_reap(struct thread *td, struct proc *p, int *status, int options)
 		procdesc_reap(p);
 	sx_xunlock(&proctree_lock);
 
+	PROC_LOCK(p);
+	knlist_detach(p->p_klist);
+	p->p_klist = NULL;
+	PROC_UNLOCK(p);
+
 	/*
 	 * Removal from allproc list and process group list paired with
 	 * PROC_LOCK which was executed during that time should guarantee
 	 * nothing can reach this process anymore. As such further locking
 	 * is unnecessary.
 	 */
-	p->p_xstat = 0;		/* XXX: why? */
+	p->p_xexit = p->p_xsig = 0;		/* XXX: why? */
 
 	PROC_LOCK(q);
 	ruadd(&q->p_stats->p_cru, &q->p_crux, &p->p_ru, &p->p_rux);
@@ -951,12 +976,11 @@ proc_reap(struct thread *td, struct proc *p, int *status, int options)
 #ifdef MAC
 	mac_proc_destroy(p);
 #endif
+
 	KASSERT(FIRST_THREAD_IN_PROC(p),
 	    ("proc_reap: no residual thread!"));
 	uma_zfree(proc_zone, p);
-	sx_xlock(&allproc_lock);
-	nprocs--;
-	sx_xunlock(&allproc_lock);
+	atomic_add_int(&nprocs, -1);
 }
 
 static int
@@ -972,6 +996,10 @@ proc_to_reap(struct thread *td, struct proc *p, idtype_t idtype, id_t id,
 
 	switch (idtype) {
 	case P_ALL:
+		if (p->p_procdesc != NULL) {
+			PROC_UNLOCK(p);
+			return (0);
+		}
 		break;
 	case P_PID:
 		if (p->p_pid != (pid_t)id) {
@@ -1059,15 +1087,15 @@ proc_to_reap(struct thread *td, struct proc *p, idtype_t idtype, id_t id,
 		 *  This is still a rough estimate.  We will fix the
 		 *  cases TRAPPED, STOPPED, and CONTINUED later.
 		 */
-		if (WCOREDUMP(p->p_xstat)) {
+		if (WCOREDUMP(p->p_xsig)) {
 			siginfo->si_code = CLD_DUMPED;
-			siginfo->si_status = WTERMSIG(p->p_xstat);
-		} else if (WIFSIGNALED(p->p_xstat)) {
+			siginfo->si_status = WTERMSIG(p->p_xsig);
+		} else if (WIFSIGNALED(p->p_xsig)) {
 			siginfo->si_code = CLD_KILLED;
-			siginfo->si_status = WTERMSIG(p->p_xstat);
+			siginfo->si_status = WTERMSIG(p->p_xsig);
 		} else {
 			siginfo->si_code = CLD_EXITED;
-			siginfo->si_status = WEXITSTATUS(p->p_xstat);
+			siginfo->si_status = p->p_xexit;
 		}
 
 		siginfo->si_pid = p->p_pid;
@@ -1099,11 +1127,9 @@ proc_to_reap(struct thread *td, struct proc *p, idtype_t idtype, id_t id,
 	}
 
 	if (p->p_state == PRS_ZOMBIE && !check_only) {
-		PROC_SLOCK(p);
 		proc_reap(td, p, status, options);
 		return (-1);
 	}
-	PROC_UNLOCK(p);
 	return (1);
 }
 
@@ -1148,12 +1174,46 @@ kern_wait(struct thread *td, pid_t pid, int *status, int options,
 	return (ret);
 }
 
+static void
+report_alive_proc(struct thread *td, struct proc *p, siginfo_t *siginfo,
+    int *status, int options, int si_code)
+{
+	bool cont;
+
+	PROC_LOCK_ASSERT(p, MA_OWNED);
+	sx_assert(&proctree_lock, SA_XLOCKED);
+	MPASS(si_code == CLD_TRAPPED || si_code == CLD_STOPPED ||
+	    si_code == CLD_CONTINUED);
+
+	cont = si_code == CLD_CONTINUED;
+	if ((options & WNOWAIT) == 0) {
+		if (cont)
+			p->p_flag &= ~P_CONTINUED;
+		else
+			p->p_flag |= P_WAITED;
+		PROC_LOCK(td->td_proc);
+		sigqueue_take(p->p_ksi);
+		PROC_UNLOCK(td->td_proc);
+	}
+	sx_xunlock(&proctree_lock);
+	if (siginfo != NULL) {
+		siginfo->si_code = si_code;
+		siginfo->si_status = cont ? SIGCONT : p->p_xsig;
+	}
+	if (status != NULL)
+		*status = cont ? SIGCONT : W_STOPCODE(p->p_xsig);
+	PROC_UNLOCK(p);
+	td->td_retval[0] = p->p_pid;
+}
+
 int
 kern_wait6(struct thread *td, idtype_t idtype, id_t id, int *status,
     int options, struct __wrusage *wrusage, siginfo_t *siginfo)
 {
 	struct proc *p, *q;
+	pid_t pid;
 	int error, nfound, ret;
+	bool report;
 
 	AUDIT_ARG_VALUE((int)idtype);	/* XXX - This is likely wrong! */
 	AUDIT_ARG_PID((pid_t)id);	/* XXX - This may be wrong! */
@@ -1188,95 +1248,59 @@ loop:
 		q->p_flag &= ~P_STATCHILD;
 		PROC_UNLOCK(q);
 	}
-	nfound = 0;
 	sx_xlock(&proctree_lock);
+loop_locked:
+	nfound = 0;
 	LIST_FOREACH(p, &q->p_children, p_sibling) {
+		pid = p->p_pid;
 		ret = proc_to_reap(td, p, idtype, id, status, options,
 		    wrusage, siginfo, 0);
 		if (ret == 0)
 			continue;
-		else if (ret == 1)
-			nfound++;
-		else
+		else if (ret != 1) {
+			td->td_retval[0] = pid;
 			return (0);
+		}
 
-		PROC_LOCK(p);
-		PROC_SLOCK(p);
+		nfound++;
+		PROC_LOCK_ASSERT(p, MA_OWNED);
 
 		if ((options & WTRAPPED) != 0 &&
-		    (p->p_flag & P_TRACED) != 0 &&
-		    (p->p_flag & (P_STOPPED_TRACE | P_STOPPED_SIG)) != 0 &&
-		    (p->p_suspcount == p->p_numthreads) &&
-		    ((p->p_flag & P_WAITED) == 0)) {
+		    (p->p_flag & P_TRACED) != 0) {
+			PROC_SLOCK(p);
+			report =
+			    ((p->p_flag & (P_STOPPED_TRACE | P_STOPPED_SIG)) &&
+			    p->p_suspcount == p->p_numthreads &&
+			    (p->p_flag & P_WAITED) == 0);
 			PROC_SUNLOCK(p);
-			if ((options & WNOWAIT) == 0)
-				p->p_flag |= P_WAITED;
-			sx_xunlock(&proctree_lock);
-			td->td_retval[0] = p->p_pid;
-
-			if (status != NULL)
-				*status = W_STOPCODE(p->p_xstat);
-			if (siginfo != NULL) {
-				siginfo->si_status = p->p_xstat;
-				siginfo->si_code = CLD_TRAPPED;
-			}
-			if ((options & WNOWAIT) == 0) {
-				PROC_LOCK(q);
-				sigqueue_take(p->p_ksi);
-				PROC_UNLOCK(q);
-			}
-
+			if (report) {
 			CTR4(KTR_PTRACE,
-	    "wait: returning trapped pid %d status %#x (xstat %d) xthread %d",
-			    p->p_pid, W_STOPCODE(p->p_xstat), p->p_xstat,
-			    p->p_xthread != NULL ? p->p_xthread->td_tid : -1);
-			PROC_UNLOCK(p);
-			return (0);
+			    "wait: returning trapped pid %d status %#x "
+			    "(xstat %d) xthread %d",
+			    p->p_pid, W_STOPCODE(p->p_xsig), p->p_xsig,
+			    p->p_xthread != NULL ?
+			    p->p_xthread->td_tid : -1);
+				report_alive_proc(td, p, siginfo, status,
+				    options, CLD_TRAPPED);
+				return (0);
+			}
 		}
 		if ((options & WUNTRACED) != 0 &&
-		    (p->p_flag & P_STOPPED_SIG) != 0 &&
-		    (p->p_suspcount == p->p_numthreads) &&
-		    ((p->p_flag & P_WAITED) == 0)) {
+		    (p->p_flag & P_STOPPED_SIG) != 0) {
+			PROC_SLOCK(p);
+			report = (p->p_suspcount == p->p_numthreads &&
+			    ((p->p_flag & P_WAITED) == 0));
 			PROC_SUNLOCK(p);
-			if ((options & WNOWAIT) == 0)
-				p->p_flag |= P_WAITED;
-			sx_xunlock(&proctree_lock);
-			td->td_retval[0] = p->p_pid;
-
-			if (status != NULL)
-				*status = W_STOPCODE(p->p_xstat);
-			if (siginfo != NULL) {
-				siginfo->si_status = p->p_xstat;
-				siginfo->si_code = CLD_STOPPED;
+			if (report) {
+				report_alive_proc(td, p, siginfo, status,
+				    options, CLD_STOPPED);
+				return (0);
 			}
-			if ((options & WNOWAIT) == 0) {
-				PROC_LOCK(q);
-				sigqueue_take(p->p_ksi);
-				PROC_UNLOCK(q);
-			}
-
-			PROC_UNLOCK(p);
-			return (0);
 		}
-		PROC_SUNLOCK(p);
 		if ((options & WCONTINUED) != 0 &&
 		    (p->p_flag & P_CONTINUED) != 0) {
-			sx_xunlock(&proctree_lock);
-			td->td_retval[0] = p->p_pid;
-			if ((options & WNOWAIT) == 0) {
-				p->p_flag &= ~P_CONTINUED;
-				PROC_LOCK(q);
-				sigqueue_take(p->p_ksi);
-				PROC_UNLOCK(q);
-			}
-			PROC_UNLOCK(p);
-
-			if (status != NULL)
-				*status = SIGCONT;
-			if (siginfo != NULL) {
-				siginfo->si_status = SIGCONT;
-				siginfo->si_code = CLD_CONTINUED;
-			}
+			report_alive_proc(td, p, siginfo, status, options,
+			    CLD_CONTINUED);
 			return (0);
 		}
 		PROC_UNLOCK(p);
@@ -1301,6 +1325,7 @@ loop:
 			if (ret != 0) {
 				KASSERT(ret != -1, ("reaped an orphan (pid %d)",
 				    (int)td->td_retval[0]));
+				PROC_UNLOCK(p);
 				nfound++;
 				break;
 			}
@@ -1316,13 +1341,13 @@ loop:
 		return (0);
 	}
 	PROC_LOCK(q);
-	sx_xunlock(&proctree_lock);
 	if (q->p_flag & P_STATCHILD) {
 		q->p_flag &= ~P_STATCHILD;
-		error = 0;
-	} else
-		error = msleep(q, &q->p_mtx, PWAIT | PCATCH, "wait", 0);
-	PROC_UNLOCK(q);
+		PROC_UNLOCK(q);
+		goto loop_locked;
+	}
+	sx_xunlock(&proctree_lock);
+	error = msleep(q, &q->p_mtx, PWAIT | PCATCH | PDROP, "wait", 0);
 	if (error)
 		return (error);
 	goto loop;
@@ -1333,7 +1358,7 @@ loop:
  * Must be called with an exclusive hold of proctree lock.
  */
 void
-proc_reparent(struct proc *child, struct proc *parent)
+proc_reparent(struct proc *child, struct proc *parent, bool set_oppid)
 {
 
 	sx_assert(&proctree_lock, SX_XLOCKED);
@@ -1361,4 +1386,6 @@ proc_reparent(struct proc *child, struct proc *parent)
 	}
 
 	child->p_pptr = parent;
+	if (set_oppid)
+		child->p_oppid = parent->p_pid;
 }

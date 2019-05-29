@@ -1,5 +1,7 @@
 /*-
- * Copyright (c) 2009-2015 Solarflare Communications Inc.
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
+ * Copyright (c) 2009-2016 Solarflare Communications Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -31,20 +33,19 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
-#include "efsys.h"
 #include "efx.h"
 #include "efx_impl.h"
 
 #if EFSYS_OPT_SIENA
 
-	__checkReturn	int
+	__checkReturn	efx_rc_t
 siena_mac_poll(
 	__in		efx_nic_t *enp,
 	__out		efx_link_mode_t *link_modep)
 {
 	efx_port_t *epp = &(enp->en_port);
 	siena_link_state_t sls;
-	int rc;
+	efx_rc_t rc;
 
 	if ((rc = siena_phy_get_link(enp, &sls)) != 0)
 		goto fail1;
@@ -57,20 +58,20 @@ siena_mac_poll(
 	return (0);
 
 fail1:
-	EFSYS_PROBE1(fail1, int, rc);
+	EFSYS_PROBE1(fail1, efx_rc_t, rc);
 
 	*link_modep = EFX_LINK_UNKNOWN;
 
 	return (rc);
 }
 
-	__checkReturn	int
+	__checkReturn	efx_rc_t
 siena_mac_up(
 	__in		efx_nic_t *enp,
 	__out		boolean_t *mac_upp)
 {
 	siena_link_state_t sls;
-	int rc;
+	efx_rc_t rc;
 
 	/*
 	 * Because Siena doesn't *require* polling, we can't rely on
@@ -84,26 +85,25 @@ siena_mac_up(
 	return (0);
 
 fail1:
-	EFSYS_PROBE1(fail1, int, rc);
+	EFSYS_PROBE1(fail1, efx_rc_t, rc);
 
 	return (rc);
 }
 
-	__checkReturn	int
+	__checkReturn	efx_rc_t
 siena_mac_reconfigure(
 	__in		efx_nic_t *enp)
 {
 	efx_port_t *epp = &(enp->en_port);
 	efx_oword_t multicast_hash[2];
 	efx_mcdi_req_t req;
-	uint8_t payload[MAX(MAX(MC_CMD_SET_MAC_IN_LEN,
-				MC_CMD_SET_MAC_OUT_LEN),
-			    MAX(MC_CMD_SET_MCAST_HASH_IN_LEN,
-				MC_CMD_SET_MCAST_HASH_OUT_LEN))];
-	unsigned int fcntl;
-	int rc;
+	EFX_MCDI_DECLARE_BUF(payload,
+		MAX(MC_CMD_SET_MAC_IN_LEN, MC_CMD_SET_MCAST_HASH_IN_LEN),
+		MAX(MC_CMD_SET_MAC_OUT_LEN, MC_CMD_SET_MCAST_HASH_OUT_LEN));
 
-	(void) memset(payload, 0, sizeof (payload));
+	unsigned int fcntl;
+	efx_rc_t rc;
+
 	req.emr_cmd = MC_CMD_SET_MAC;
 	req.emr_in_buf = payload;
 	req.emr_in_length = MC_CMD_SET_MAC_IN_LEN;
@@ -159,8 +159,17 @@ siena_mac_reconfigure(
 	 * so we always add bit 0xff to the mask (bit 0x7f in the
 	 * second octword).
 	 */
-	if (epp->ep_brdcst)
+	if (epp->ep_brdcst) {
+		/*
+		 * NOTE: due to constant folding, some of this evaluates
+		 * to null expressions, giving E_EXPR_NULL_EFFECT during
+		 * lint on Illumos.  No good way to fix this without
+		 * explicit coding the individual word/bit setting.
+		 * So just suppress lint for this one line.
+		 */
+		/* LINTED */
 		EFX_SET_OWORD_BIT(multicast_hash[1], 0x7f);
+	}
 
 	(void) memset(payload, 0, sizeof (payload));
 	req.emr_cmd = MC_CMD_SET_MCAST_HASH;
@@ -184,24 +193,24 @@ siena_mac_reconfigure(
 fail2:
 	EFSYS_PROBE(fail2);
 fail1:
-	EFSYS_PROBE1(fail1, int, rc);
+	EFSYS_PROBE1(fail1, efx_rc_t, rc);
 
 	return (rc);
 }
 
 #if EFSYS_OPT_LOOPBACK
 
-	__checkReturn	int
+	__checkReturn	efx_rc_t
 siena_mac_loopback_set(
 	__in		efx_nic_t *enp,
 	__in		efx_link_mode_t link_mode,
 	__in		efx_loopback_type_t loopback_type)
 {
 	efx_port_t *epp = &(enp->en_port);
-	efx_phy_ops_t *epop = epp->ep_epop;
+	const efx_phy_ops_t *epop = epp->ep_epop;
 	efx_loopback_type_t old_loopback_type;
 	efx_link_mode_t old_loopback_link_mode;
-	int rc;
+	efx_rc_t rc;
 
 	/* The PHY object handles this on Siena */
 	old_loopback_type = epp->ep_loopback_type;
@@ -215,7 +224,7 @@ siena_mac_loopback_set(
 	return (0);
 
 fail1:
-	EFSYS_PROBE(fail2);
+	EFSYS_PROBE1(fail1, efx_rc_t, rc);
 
 	epp->ep_loopback_type = old_loopback_type;
 	epp->ep_loopback_link_mode = old_loopback_link_mode;
@@ -227,26 +236,65 @@ fail1:
 
 #if EFSYS_OPT_MAC_STATS
 
-#define	SIENA_MAC_STAT_READ(_esmp, _field, _eqp)			\
-	EFSYS_MEM_READQ((_esmp), (_field) * sizeof (efx_qword_t), _eqp)
-
-	__checkReturn			int
-siena_mac_stats_update(
+	__checkReturn			efx_rc_t
+siena_mac_stats_get_mask(
 	__in				efx_nic_t *enp,
-	__in				efsys_mem_t *esmp,
-	__out_ecount(EFX_MAC_NSTATS)	efsys_stat_t *stat,
-	__out_opt			uint32_t *generationp)
+	__inout_bcount(mask_size)	uint32_t *maskp,
+	__in				size_t mask_size)
 {
-	efx_qword_t value;
-	efx_qword_t generation_start;
-	efx_qword_t generation_end;
+	const struct efx_mac_stats_range siena_stats[] = {
+		{ EFX_MAC_RX_OCTETS, EFX_MAC_RX_GE_15XX_PKTS },
+		/* EFX_MAC_RX_ERRORS is not supported */
+		{ EFX_MAC_RX_FCS_ERRORS, EFX_MAC_TX_EX_DEF_PKTS },
+	};
+	efx_rc_t rc;
 
 	_NOTE(ARGUNUSED(enp))
 
+	if ((rc = efx_mac_stats_mask_add_ranges(maskp, mask_size,
+	    siena_stats, EFX_ARRAY_SIZE(siena_stats))) != 0)
+		goto fail1;
+
+	return (0);
+
+fail1:
+	EFSYS_PROBE1(fail1, efx_rc_t, rc);
+
+	return (rc);
+}
+
+#define	SIENA_MAC_STAT_READ(_esmp, _field, _eqp)			\
+	EFSYS_MEM_READQ((_esmp), (_field) * sizeof (efx_qword_t), _eqp)
+
+	__checkReturn			efx_rc_t
+siena_mac_stats_update(
+	__in				efx_nic_t *enp,
+	__in				efsys_mem_t *esmp,
+	__inout_ecount(EFX_MAC_NSTATS)	efsys_stat_t *stat,
+	__inout_opt			uint32_t *generationp)
+{
+	const efx_nic_cfg_t *encp = &enp->en_nic_cfg;
+	efx_qword_t generation_start;
+	efx_qword_t generation_end;
+	efx_qword_t value;
+	efx_rc_t rc;
+
+	if (encp->enc_mac_stats_nstats < MC_CMD_MAC_NSTATS) {
+		/* MAC stats count too small */
+		rc = ENOSPC;
+		goto fail1;
+	}
+	if (EFSYS_MEM_SIZE(esmp) <
+	    (encp->enc_mac_stats_nstats * sizeof (efx_qword_t))) {
+		/* DMA buffer too small */
+		rc = ENOSPC;
+		goto fail2;
+	}
+
 	/* Read END first so we don't race with the MC */
-	EFSYS_DMA_SYNC_FOR_KERNEL(esmp, 0, EFX_MAC_STATS_SIZE);
-	SIENA_MAC_STAT_READ(esmp, MC_CMD_MAC_GENERATION_END,
-			    &generation_end);
+	EFSYS_DMA_SYNC_FOR_KERNEL(esmp, 0, EFSYS_MEM_SIZE(esmp));
+	SIENA_MAC_STAT_READ(esmp, (encp->enc_mac_stats_nstats - 1),
+	    &generation_end);
 	EFSYS_MEM_READ_BARRIER();
 
 	/* TX */
@@ -414,7 +462,7 @@ siena_mac_stats_update(
 	SIENA_MAC_STAT_READ(esmp, MC_CMD_MAC_RX_NODESC_DROPS, &value);
 	EFSYS_STAT_SET_QWORD(&(stat[EFX_MAC_RX_NODESC_DROP_CNT]), &value);
 
-	EFSYS_DMA_SYNC_FOR_KERNEL(esmp, 0, EFX_MAC_STATS_SIZE);
+	EFSYS_DMA_SYNC_FOR_KERNEL(esmp, 0, EFSYS_MEM_SIZE(esmp));
 	EFSYS_MEM_READ_BARRIER();
 	SIENA_MAC_STAT_READ(esmp, MC_CMD_MAC_GENERATION_START,
 			    &generation_start);
@@ -429,8 +477,23 @@ siena_mac_stats_update(
 		*generationp = EFX_QWORD_FIELD(generation_start, EFX_DWORD_0);
 
 	return (0);
+
+fail2:
+	EFSYS_PROBE(fail2);
+fail1:
+	EFSYS_PROBE1(fail1, efx_rc_t, rc);
+
+	return (rc);
 }
 
 #endif	/* EFSYS_OPT_MAC_STATS */
+
+	__checkReturn		efx_rc_t
+siena_mac_pdu_get(
+	__in		efx_nic_t *enp,
+	__out		size_t *pdu)
+{
+	return (ENOTSUP);
+}
 
 #endif	/* EFSYS_OPT_SIENA */

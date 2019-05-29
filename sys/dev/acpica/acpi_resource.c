@@ -45,16 +45,23 @@ __FBSDID("$FreeBSD$");
 
 #include <dev/acpica/acpivar.h>
 
+#ifdef INTRNG
+#include "acpi_bus_if.h"
+#endif
+
 /* Hooks for the ACPI CA debugging infrastructure */
 #define _COMPONENT	ACPI_BUS
 ACPI_MODULE_NAME("RESOURCE")
 
 struct lookup_irq_request {
     ACPI_RESOURCE *acpi_res;
-    struct resource *res;
+    u_int	irq;
     int		counter;
     int		rid;
     int		found;
+    int		checkrid;
+    int		trig;
+    int		pol;
 };
 
 static ACPI_STATUS
@@ -62,18 +69,22 @@ acpi_lookup_irq_handler(ACPI_RESOURCE *res, void *context)
 {
     struct lookup_irq_request *req;
     size_t len;
-    u_int irqnum, irq;
+    u_int irqnum, irq, trig, pol;
 
     switch (res->Type) {
     case ACPI_RESOURCE_TYPE_IRQ:
 	irqnum = res->Data.Irq.InterruptCount;
 	irq = res->Data.Irq.Interrupts[0];
 	len = ACPI_RS_SIZE(ACPI_RESOURCE_IRQ);
+	trig = res->Data.Irq.Triggering;
+	pol = res->Data.Irq.Polarity;
 	break;
     case ACPI_RESOURCE_TYPE_EXTENDED_IRQ:
 	irqnum = res->Data.ExtendedIrq.InterruptCount;
 	irq = res->Data.ExtendedIrq.Interrupts[0];
 	len = ACPI_RS_SIZE(ACPI_RESOURCE_EXTENDED_IRQ);
+	trig = res->Data.ExtendedIrq.Triggering;
+	pol = res->Data.ExtendedIrq.Polarity;
 	break;
     default:
 	return (AE_OK);
@@ -81,14 +92,21 @@ acpi_lookup_irq_handler(ACPI_RESOURCE *res, void *context)
     if (irqnum != 1)
 	return (AE_OK);
     req = (struct lookup_irq_request *)context;
-    if (req->counter != req->rid) {
-	req->counter++;
-	return (AE_OK);
+    if (req->checkrid) {
+	if (req->counter != req->rid) {
+	    req->counter++;
+	    return (AE_OK);
+	}
+	KASSERT(irq == req->irq, ("IRQ resources do not match"));
+    } else {
+	if (req->irq != irq)
+	    return (AE_OK);
     }
     req->found = 1;
-    KASSERT(irq == rman_get_start(req->res),
-	("IRQ resources do not match"));
-    bcopy(res, req->acpi_res, len);
+    req->pol = pol;
+    req->trig = trig;
+    if (req->acpi_res != NULL)
+	bcopy(res, req->acpi_res, len);
     return (AE_CTRL_TERMINATE);
 }
 
@@ -100,10 +118,11 @@ acpi_lookup_irq_resource(device_t dev, int rid, struct resource *res,
     ACPI_STATUS status;
 
     req.acpi_res = acpi_res;
-    req.res = res;
+    req.irq = rman_get_start(res);
     req.counter = 0;
     req.rid = rid;
     req.found = 0;
+    req.checkrid = 1;
     status = AcpiWalkResources(acpi_get_handle(dev), "_CRS",
 	acpi_lookup_irq_handler, &req);
     if (ACPI_SUCCESS(status) && req.found == 0)
@@ -151,10 +170,39 @@ acpi_config_intr(device_t dev, ACPI_RESOURCE *res)
 	INTR_POLARITY_HIGH : INTR_POLARITY_LOW);
 }
 
+#ifdef INTRNG
+int
+acpi_map_intr(device_t dev, u_int irq, ACPI_HANDLE handle)
+{
+    struct lookup_irq_request req;
+    int trig, pol;
+
+    trig = ACPI_LEVEL_SENSITIVE;
+    pol = ACPI_ACTIVE_HIGH;
+    if (handle != NULL) {
+	req.found = 0;
+	req.acpi_res = NULL;
+	req.irq = irq;
+	req.counter = 0;
+	req.rid = 0;
+	req.checkrid = 0;
+	AcpiWalkResources(handle, "_CRS", acpi_lookup_irq_handler, &req);
+	if (req.found != 0) {
+	    trig = req.trig;
+	    pol = req.pol;
+	}
+    }
+    return ACPI_BUS_MAP_INTR(device_get_parent(dev), dev, irq,
+	(trig == ACPI_EDGE_SENSITIVE) ?  INTR_TRIGGER_EDGE : INTR_TRIGGER_LEVEL,
+	(pol == ACPI_ACTIVE_HIGH) ?  INTR_POLARITY_HIGH : INTR_POLARITY_LOW);
+}
+#endif
+
 struct acpi_resource_context {
     struct acpi_parse_resource_set *set;
     device_t	dev;
     void	*context;
+    bool	ignore_producer_flag;
 };
 
 #ifdef ACPI_DEBUG_OUTPUT
@@ -338,7 +386,8 @@ acpi_parse_resource(ACPI_RESOURCE *res, void *context)
 	}
 	if (length <= 0)
 	    break;
-	if (res->Data.Address.ProducerConsumer != ACPI_CONSUMER) {
+	if (!arc->ignore_producer_flag &&
+	    res->Data.Address.ProducerConsumer != ACPI_CONSUMER) {
 	    ACPI_DEBUG_PRINT((ACPI_DB_RESOURCES,
 		"ignored %s %s producer\n", name,
 		acpi_address_range_name(res->Data.Address.ResourceType)));
@@ -426,6 +475,12 @@ acpi_parse_resources(device_t dev, ACPI_HANDLE handle,
     set->set_init(dev, arg, &arc.context);
     arc.set = set;
     arc.dev = dev;
+    arc.ignore_producer_flag = false;
+
+    /* UARTs on ThunderX2 set ResourceProducer on memory resources. */
+    if (acpi_MatchHid(handle, "ARMH0011") != ACPI_MATCHHID_NOMATCH)
+	    arc.ignore_producer_flag = true;
+
     status = AcpiWalkResources(handle, "_CRS", acpi_parse_resource, &arc);
     if (ACPI_FAILURE(status) && status != AE_NOT_FOUND) {
 	printf("can't fetch resources for %s - %s\n",
@@ -525,6 +580,24 @@ acpi_res_set_iorange(device_t dev, void *context, uint64_t low,
 
     if (cp == NULL)
 	return;
+
+    /*
+     * XXX: Some BIOSes contain buggy _CRS entries where fixed I/O
+     * ranges have the maximum base address (_MAX) to the end of the
+     * I/O range instead of the start.  These are then treated as a
+     * relocatable I/O range rather than a fixed I/O resource.  As a
+     * workaround, treat I/O resources encoded this way as fixed I/O
+     * ports.
+     */
+    if (high == (low + length)) {
+	if (bootverbose)
+	    device_printf(dev,
+		"_CRS has fixed I/O port range defined as relocatable\n");
+
+	bus_set_resource(dev, SYS_RES_IOPORT, cp->ar_nio++, low, length);
+	return;
+    }
+
     device_printf(dev, "I/O range not supported\n");
 }
 
@@ -536,7 +609,6 @@ acpi_res_set_memory(device_t dev, void *context, uint64_t base,
 
     if (cp == NULL)
 	return;
-
     bus_set_resource(dev, SYS_RES_MEMORY, cp->ar_nmem++, base, length);
 }
 
@@ -556,6 +628,7 @@ acpi_res_set_irq(device_t dev, void *context, uint8_t *irq, int count,
     int trig, int pol)
 {
     struct acpi_res_context	*cp = (struct acpi_res_context *)context;
+    rman_res_t intr;
 
     if (cp == NULL || irq == NULL)
 	return;
@@ -564,7 +637,8 @@ acpi_res_set_irq(device_t dev, void *context, uint8_t *irq, int count,
     if (count != 1)
 	return;
 
-    bus_set_resource(dev, SYS_RES_IRQ, cp->ar_nirq++, *irq, 1);
+    intr = *irq;
+    bus_set_resource(dev, SYS_RES_IRQ, cp->ar_nirq++, intr, 1);
 }
 
 static void
@@ -572,6 +646,7 @@ acpi_res_set_ext_irq(device_t dev, void *context, uint32_t *irq, int count,
     int trig, int pol)
 {
     struct acpi_res_context	*cp = (struct acpi_res_context *)context;
+    rman_res_t intr;
 
     if (cp == NULL || irq == NULL)
 	return;
@@ -580,7 +655,8 @@ acpi_res_set_ext_irq(device_t dev, void *context, uint32_t *irq, int count,
     if (count != 1)
 	return;
 
-    bus_set_resource(dev, SYS_RES_IRQ, cp->ar_nirq++, *irq, 1);
+    intr = *irq;
+    bus_set_resource(dev, SYS_RES_IRQ, cp->ar_nirq++, intr, 1);
 }
 
 static void
@@ -654,14 +730,17 @@ static int
 acpi_sysres_probe(device_t dev)
 {
     static char *sysres_ids[] = { "PNP0C01", "PNP0C02", NULL };
+    int rv;
 
-    if (acpi_disabled("sysresource") ||
-	ACPI_ID_PROBE(device_get_parent(dev), dev, sysres_ids) == NULL)
+    if (acpi_disabled("sysresource"))
 	return (ENXIO);
-
+    rv = ACPI_ID_PROBE(device_get_parent(dev), dev, sysres_ids, NULL);
+    if (rv > 0){
+	return (rv);
+    }
     device_set_desc(dev, "System Resource");
     device_quiet(dev);
-    return (BUS_PROBE_DEFAULT);
+    return (rv);
 }
 
 static int
@@ -671,7 +750,7 @@ acpi_sysres_attach(device_t dev)
     struct resource_list_entry *bus_rle, *dev_rle;
     struct resource_list *bus_rl, *dev_rl;
     int done, type;
-    u_long start, end, count;
+    rman_res_t start, end, count;
 
     /*
      * Loop through all current resources to see if the new one overlaps

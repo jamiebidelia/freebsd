@@ -1,5 +1,7 @@
 /*-
- * Copyright (c) 2010-2015 Solarflare Communications Inc.
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
+ * Copyright (c) 2010-2016 Solarflare Communications Inc.
  * All rights reserved.
  *
  * This software was developed in part by Philip Paeps under contract for
@@ -43,6 +45,15 @@ __FBSDID("$FreeBSD$");
 
 #include "sfxge.h"
 
+#define	SFXGE_PARAM_STATS_UPDATE_PERIOD_MS \
+	SFXGE_PARAM(stats_update_period_ms)
+static int sfxge_stats_update_period_ms = SFXGE_STATS_UPDATE_PERIOD_MS;
+TUNABLE_INT(SFXGE_PARAM_STATS_UPDATE_PERIOD_MS,
+	    &sfxge_stats_update_period_ms);
+SYSCTL_INT(_hw_sfxge, OID_AUTO, stats_update_period_ms, CTLFLAG_RDTUN,
+	   &sfxge_stats_update_period_ms, 0,
+	   "netstat interface statistics update period in milliseconds");
+
 static int sfxge_phy_cap_mask(struct sfxge_softc *, int, uint32_t *);
 
 static int
@@ -51,6 +62,7 @@ sfxge_mac_stat_update(struct sfxge_softc *sc)
 	struct sfxge_port *port = &sc->port;
 	efsys_mem_t *esmp = &(port->mac_stats.dma_buf);
 	clock_t now;
+	unsigned int min_ticks;
 	unsigned int count;
 	int rc;
 
@@ -61,8 +73,10 @@ sfxge_mac_stat_update(struct sfxge_softc *sc)
 		goto out;
 	}
 
+	min_ticks = (unsigned int)hz * port->stats_update_period_ms / 1000;
+
 	now = ticks;
-	if (now - port->mac_stats.update_time < hz) {
+	if ((unsigned int)(now - port->mac_stats.update_time) < min_ticks) {
 		rc = 0;
 		goto out;
 	}
@@ -294,7 +308,10 @@ static const uint64_t sfxge_link_baudrate[EFX_LINK_NMODES] = {
 	[EFX_LINK_1000HDX]	= IF_Gbps(1),
 	[EFX_LINK_1000FDX]	= IF_Gbps(1),
 	[EFX_LINK_10000FDX]	= IF_Gbps(10),
+	[EFX_LINK_25000FDX]	= IF_Gbps(25),
 	[EFX_LINK_40000FDX]	= IF_Gbps(40),
+	[EFX_LINK_50000FDX]	= IF_Gbps(50),
+	[EFX_LINK_100000FDX]	= IF_Gbps(100),
 };
 
 void
@@ -311,8 +328,7 @@ sfxge_mac_link_update(struct sfxge_softc *sc, efx_link_mode_t mode)
 	port->link_mode = mode;
 
 	/* Push link state update to the OS */
-	link_state = (port->link_mode != EFX_LINK_DOWN ?
-		      LINK_STATE_UP : LINK_STATE_DOWN);
+	link_state = (SFXGE_LINK_UP(sc) ? LINK_STATE_UP : LINK_STATE_DOWN);
 	sc->ifnet->if_baudrate = sfxge_link_baudrate[port->link_mode];
 	if_link_state_change(sc->ifnet, link_state);
 }
@@ -356,7 +372,7 @@ sfxge_mac_multicast_list_set(struct sfxge_softc *sc)
 
 	port->mcast_count = 0;
 	if_maddr_rlock(ifp);
-	TAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
+	CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
 		if (ifma->ifma_addr->sa_family == AF_LINK) {
 			if (port->mcast_count == EFX_MAC_MULTICAST_LIST_MAX) {
 				device_printf(sc->dev,
@@ -511,9 +527,10 @@ sfxge_port_start(struct sfxge_softc *sc)
 
 	sfxge_mac_filter_set_locked(sc);
 
-	/* Update MAC stats by DMA every second */
+	/* Update MAC stats by DMA every period */
 	if ((rc = efx_mac_stats_periodic(enp, &port->mac_stats.dma_buf,
-					 1000, B_FALSE)) != 0)
+					 port->stats_update_period_ms,
+					 B_FALSE)) != 0)
 		goto fail6;
 
 	if ((rc = efx_mac_drain(enp, B_FALSE)) != 0)
@@ -570,7 +587,7 @@ sfxge_phy_stat_update(struct sfxge_softc *sc)
 	}
 
 	now = ticks;
-	if (now - port->phy_stats.update_time < hz) {
+	if ((unsigned int)(now - port->phy_stats.update_time) < (unsigned int)hz) {
 		rc = 0;
 		goto out;
 	}
@@ -670,6 +687,68 @@ sfxge_port_fini(struct sfxge_softc *sc)
 	port->sc = NULL;
 }
 
+static uint16_t
+sfxge_port_stats_update_period_ms(struct sfxge_softc *sc)
+{
+	int period_ms = sfxge_stats_update_period_ms;
+
+	if (period_ms < 0) {
+		device_printf(sc->dev,
+			"treat negative stats update period %d as 0 (disable)\n",
+			 period_ms);
+		period_ms = 0;
+	} else if (period_ms > UINT16_MAX) {
+		device_printf(sc->dev,
+			"treat too big stats update period %d as %u\n",
+			period_ms, UINT16_MAX);
+		period_ms = UINT16_MAX;
+	}
+
+	return period_ms;
+}
+
+static int
+sfxge_port_stats_update_period_ms_handler(SYSCTL_HANDLER_ARGS)
+{
+	struct sfxge_softc *sc;
+	struct sfxge_port *port;
+	unsigned int period_ms;
+	int error;
+
+	sc = arg1;
+	port = &sc->port;
+
+	if (req->newptr != NULL) {
+		error = SYSCTL_IN(req, &period_ms, sizeof(period_ms));
+		if (error != 0)
+			return (error);
+
+		if (period_ms > UINT16_MAX)
+			return (EINVAL);
+
+		SFXGE_PORT_LOCK(port);
+
+		if (port->stats_update_period_ms != period_ms) {
+			if (port->init_state == SFXGE_PORT_STARTED)
+				error = efx_mac_stats_periodic(sc->enp,
+						&port->mac_stats.dma_buf,
+						period_ms, B_FALSE);
+			if (error == 0)
+				port->stats_update_period_ms = period_ms;
+		}
+
+		SFXGE_PORT_UNLOCK(port);
+	} else {
+		SFXGE_PORT_LOCK(port);
+		period_ms = port->stats_update_period_ms;
+		SFXGE_PORT_UNLOCK(port);
+
+		error = SYSCTL_OUT(req, &period_ms, sizeof(period_ms));
+	}
+
+	return (error);
+}
+
 int
 sfxge_port_init(struct sfxge_softc *sc)
 {
@@ -677,6 +756,8 @@ sfxge_port_init(struct sfxge_softc *sc)
 	struct sysctl_ctx_list *sysctl_ctx;
 	struct sysctl_oid *sysctl_tree;
 	efsys_mem_t *mac_stats_buf, *phy_stats_buf;
+	uint32_t mac_nstats;
+	size_t mac_stats_size;
 	int rc;
 
 	port = &sc->port;
@@ -716,9 +797,17 @@ sfxge_port_init(struct sfxge_softc *sc)
 	DBGPRINT(sc->dev, "alloc MAC stats");
 	port->mac_stats.decode_buf = malloc(EFX_MAC_NSTATS * sizeof(uint64_t),
 					    M_SFXGE, M_WAITOK | M_ZERO);
-	if ((rc = sfxge_dma_alloc(sc, EFX_MAC_STATS_SIZE, mac_stats_buf)) != 0)
+	mac_nstats = efx_nic_cfg_get(sc->enp)->enc_mac_stats_nstats;
+	mac_stats_size = P2ROUNDUP(mac_nstats * sizeof(uint64_t), EFX_BUF_SIZE);
+	if ((rc = sfxge_dma_alloc(sc, mac_stats_size, mac_stats_buf)) != 0)
 		goto fail2;
+	port->stats_update_period_ms = sfxge_port_stats_update_period_ms(sc);
 	sfxge_mac_stat_init(sc);
+
+	SYSCTL_ADD_PROC(sysctl_ctx, SYSCTL_CHILDREN(sysctl_tree), OID_AUTO,
+	    "stats_update_period_ms", CTLTYPE_UINT|CTLFLAG_RW, sc, 0,
+	    sfxge_port_stats_update_period_ms_handler, "IU",
+	    "interface statistics refresh period");
 
 	port->init_state = SFXGE_PORT_INITIALIZED;
 
@@ -750,12 +839,16 @@ static const int sfxge_link_mode[EFX_PHY_MEDIA_NTYPES][EFX_LINK_NMODES] = {
 	[EFX_PHY_MEDIA_QSFP_PLUS] = {
 		/* Don't know the module type, but assume SR for now. */
 		[EFX_LINK_10000FDX]	= IFM_ETHER | IFM_FDX | IFM_10G_SR,
+		[EFX_LINK_25000FDX]	= IFM_ETHER | IFM_FDX | IFM_25G_SR,
 		[EFX_LINK_40000FDX]	= IFM_ETHER | IFM_FDX | IFM_40G_CR4,
+		[EFX_LINK_50000FDX]	= IFM_ETHER | IFM_FDX | IFM_50G_SR,
+		[EFX_LINK_100000FDX]	= IFM_ETHER | IFM_FDX | IFM_100G_SR2,
 	},
 	[EFX_PHY_MEDIA_SFP_PLUS] = {
 		/* Don't know the module type, but assume SX/SR for now. */
 		[EFX_LINK_1000FDX]	= IFM_ETHER | IFM_FDX | IFM_1000_SX,
 		[EFX_LINK_10000FDX]	= IFM_ETHER | IFM_FDX | IFM_10G_SR,
+		[EFX_LINK_25000FDX]	= IFM_ETHER | IFM_FDX | IFM_25G_SR,
 	},
 	[EFX_PHY_MEDIA_BASE_T] = {
 		[EFX_LINK_10HDX]	= IFM_ETHER | IFM_HDX | IFM_10_T,
@@ -811,10 +904,15 @@ sfxge_link_mode_to_phy_cap(efx_link_mode_t mode)
 		return (EFX_PHY_CAP_1000FDX);
 	case EFX_LINK_10000FDX:
 		return (EFX_PHY_CAP_10000FDX);
+	case EFX_LINK_25000FDX:
+		return (EFX_PHY_CAP_25000FDX);
 	case EFX_LINK_40000FDX:
 		return (EFX_PHY_CAP_40000FDX);
+	case EFX_LINK_50000FDX:
+		return (EFX_PHY_CAP_50000FDX);
+	case EFX_LINK_100000FDX:
+		return (EFX_PHY_CAP_100000FDX);
 	default:
-		EFSYS_ASSERT(B_FALSE);
 		return (EFX_PHY_CAP_INVALID);
 	}
 }

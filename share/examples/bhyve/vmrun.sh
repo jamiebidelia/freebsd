@@ -1,5 +1,7 @@
 #!/bin/sh
 #
+# SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+#
 # Copyright (c) 2013 NetApp, Inc.
 # All rights reserved.
 #
@@ -36,8 +38,14 @@ DEFAULT_CPUS=2
 DEFAULT_TAPDEV=tap0
 DEFAULT_CONSOLE=stdio
 
+DEFAULT_NIC=virtio-net
+DEFAULT_DISK=virtio-blk
 DEFAULT_VIRTIO_DISK="./diskdev"
 DEFAULT_ISOFILE="./release.iso"
+
+DEFAULT_VNCHOST="127.0.0.1"
+DEFAULT_VNCPORT=5900
+DEFAULT_VNCSIZE="w=1024,h=768"
 
 errmsg() {
 	echo "*** $1"
@@ -46,24 +54,47 @@ errmsg() {
 usage() {
 	local msg=$1
 
-	echo "Usage: vmrun.sh [-ahi] [-c <CPUs>] [-C <console>] [-d <disk file>]"
-	echo "                [-e <name=value>] [-g <gdbport> ] [-H <directory>]"
-	echo "                [-I <location of installation iso>] [-m <memsize>]"
-	echo "                [-t <tapdev>] <vmname>"
+	echo "Usage: vmrun.sh [-aAEhiTv] [-c <CPUs>] [-C <console>]" \
+	    "[-d <disk file>]"
+	echo "                [-e <name=value>] [-f <path of firmware>]" \
+	    "[-F <size>]"
+	echo "                [-g <gdbport> ] [-H <directory>]"
+	echo "                [-I <location of installation iso>] [-l <loader>]"
+	echo "                [-L <VNC IP for UEFI framebuffer>]"
+	echo "                [-m <memsize>]" \
+	    "[-n <network adapter emulation type>]"
+	echo "                [-P <port>] [-t <tapdev>] <vmname>"
 	echo ""
 	echo "       -h: display this help message"
 	echo "       -a: force memory mapped local APIC access"
-	echo "       -c: number of virtual cpus (default is ${DEFAULT_CPUS})"
-	echo "       -C: console device (default is ${DEFAULT_CONSOLE})"
-	echo "       -d: virtio diskdev file (default is ${DEFAULT_VIRTIO_DISK})"
+	echo "       -A: use AHCI disk emulation instead of ${DEFAULT_DISK}"
+	echo "       -c: number of virtual cpus (default: ${DEFAULT_CPUS})"
+	echo "       -C: console device (default: ${DEFAULT_CONSOLE})"
+	echo "       -d: virtio diskdev file (default: ${DEFAULT_VIRTIO_DISK})"
 	echo "       -e: set FreeBSD loader environment variable"
+	echo "       -E: Use UEFI mode"
+	echo "       -f: Use a specific UEFI firmware"
+	echo "       -F: Use a custom UEFI GOP framebuffer size" \
+	    "(default: ${DEFAULT_VNCSIZE}"
 	echo "       -g: listen for connection from kgdb at <gdbport>"
 	echo "       -H: host filesystem to export to the loader"
 	echo "       -i: force boot of the Installation CDROM image"
-	echo "       -I: Installation CDROM image location (default is ${DEFAULT_ISOFILE})"
-	echo "       -m: memory size (default is ${DEFAULT_MEMSIZE})"
-	echo "       -p: pass-through a host PCI device at bus/slot/func (e.g. 10/0/0)"
-	echo "       -t: tap device for virtio-net (default is $DEFAULT_TAPDEV)"
+	echo "       -I: Installation CDROM image location" \
+	    "(default: ${DEFAULT_ISOFILE})"
+	echo "       -l: the OS loader to use (default: /boot/userboot.so)"
+	echo "       -L: IP address for UEFI GOP VNC server" \
+	    "(default: ${DEFAULT_VNCHOST}"
+	echo "       -m: memory size (default: ${DEFAULT_MEMSIZE})"
+	echo "       -n: network adapter emulation type" \
+	    "(default: ${DEFAULT_NIC})"
+	echo "       -p: pass-through a host PCI device at bus/slot/func" \
+	    "(e.g. 10/0/0)"
+	echo "       -P: UEFI GOP VNC port (default: ${DEFAULT_VNCPORT})"
+	echo "       -t: tap device for virtio-net (default: $DEFAULT_TAPDEV)"
+	echo "       -T: Enable tablet device (for UEFI GOP)"
+	echo "       -u: RTC keeps UTC time"
+	echo "       -v: Wait for VNC client connection before booting VM"
+	echo "       -w: ignore unimplemented MSRs"
 	echo ""
 	[ -n "$msg" ] && errmsg "$msg"
 	exit 1
@@ -85,17 +116,31 @@ isofile=${DEFAULT_ISOFILE}
 memsize=${DEFAULT_MEMSIZE}
 console=${DEFAULT_CONSOLE}
 cpus=${DEFAULT_CPUS}
+nic=${DEFAULT_NIC}
 tap_total=0
 disk_total=0
-apic_opt=""
+disk_emulation=${DEFAULT_DISK}
 gdbport=0
 loader_opt=""
+bhyverun_opt="-H -A -P"
 pass_total=0
 
-while getopts ac:C:d:e:g:hH:iI:m:p:t: c ; do
+# EFI-specific options
+efi_mode=0
+efi_firmware="/usr/local/share/uefi-firmware/BHYVE_UEFI.fd"
+vncwait=""
+vnchost=${DEFAULT_VNCHOST}
+vncport=${DEFAULT_VNCPORT}
+vncsize=${DEFAULT_VNCSIZE}
+tablet=""
+
+while getopts aAc:C:d:e:Ef:F:g:hH:iI:l:L:m:n:p:P:t:Tuvw c ; do
 	case $c in
 	a)
-		apic_opt="-a"
+		bhyverun_opt="${bhyverun_opt} -a"
+		;;
+	A)
+		disk_emulation="ahci-hd"
 		;;
 	c)
 		cpus=${OPTARG}
@@ -104,11 +149,23 @@ while getopts ac:C:d:e:g:hH:iI:m:p:t: c ; do
 		console=${OPTARG}
 		;;
 	d)
-		eval "disk_dev${disk_total}=\"${OPTARG}\""
+		disk_dev=${OPTARG%%,*}
+		disk_opts=${OPTARG#${disk_dev}}
+		eval "disk_dev${disk_total}=\"${disk_dev}\""
+		eval "disk_opts${disk_total}=\"${disk_opts}\""
 		disk_total=$(($disk_total + 1))
 		;;
 	e)
 		loader_opt="${loader_opt} -e ${OPTARG}"
+		;;
+	E)
+		efi_mode=1
+		;;
+	f)
+		efi_firmware="${OPTARG}"
+		;;
+	F)
+		vncsize="${OPTARG}"
 		;;
 	g)	
 		gdbport=${OPTARG}
@@ -122,16 +179,40 @@ while getopts ac:C:d:e:g:hH:iI:m:p:t: c ; do
 	I)
 		isofile=${OPTARG}
 		;;
+	l)
+		loader_opt="${loader_opt} -l ${OPTARG}"
+		;;
+	L)
+		vnchost="${OPTARG}"
+		;;
 	m)
 		memsize=${OPTARG}
+		;;
+	n)
+		nic=${OPTARG}
 		;;
 	p)
 		eval "pass_dev${pass_total}=\"${OPTARG}\""
 		pass_total=$(($pass_total + 1))
 		;;
+	P)
+		vncport="${OPTARG}"
+		;;
 	t)
 		eval "tap_dev${tap_total}=\"${OPTARG}\""
 		tap_total=$(($tap_total + 1))
+		;;
+	T)
+		tablet="-s 30,xhci,tablet"
+		;;
+	u)	
+		bhyverun_opt="${bhyverun_opt} -u"
+		;;
+	v)
+		vncwait=",wait"
+		;;
+	w)
+		bhyverun_opt="${bhyverun_opt} -w"
 		;;
 	*)
 		usage
@@ -160,6 +241,20 @@ if [ -n "${host_base}" ]; then
 	loader_opt="${loader_opt} -h ${host_base}"
 fi
 
+# If PCI passthru devices are configured then guest memory must be wired
+if [ ${pass_total} -gt 0 ]; then
+	loader_opt="${loader_opt} -S"
+	bhyverun_opt="${bhyverun_opt} -S"
+fi
+
+if [ ${efi_mode} -gt 0 ]; then
+	if [ ! -f ${efi_firmware} ]; then
+		echo "Error: EFI Firmware ${efi_firmware} doesn't exist." \
+		    "Try: pkg install uefi-edk2-bhyve"
+		exit 1
+	fi
+fi
+
 make_and_check_diskdev()
 {
     local virtio_diskdev="$1"
@@ -183,16 +278,17 @@ make_and_check_diskdev()
 
 echo "Launching virtual machine \"$vmname\" ..."
 
-virtio_diskdev="$disk_dev0"
+first_diskdev="$disk_dev0"
 
 ${BHYVECTL} --vm=${vmname} --destroy > /dev/null 2>&1
 
 while [ 1 ]; do
 
-	file -s ${virtio_diskdev} | grep "boot sector" > /dev/null
+	file -s ${first_diskdev} | grep "boot sector" > /dev/null
 	rc=$?
 	if [ $rc -ne 0 ]; then
-		file -s ${virtio_diskdev} | grep ": Unix Fast File sys" > /dev/null
+		file -s ${first_diskdev} | \
+		    grep ": Unix Fast File sys" > /dev/null
 		rc=$?
 	fi
 	if [ $rc -ne 0 ]; then
@@ -207,18 +303,28 @@ while [ 1 ]; do
 			echo    "is not readable"
 			exit 1
 		fi
-		BOOTDISK=${isofile}
-		installer_opt="-s 31:0,ahci-cd,${BOOTDISK}"
+		BOOTDISKS="-d ${isofile}"
+		installer_opt="-s 31:0,ahci-cd,${isofile}"
 	else
-		BOOTDISK=${virtio_diskdev}
+		BOOTDISKS=""
+		i=0
+		while [ $i -lt $disk_total ] ; do
+			eval "disk=\$disk_dev${i}"
+			if [ -r ${disk} ] ; then
+				BOOTDISKS="$BOOTDISKS -d ${disk} "
+			fi
+			i=$(($i + 1))
+		done
 		installer_opt=""
 	fi
 
-	${LOADER} -c ${console} -m ${memsize} -d ${BOOTDISK} ${loader_opt} \
-		${vmname}
-	bhyve_exit=$?
-	if [ $bhyve_exit -ne 0 ]; then
-		break
+	if [ ${efi_mode} -eq 0 ]; then
+		${LOADER} -c ${console} -m ${memsize} ${BOOTDISKS} \
+		    ${loader_opt} ${vmname}
+		bhyve_exit=$?
+		if [ $bhyve_exit -ne 0 ]; then
+			break
+		fi
 	fi
 
 	#
@@ -229,7 +335,7 @@ while [ 1 ]; do
 	i=0
 	while [ $i -lt $tap_total ] ; do
 	    eval "tapname=\$tap_dev${i}"
-	    devargs="$devargs -s $nextslot:0,virtio-net,${tapname} "
+	    devargs="$devargs -s $nextslot:0,${nic},${tapname} "
 	    nextslot=$(($nextslot + 1))
 	    i=$(($i + 1))
 	done
@@ -237,8 +343,9 @@ while [ 1 ]; do
 	i=0
 	while [ $i -lt $disk_total ] ; do
 	    eval "disk=\$disk_dev${i}"
+	    eval "opts=\$disk_opts${i}"
 	    make_and_check_diskdev "${disk}"
-	    devargs="$devargs -s $nextslot:0,virtio-blk,${disk} "
+	    devargs="$devargs -s $nextslot:0,$disk_emulation,${disk}${opts} "
 	    nextslot=$(($nextslot + 1))
 	    i=$(($i + 1))
 	done
@@ -251,10 +358,19 @@ while [ 1 ]; do
 	    i=$(($i + 1))
         done
 
-	${FBSDRUN} -c ${cpus} -m ${memsize} ${apic_opt} -A -H -P	\
+	efiargs=""
+	if [ ${efi_mode} -gt 0 ]; then
+		efiargs="-s 29,fbuf,tcp=${vnchost}:${vncport},"
+		efiargs="${efiargs}${vncsize}${vncwait}"
+		efiargs="${efiargs} -l bootrom,${efi_firmware}"
+		efiargs="${efiargs} ${tablet}"
+	fi
+
+	${FBSDRUN} -c ${cpus} -m ${memsize} ${bhyverun_opt}		\
 		-g ${gdbport}						\
 		-s 0:0,hostbridge					\
 		-s 1:0,lpc						\
+		${efiargs}						\
 		${devargs}						\
 		-l com1,${console}					\
 		${installer_opt}					\

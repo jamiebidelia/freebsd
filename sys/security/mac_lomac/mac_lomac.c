@@ -1139,7 +1139,7 @@ lomac_ifnet_check_relabel(struct ucred *cred, struct ifnet *ifp,
 		 *
 		 * XXXRW: This is also redundant to a higher layer check.
 		 */
-		error = priv_check_cred(cred, PRIV_NET_SETIFMAC, 0);
+		error = priv_check_cred(cred, PRIV_NET_SETIFMAC);
 		if (error)
 			return (EPERM);
 
@@ -1472,7 +1472,7 @@ lomac_netinet_firewall_send(struct mbuf *m, struct label *mlabel)
 
 	dest = SLOT(mlabel);
 
-	/* XXX: where is the label for the firewall really comming from? */
+	/* XXX: where is the label for the firewall really coming from? */
 	lomac_set_single(dest, MAC_LOMAC_TYPE_EQUAL, 0);
 }
 

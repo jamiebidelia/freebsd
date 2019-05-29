@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-NetBSD
+ *
  * Copyright (c) 2001 Jake Burkholder.
  * Copyright (c) 2000 Eduardo Horvath.
  * Copyright (c) 1999 The NetBSD Foundation, Inc.
@@ -57,9 +59,6 @@ __FBSDID("$FreeBSD$");
 static struct sysentvec elf64_freebsd_sysvec = {
 	.sv_size	= SYS_MAXSYSCALL,
 	.sv_table	= sysent,
-	.sv_mask	= 0,
-	.sv_sigsize	= 0,
-	.sv_sigtbl	= NULL,
 	.sv_errsize	= 0,
 	.sv_errtbl	= NULL,
 	.sv_transtrap	= NULL,
@@ -67,12 +66,10 @@ static struct sysentvec elf64_freebsd_sysvec = {
 	.sv_sendsig	= sendsig,
 	.sv_sigcode	= NULL,
 	.sv_szsigcode	= NULL,
-	.sv_prepsyscall	= NULL,
 	.sv_name	= "FreeBSD ELF64",
 	.sv_coredump	= __elfN(coredump),
 	.sv_imgact_try	= NULL,
 	.sv_minsigstksz	= MINSIGSTKSZ,
-	.sv_pagesize	= PAGE_SIZE,
 	.sv_minuser	= VM_MIN_ADDRESS,
 	.sv_maxuser	= VM_MAXUSER_ADDRESS,
 	.sv_usrstack	= USRSTACK,
@@ -82,12 +79,13 @@ static struct sysentvec elf64_freebsd_sysvec = {
 	.sv_setregs	= exec_setregs,
 	.sv_fixlimit	= NULL,
 	.sv_maxssiz	= NULL,
-	.sv_flags	= SV_ABI_FREEBSD | SV_LP64,
+	.sv_flags	= SV_ABI_FREEBSD | SV_LP64 | SV_ASLR,
 	.sv_set_syscall_retval = cpu_set_syscall_retval,
 	.sv_fetch_syscall_args = cpu_fetch_syscall_args,
 	.sv_syscallnames = syscallnames,
 	.sv_schedtail	= NULL,
 	.sv_thread_detach = NULL,
+	.sv_trap	= NULL,
 };
 
 static Elf64_Brandinfo freebsd_brand_info = {
@@ -312,6 +310,13 @@ static const long reloc_target_bitmask[] = {
 };
 #define	RELOC_VALUE_BITMASK(t)	(reloc_target_bitmask[t])
 
+bool
+elf_is_ifunc_reloc(Elf_Size r_info __unused)
+{
+
+	return (false);
+}
+
 int
 elf_reloc_local(linker_file_t lf, Elf_Addr relocbase, const void *data,
     int type, elf_lookup_fn lookup __unused)
@@ -344,6 +349,7 @@ elf_reloc(linker_file_t lf, Elf_Addr relocbase, const void *data, int type,
 	Elf_Addr value;
 	Elf_Addr mask;
 	Elf_Addr addr;
+	int error;
 
 	if (type != ELF_RELOC_RELA)
 		return (-1);
@@ -358,8 +364,7 @@ elf_reloc(linker_file_t lf, Elf_Addr relocbase, const void *data, int type,
 		return (0);
 
 	if (rtype == R_SPARC_JMP_SLOT || rtype == R_SPARC_COPY ||
-	    rtype >= sizeof(reloc_target_bitmask) /
-	    sizeof(*reloc_target_bitmask)) {
+	    rtype >= nitems(reloc_target_bitmask)) {
 		printf("kldload: unexpected relocation type %ld\n", rtype);
 		return (-1);
 	}
@@ -372,8 +377,8 @@ elf_reloc(linker_file_t lf, Elf_Addr relocbase, const void *data, int type,
 	value = rela->r_addend;
 
 	if (RELOC_RESOLVE_SYMBOL(rtype)) {
-		addr = lookup(lf, symidx, 1);
-		if (addr == 0)
+		error = lookup(lf, symidx, 1, &addr);
+		if (error != 0)
 			return (-1);
 		value += addr;
 		if (RELOC_BARE_SYMBOL(rtype))

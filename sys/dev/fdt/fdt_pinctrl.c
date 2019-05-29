@@ -46,7 +46,7 @@ fdt_pinctrl_configure(device_t client, u_int index)
 	char name[16];
 
 	snprintf(name, sizeof(name), "pinctrl-%u", index);
-	nconfigs = OF_getencprop_alloc(ofw_bus_get_node(client), name,
+	nconfigs = OF_getencprop_alloc_multi(ofw_bus_get_node(client), name,
 	    sizeof(*configs), (void **)&configs);
 	if (nconfigs < 0)
 		return (ENOENT);
@@ -56,7 +56,7 @@ fdt_pinctrl_configure(device_t client, u_int index)
 		if ((pinctrl = OF_device_from_xref(configs[i])) != NULL)
 			FDT_PINCTRL_CONFIGURE(pinctrl, configs[i]);
 	}
-	free(configs, M_OFWPROP);
+	OF_prop_free(configs);
 	return (0);
 }
 
@@ -67,7 +67,7 @@ fdt_pinctrl_configure_by_name(device_t client, const char * name)
 	int i, offset, nameslen;
 
 	nameslen = OF_getprop_alloc(ofw_bus_get_node(client), "pinctrl-names",
-	    sizeof(*names), (void **)&names);
+	    (void **)&names);
 	if (nameslen <= 0)
 		return (ENOENT);
 	for (i = 0, offset = 0; offset < nameslen; i++) {
@@ -75,7 +75,7 @@ fdt_pinctrl_configure_by_name(device_t client, const char * name)
 			break;
 		offset += strlen(&names[offset]) + 1;
 	}
-	free(names, M_OFWPROP);
+	OF_prop_free(names);
 	if (offset < nameslen)
 		return (fdt_pinctrl_configure(client, i));
 	else
@@ -106,10 +106,15 @@ int
 fdt_pinctrl_register(device_t pinctrl, const char *pinprop)
 {
 	phandle_t node;
+	int ret;
 
+	TSENTER();
 	node = ofw_bus_get_node(pinctrl);
 	OF_device_register_xref(OF_xref_from_node(node), pinctrl);
-	return (pinctrl_register_children(pinctrl, node, pinprop));
+	ret = pinctrl_register_children(pinctrl, node, pinprop);
+	TSEXIT();
+
+	return (ret);
 }
 
 static int
@@ -118,11 +123,13 @@ pinctrl_configure_children(device_t pinctrl, phandle_t parent)
 	phandle_t node, *configs;
 	int i, nconfigs;
 
+	TSENTER();
+
 	for (node = OF_child(parent); node != 0; node = OF_peer(node)) {
-		if (!fdt_is_enabled(node))
+		if (!ofw_bus_node_status_okay(node))
 			continue;
 		pinctrl_configure_children(pinctrl, node);
-		nconfigs = OF_getencprop_alloc(node, "pinctrl-0",
+		nconfigs = OF_getencprop_alloc_multi(node, "pinctrl-0",
 		    sizeof(*configs), (void **)&configs);
 		if (nconfigs <= 0)
 			continue;
@@ -136,8 +143,9 @@ pinctrl_configure_children(device_t pinctrl, phandle_t parent)
 			if (OF_device_from_xref(configs[i]) == pinctrl)
 				FDT_PINCTRL_CONFIGURE(pinctrl, configs[i]);
 		}
-		free(configs, M_OFWPROP);
+		OF_prop_free(configs);
 	}
+	TSEXIT();
 	return (0);
 }
 

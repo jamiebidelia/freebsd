@@ -83,19 +83,19 @@ def warn_doc_function_method_decl_mismatch : Warning<
   "%select{a function|a function|an Objective-C method|an Objective-C method|"
   "a pointer to function}2 declaration">,
   InGroup<Documentation>, DefaultIgnore;
-  
+
 def warn_doc_api_container_decl_mismatch : Warning<
   "'%select{\\|@}0%select{class|interface|protocol|struct|union}1' "
   "command should not be used in a comment attached to a "
   "non-%select{class|interface|protocol|struct|union}2 declaration">,
   InGroup<Documentation>, DefaultIgnore;
-  
+
 def warn_doc_container_decl_mismatch : Warning<
   "'%select{\\|@}0%select{classdesign|coclass|dependency|helper"
   "|helperclass|helps|instancesize|ownership|performance|security|superclass}1' "
   "command should not be used in a comment attached to a non-container declaration">,
   InGroup<Documentation>, DefaultIgnore;
-  
+
 def warn_doc_param_duplicate : Warning<
   "parameter '%0' is already documented">,
   InGroup<Documentation>, DefaultIgnore;
@@ -166,7 +166,7 @@ def warn_unknown_comment_command_name : Warning<
 
 def warn_correct_comment_command_name : Warning<
   "unknown command tag name '%0'; did you mean '%1'?">,
-  InGroup<Documentation>, DefaultIgnore;
+  InGroup<DocumentationUnknownCommand>, DefaultIgnore;
 
 } // end of documentation issue category
 } // end of AST component

@@ -4,10 +4,6 @@
 #ifndef _POWERPC_REG_H_
 #define	_POWERPC_REG_H_
 
-#if defined(_KERNEL) && !defined(KLD_MODULE) && !defined(_STANDALONE)
-#include "opt_compat.h"
-#endif
-
 /* Must match struct trapframe */
 struct reg {
 	register_t fixreg[32];
@@ -18,12 +14,8 @@ struct reg {
 	register_t pc;
 };
 
-/* Must match pcb.pcb_fpu */
 struct fpreg {
-	union {
-		double fpr;
-		uint64_t vsr[2];
-	} fpreg[32];
+	double fpreg[32];
 	double fpscr;
 };
 

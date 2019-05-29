@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2002 Doug Rabson
  * Copyright (c) 2003 Peter Wemm
  * All rights reserved.
@@ -27,8 +29,6 @@
 
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
-
-#include "opt_compat.h"
 
 #define __ELF_WORD_SIZE 32
 
@@ -98,9 +98,6 @@ SYSCTL_ULONG(_compat_ia32, OID_AUTO, maxvmem, CTLFLAG_RWTUN, &ia32_maxvmem, 0, "
 struct sysentvec ia32_freebsd_sysvec = {
 	.sv_size	= FREEBSD32_SYS_MAXSYSCALL,
 	.sv_table	= freebsd32_sysent,
-	.sv_mask	= 0,
-	.sv_sigsize	= 0,
-	.sv_sigtbl	= NULL,
 	.sv_errsize	= 0,
 	.sv_errtbl	= NULL,
 	.sv_transtrap	= NULL,
@@ -108,12 +105,10 @@ struct sysentvec ia32_freebsd_sysvec = {
 	.sv_sendsig	= ia32_sendsig,
 	.sv_sigcode	= ia32_sigcode,
 	.sv_szsigcode	= &sz_ia32_sigcode,
-	.sv_prepsyscall	= NULL,
 	.sv_name	= "FreeBSD ELF32",
 	.sv_coredump	= elf32_coredump,
 	.sv_imgact_try	= NULL,
 	.sv_minsigstksz	= MINSIGSTKSZ,
-	.sv_pagesize	= IA32_PAGE_SIZE,
 	.sv_minuser	= FREEBSD32_MINUSER,
 	.sv_maxuser	= FREEBSD32_MAXUSER,
 	.sv_usrstack	= FREEBSD32_USRSTACK,
@@ -123,13 +118,8 @@ struct sysentvec ia32_freebsd_sysvec = {
 	.sv_setregs	= ia32_setregs,
 	.sv_fixlimit	= ia32_fixlimit,
 	.sv_maxssiz	= &ia32_maxssiz,
-	.sv_flags	= SV_ABI_FREEBSD | SV_IA32 | SV_ILP32 |
-#ifdef __amd64__
-		SV_SHP
-#else
-		0
-#endif
-	,
+	.sv_flags	= SV_ABI_FREEBSD | SV_ASLR | SV_IA32 | SV_ILP32 |
+			    SV_SHP | SV_TIMEKEEP,
 	.sv_set_syscall_retval = ia32_set_syscall_retval,
 	.sv_fetch_syscall_args = ia32_fetch_syscall_args,
 	.sv_syscallnames = freebsd32_syscallnames,
@@ -137,6 +127,7 @@ struct sysentvec ia32_freebsd_sysvec = {
 	.sv_shared_page_len = PAGE_SIZE,
 	.sv_schedtail	= NULL,
 	.sv_thread_detach = NULL,
+	.sv_trap	= NULL,
 };
 INIT_SYSENTVEC(elf_ia32_sysvec, &ia32_freebsd_sysvec);
 

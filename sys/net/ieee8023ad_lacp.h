@@ -1,6 +1,8 @@
 /*	$NetBSD: ieee8023ad_impl.h,v 1.2 2005/12/10 23:21:39 elad Exp $	*/
 
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-NetBSD
+ *
  * Copyright (c)2005 YAMAMOTO Takashi,
  * All rights reserved.
  *
@@ -195,8 +197,15 @@ enum lacp_mux_state {
 
 #define	LACP_MAX_PORTS		32
 
+struct lacp_numa {
+	int			count;
+	struct lacp_port	*map[LACP_MAX_PORTS];
+};
+
 struct lacp_portmap {
 	int			pm_count;
+	int			pm_num_dom;
+	struct lacp_numa	pm_numa[MAXMEMDOM];
 	struct lacp_port	*pm_map[LACP_MAX_PORTS];
 };
 
@@ -251,6 +260,7 @@ struct lacp_softc {
 		u_int32_t	lsc_tx_test;
 	} lsc_debug;
 	u_int32_t		lsc_strict_mode;
+	boolean_t		lsc_fast_timeout; /* if set, fast timeout */
 };
 
 #define	LACP_TYPE_ACTORINFO	1
@@ -283,6 +293,9 @@ struct lacp_softc {
 
 struct mbuf	*lacp_input(struct lagg_port *, struct mbuf *);
 struct lagg_port *lacp_select_tx_port(struct lagg_softc *, struct mbuf *);
+#ifdef RATELIMIT
+struct lagg_port *lacp_select_tx_port_by_hash(struct lagg_softc *, uint32_t);
+#endif
 void		lacp_attach(struct lagg_softc *);
 void		lacp_detach(void *);
 void		lacp_init(struct lagg_softc *);

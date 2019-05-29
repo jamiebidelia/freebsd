@@ -12,7 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "ClangSACheckers.h"
+#include "clang/StaticAnalyzer/Checkers/BuiltinCheckerRegistration.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/StaticAnalyzer/Core/BugReporter/BugType.h"
 #include "clang/StaticAnalyzer/Core/Checker.h"
@@ -32,7 +32,7 @@ public:
 };
 } // end anonymous namespace
 
-void 
+void
 UndefinedArraySubscriptChecker::checkPreStmt(const ArraySubscriptExpr *A,
                                              CheckerContext &C) const {
   const Expr *Index = A->getIdx();
@@ -46,17 +46,17 @@ UndefinedArraySubscriptChecker::checkPreStmt(const ArraySubscriptExpr *A,
     if (Ctor->isDefaulted())
       return;
 
-  ExplodedNode *N = C.generateSink();
+  ExplodedNode *N = C.generateErrorNode();
   if (!N)
     return;
   if (!BT)
     BT.reset(new BuiltinBug(this, "Array subscript is undefined"));
 
   // Generate a report for this bug.
-  BugReport *R = new BugReport(*BT, BT->getName(), N);
+  auto R = llvm::make_unique<BugReport>(*BT, BT->getName(), N);
   R->addRange(A->getIdx()->getSourceRange());
-  bugreporter::trackNullOrUndefValue(N, A->getIdx(), *R);
-  C.emitReport(R);
+  bugreporter::trackExpressionValue(N, A->getIdx(), *R);
+  C.emitReport(std::move(R));
 }
 
 void ento::registerUndefinedArraySubscriptChecker(CheckerManager &mgr) {

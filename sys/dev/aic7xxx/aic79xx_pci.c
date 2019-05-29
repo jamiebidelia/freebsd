@@ -2,6 +2,8 @@
  * Product specific probe and attach routines for:
  *	aic7901 and aic7902 SCSI controllers
  *
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1994-2001 Justin T. Gibbs.
  * Copyright (c) 2000-2002 Adaptec Inc.
  * All rights reserved.
@@ -73,6 +75,7 @@ ahd_compose_id(u_int device, u_int vendor, u_int subdevice, u_int subvendor)
 #define ID_AIC7901			0x800F9005FFFF9005ull
 #define ID_AHA_29320A			0x8000900500609005ull
 #define ID_AHA_29320ALP			0x8017900500449005ull
+#define ID_AHA_29320LPE 		0x8017900500459005ull
 
 #define ID_AIC7901A			0x801E9005FFFF9005ull
 #define ID_AHA_29320LP			0x8014900500449005ull
@@ -89,10 +92,14 @@ ahd_compose_id(u_int device, u_int vendor, u_int subdevice, u_int subvendor)
 #define ID_AHA_39320D_B			0x801C900500419005ull
 #define ID_AHA_39320D_HP		0x8011900500AC0E11ull
 #define ID_AHA_39320D_B_HP		0x801C900500AC0E11ull
-#define ID_AHA_39320LPE 		0x8017900500459005ull
 #define ID_AIC7902_PCI_REV_A4		0x3
 #define ID_AIC7902_PCI_REV_B0		0x10
 #define SUBID_HP			0x0E11
+#define DEVICE8081			0x8081
+#define DEVICE8088			0x8088
+#define DEVICE8089			0x8089
+#define ADAPTECVENDORID			0x9005
+#define SUBVENDOR9005			0x9005
 
 #define DEVID_9005_HOSTRAID(id) ((id) & 0x80)
 
@@ -135,6 +142,12 @@ struct ahd_pci_identity ahd_pci_ident_table [] =
 		ID_AHA_29320ALP,
 		ID_ALL_MASK,
 		"Adaptec 29320ALP Ultra320 SCSI adapter",
+		ahd_aic7901_setup
+	},
+	{
+		ID_AHA_29320LPE,
+		ID_ALL_MASK,
+		"Adaptec 29320LPE Ultra320 SCSI adapter",
 		ahd_aic7901_setup
 	},
 	/* aic7901A based controllers */
@@ -203,12 +216,6 @@ struct ahd_pci_identity ahd_pci_ident_table [] =
 		ID_AHA_39320D_B_HP,
 		ID_ALL_MASK,
 		"Adaptec (HP OEM) 39320D Ultra320 SCSI adapter",
-		ahd_aic7902_setup
-	},
-	{
-		ID_AHA_39320LPE,
-		ID_ALL_MASK,
-		"Adaptec 39320LPE Ultra320 SCSI adapter",
 		ahd_aic7902_setup
 	},
 	/* Generic chip probes for devices we don't know 'exactly' */
@@ -292,6 +299,15 @@ ahd_find_pci_device(aic_dev_softc_t pci)
 	device = aic_pci_read_config(pci, PCIR_DEVICE, /*bytes*/2);
 	subvendor = aic_pci_read_config(pci, PCIR_SUBVEND_0, /*bytes*/2);
 	subdevice = aic_pci_read_config(pci, PCIR_SUBDEV_0, /*bytes*/2);
+
+	if ((vendor == ADAPTECVENDORID) && (subvendor == SUBVENDOR9005)) {
+		if ((device == DEVICE8081) || (device == DEVICE8088) || 
+			(device == DEVICE8089)) {
+			printf("Controller device ID conflict with PMC Adaptec HBA\n");
+			return (NULL);
+		}
+	}
+
 	full_id = ahd_compose_id(device,
 				 vendor,
 				 subdevice,
@@ -475,7 +491,7 @@ ahd_pci_test_register_access(struct ahd_softc *ahd)
 	 * Next create a situation where write combining
 	 * or read prefetching could be initiated by the
 	 * CPU or host bridge.  Our device does not support
-	 * either, so look for data corruption and/or flaged
+	 * either, so look for data corruption and/or flagged
 	 * PCI errors.  First pause without causing another
 	 * chip reset.
 	 */
@@ -997,7 +1013,7 @@ ahd_aic790X_setup(struct ahd_softc *ahd)
 			  |  AHD_FAINT_LED_BUG;
 
 		/*
-		 * IO Cell paramter setup.
+		 * IO Cell parameter setup.
 		 */
 		AHD_SET_PRECOMP(ahd, AHD_PRECOMP_CUTBACK_29);
 
@@ -1018,7 +1034,7 @@ ahd_aic790X_setup(struct ahd_softc *ahd)
 				  |  AHD_BUSFREEREV_BUG;
 
 		/*
-		 * IO Cell paramter setup.
+		 * IO Cell parameter setup.
 		 */
 		AHD_SET_PRECOMP(ahd, AHD_PRECOMP_CUTBACK_29);
 		AHD_SET_SLEWRATE(ahd, AHD_SLEWRATE_DEF_REVB);

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2005 John Bicket
  * All rights reserved.
  *
@@ -488,8 +490,7 @@ ath_rate_findrate(struct ath_softc *sc, struct ath_node *an,
 #define	RATE(ix)	(DOT11RATE(ix) / 2)
 	struct sample_node *sn = ATH_NODE_SAMPLE(an);
 	struct sample_softc *ssc = ATH_SOFTC_SAMPLE(sc);
-	struct ifnet *ifp = sc->sc_ifp;
-	struct ieee80211com *ic = ifp->if_l2com;
+	struct ieee80211com *ic = &sc->sc_ic;
 	const HAL_RATE_TABLE *rt = sc->sc_currates;
 	const int size_bin = size_to_bin(frameLen);
 	int rix, mrr, best_rix, change_rates;
@@ -776,6 +777,10 @@ update_stats(struct ath_softc *sc, struct ath_node *an,
 	 * XXX Don't mark the higher bit rates as also having failed; as this
 	 * unfortunately stops those rates from being tasted when trying to
 	 * TX. This happens with 11n aggregation.
+	 *
+	 * This is valid for higher CCK rates, higher OFDM rates, and higher
+	 * HT rates within the current number of streams (eg MCS0..7, 8..15,
+	 * etc.)
 	 */
 	if (nframes == nbad) {
 #if 0
@@ -856,8 +861,7 @@ ath_rate_tx_complete(struct ath_softc *sc, struct ath_node *an,
 	const struct ath_rc_series *rc, const struct ath_tx_status *ts,
 	int frame_size, int nframes, int nbad)
 {
-	struct ifnet *ifp = sc->sc_ifp;
-	struct ieee80211com *ic = ifp->if_l2com;
+	struct ieee80211com *ic = &sc->sc_ic;
 	struct sample_node *sn = ATH_NODE_SAMPLE(an);
 	int final_rix, short_tries, long_tries;
 	const HAL_RATE_TABLE *rt = sc->sc_currates;
@@ -1014,6 +1018,12 @@ ath_rate_newassoc(struct ath_softc *sc, struct ath_node *an, int isnew)
 	if (isnew)
 		ath_rate_ctl_reset(sc, &an->an_node);
 }
+
+void
+ath_rate_update_rx_rssi(struct ath_softc *sc, struct ath_node *an, int rssi)
+{
+}
+
 
 static const struct txschedule *mrr_schedules[IEEE80211_MODE_MAX+2] = {
 	NULL,		/* IEEE80211_MODE_AUTO */
@@ -1303,8 +1313,7 @@ static int
 ath_rate_sysctl_stats(SYSCTL_HANDLER_ARGS)
 {
 	struct ath_softc *sc = arg1;
-	struct ifnet *ifp = sc->sc_ifp;
-	struct ieee80211com *ic = ifp->if_l2com;
+	struct ieee80211com *ic = &sc->sc_ic;
 	int error, v;
 
 	v = 0;

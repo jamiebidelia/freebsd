@@ -25,7 +25,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd June 24, 2012
+.Dd June 19, 2015
 .Dt ACPI_IBM 4
 .Os
 .Sh NAME
@@ -74,7 +74,7 @@ sysctl, is set to
 .Va availmask
 by default, a value representing all possible keypress events on the specific
 ThinkPad model.
-.Ss Xr devd 8 Ss Events
+.Ss Xr devd 8 Events
 Hotkey events received by
 .Xr devd 8
 provide the following information:
@@ -144,7 +144,7 @@ Mute
 .It Li 0x18
 Access IBM Button
 .El
-.Ss Xr led 4 Ss Interface
+.Ss Xr led 4 Interface
 The
 .Nm
 driver provides a
@@ -273,6 +273,9 @@ Current brightness level of the display.
 Speaker volume.
 .It Va dev.acpi_ibm.0.mute
 Indicates, whether the speakers are muted or not.
+.It Va dev.acpi_ibm.0.mic_mute
+Indicates, whether the microphone led (present on some model) is on or not. 
+Note that this does not mean that the microphone input is muted.
 .It Va dev.acpi_ibm.0.thinklight
 Indicates, whether the ThinkLight keyboard light is activated or not.
 .It Va dev.acpi_ibm.0.bluetooth
@@ -344,7 +347,7 @@ when
 is set to 1.
 Events are specified as a whitespace-separated list of event code in
 hexadecimal or decimal form.
-Note that the event maybe handled twice (eg. Brightness up/down) if ACPI BIOS
+Note that the event maybe handled twice (e.g., Brightness up/down) if ACPI BIOS
 already handled the event.
 .El
 .Pp
@@ -437,6 +440,17 @@ case ${NOTIFY} in
                         MESSAGE="volume unmuted"
                 fi
                 ;;
+	0x1b)
+		LEVEL=`sysctl -n dev.acpi_ibm.0.mic_led`
+		if [ $LEVEL -eq 0 ]; then
+			sysctl dev.acpi_ibm.0.mic_led=1
+			mixer rec 0
+		fi 
+		if [ $LEVEL -eq 1 ]; then 
+			sysctl dev.acpi_ibm.0.mic_led=0
+			mixer rec 30
+		fi
+		;;
         *)
                 ;;
 esac

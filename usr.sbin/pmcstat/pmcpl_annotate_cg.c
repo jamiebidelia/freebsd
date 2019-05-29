@@ -1,8 +1,12 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2005-2007, Joseph Koshy
  * Copyright (c) 2007 The FreeBSD Foundation
- * Copyright (c) 2014, Adrian Chadd, Netflix Inc.
  * All rights reserved.
+ *
+ * Copyright (c) 2014 Netflix, Inc.
+ * Written by: Adrian Chadd <adrian@FreeBSD.org>
  *
  * Portions of this software were developed by A. Joseph Koshy under
  * sponsorship from the FreeBSD Foundation and Google, Inc.

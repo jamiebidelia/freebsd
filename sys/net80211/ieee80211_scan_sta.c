@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2002-2009 Sam Leffler, Errno Consulting
  * All rights reserved.
  *
@@ -34,6 +36,8 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
+#include <sys/endian.h>
+#include <sys/malloc.h>
 #include <sys/module.h>
 
 #include <sys/socket.h>
@@ -53,6 +57,7 @@ __FBSDID("$FreeBSD$");
 #include <net80211/ieee80211_mesh.h>
 #endif
 #include <net80211/ieee80211_ratectl.h>
+#include <net80211/ieee80211_vht.h>
 
 #include <net/bpf.h>
 
@@ -114,7 +119,7 @@ static void sta_flush_table(struct sta_table *);
 /*
  * match_bss returns a bitmask describing if an entry is suitable
  * for use.  If non-zero the entry was deemed not suitable and it's
- * contents explains why.  The following flags are or'd to to this
+ * contents explains why.  The following flags are or'd to this
  * mask and can be used to figure out why the entry was rejected.
  */
 #define	MATCH_CHANNEL		0x00001	/* channel mismatch */
@@ -127,11 +132,13 @@ static void sta_flush_table(struct sta_table *);
 #define	MATCH_NOTSEEN		0x00080	/* not seen in recent scans */
 #define	MATCH_RSSI		0x00100	/* rssi deemed too low to use */
 #define	MATCH_CC		0x00200	/* country code mismatch */
+#ifdef IEEE80211_SUPPORT_TDMA
 #define	MATCH_TDMA_NOIE		0x00400	/* no TDMA ie */
 #define	MATCH_TDMA_NOTMASTER	0x00800	/* not TDMA master */
 #define	MATCH_TDMA_NOSLOT	0x01000	/* all TDMA slots occupied */
 #define	MATCH_TDMA_LOCAL	0x02000	/* local address */
 #define	MATCH_TDMA_VERSION	0x04000	/* protocol version mismatch */
+#endif
 #define	MATCH_MESH_NOID		0x10000	/* no MESHID ie */
 #define	MATCH_MESHID		0x20000	/* meshid mismatch */
 static int match_bss(struct ieee80211vap *,
@@ -321,14 +328,33 @@ found:
 		}
 	} else
 		ise->se_chan = curchan;
+
+	/* VHT demotion */
+	if (IEEE80211_IS_CHAN_VHT(ise->se_chan) && sp->vhtcap == NULL) {
+		IEEE80211_DPRINTF(vap, IEEE80211_MSG_11N,
+		    "%s: demoting VHT->HT %d/0x%08x\n",
+		    __func__, ise->se_chan->ic_freq, ise->se_chan->ic_flags);
+		/* Demote legacy networks to a non-VHT channel. */
+		c = ieee80211_find_channel(ic, ise->se_chan->ic_freq,
+		    ise->se_chan->ic_flags & ~IEEE80211_CHAN_VHT);
+		KASSERT(c != NULL,
+		    ("no non-VHT channel %u", ise->se_chan->ic_ieee));
+		ise->se_chan = c;
+	}
+
+	/* HT demotion */
 	if (IEEE80211_IS_CHAN_HT(ise->se_chan) && sp->htcap == NULL) {
 		/* Demote legacy networks to a non-HT channel. */
+		IEEE80211_DPRINTF(vap, IEEE80211_MSG_11N,
+		    "%s: demoting HT->legacy %d/0x%08x\n",
+		    __func__, ise->se_chan->ic_freq, ise->se_chan->ic_flags);
 		c = ieee80211_find_channel(ic, ise->se_chan->ic_freq,
 		    ise->se_chan->ic_flags & ~IEEE80211_CHAN_HT);
 		KASSERT(c != NULL,
 		    ("no legacy channel %u", ise->se_chan->ic_ieee));
 		ise->se_chan = c;
 	}
+
 	ise->se_fhdwell = sp->fhdwell;
 	ise->se_fhindex = sp->fhindex;
 	ise->se_erp = sp->erp;
@@ -446,6 +472,8 @@ static const u_int chanflags[IEEE80211_MODE_MAX] = {
 	/* check legacy */
 	[IEEE80211_MODE_11NA]	  = IEEE80211_CHAN_A,
 	[IEEE80211_MODE_11NG]	  = IEEE80211_CHAN_G,
+	[IEEE80211_MODE_VHT_5GHZ] = IEEE80211_CHAN_A,
+	[IEEE80211_MODE_VHT_2GHZ] = IEEE80211_CHAN_G,
 };
 
 static void
@@ -468,12 +496,15 @@ add_channels(struct ieee80211vap *vap,
 		if (c == NULL || isexcluded(vap, c))
 			continue;
 		if (mode == IEEE80211_MODE_AUTO) {
+			KASSERT(IEEE80211_IS_CHAN_B(c),
+			    ("%s: wrong channel for 'auto' mode %u / %u\n",
+			    __func__, c->ic_freq, c->ic_flags));
+
 			/*
 			 * XXX special-case 11b/g channels so we select
 			 *     the g channel if both are present.
 			 */
-			if (IEEE80211_IS_CHAN_B(c) &&
-			    (cg = find11gchannel(ic, i, c->ic_freq)) != NULL)
+			if ((cg = find11gchannel(ic, i, c->ic_freq)) != NULL)
 				c = cg;
 		}
 		ss->ss_chans[ss->ss_last++] = c;
@@ -527,10 +558,11 @@ sweepchannels(struct ieee80211_scan_state *ss, struct ieee80211vap *vap,
 		/*
 		 * Ignore dynamic turbo channels; we scan them
 		 * in normal mode (i.e. not boosted).  Likewise
-		 * for HT channels, they get scanned using
+		 * for HT/VHT channels, they get scanned using
 		 * legacy rates.
 		 */
-		if (IEEE80211_IS_CHAN_DTURBO(c) || IEEE80211_IS_CHAN_HT(c))
+		if (IEEE80211_IS_CHAN_DTURBO(c) || IEEE80211_IS_CHAN_HT(c) ||
+		    IEEE80211_IS_CHAN_VHT(c))
 			continue;
 
 		/*
@@ -591,32 +623,48 @@ makescanlist(struct ieee80211_scan_state *ss, struct ieee80211vap *vap,
 	 */
 	for (scan = table; scan->list != NULL; scan++) {
 		mode = scan->mode;
-		if (vap->iv_des_mode != IEEE80211_MODE_AUTO) {
+
+		switch (mode) {
+		case IEEE80211_MODE_11B:
+			if (vap->iv_des_mode == IEEE80211_MODE_11B)
+				break;
+
 			/*
-			 * If a desired mode was specified, scan only 
+			 * The scan table marks 2.4Ghz channels as b
+			 * so if the desired mode is 11g / 11ng / 11acg,
+			 * then use the 11b channel list but upgrade the mode.
+			 *
+			 * NB: 11b -> AUTO lets add_channels upgrade an
+			 * 11b channel to 11g if available.
+			 */
+			if (vap->iv_des_mode == IEEE80211_MODE_AUTO ||
+			    vap->iv_des_mode == IEEE80211_MODE_11G ||
+			    vap->iv_des_mode == IEEE80211_MODE_11NG ||
+			    vap->iv_des_mode == IEEE80211_MODE_VHT_2GHZ) {
+				mode = vap->iv_des_mode;
+				break;
+			}
+
+			continue;
+		case IEEE80211_MODE_11A:
+			/* Use 11a channel list for 11na / 11ac modes */
+			if (vap->iv_des_mode == IEEE80211_MODE_11NA ||
+			    vap->iv_des_mode == IEEE80211_MODE_VHT_5GHZ) {
+				mode = vap->iv_des_mode;
+				break;
+			}
+
+			/* FALLTHROUGH */
+		default:
+			/*
+			 * If a desired mode was specified, scan only
 			 * channels that satisfy that constraint.
 			 */
-			if (vap->iv_des_mode != mode) {
-				/*
-				 * The scan table marks 2.4Ghz channels as b
-				 * so if the desired mode is 11g, then use
-				 * the 11b channel list but upgrade the mode.
-				 */
-				if (vap->iv_des_mode == IEEE80211_MODE_11G) {
-					if (mode == IEEE80211_MODE_11G) /* Skip the G check */
-						continue;
-					else if (mode == IEEE80211_MODE_11B)
-						mode = IEEE80211_MODE_11G;	/* upgrade */
-				}
-			}
-		} else {
-			/*
-			 * This lets add_channels upgrade an 11b channel
-			 * to 11g if available.
-			 */
-			if (mode == IEEE80211_MODE_11B)
-				mode = IEEE80211_MODE_AUTO;
+			if (vap->iv_des_mode != IEEE80211_MODE_AUTO &&
+			    vap->iv_des_mode != mode)
+				continue;
 		}
+
 #ifdef IEEE80211_F_XR
 		/* XR does not operate on turbo channels */
 		if ((vap->iv_flags & IEEE80211_F_XR) &&
@@ -737,12 +785,6 @@ sta_cancel(struct ieee80211_scan_state *ss, struct ieee80211vap *vap)
 	return 0;
 }
 
-/* unaligned little endian access */     
-#define LE_READ_2(p)					\
-	((uint16_t)					\
-	 ((((const uint8_t *)(p))[0]      ) |		\
-	  (((const uint8_t *)(p))[1] <<  8)))
- 
 /*
  * Demote any supplied 11g channel to 11b.  There should
  * always be an 11b channel but we check anyway...
@@ -790,7 +832,7 @@ maxrate(const struct ieee80211_scan_entry *se)
 		} else
 			for (i = 31; i >= 0 && isclr(htcap->hc_mcsset, i); i--);
 		if (i >= 0) {
-			caps = LE_READ_2(&htcap->hc_cap);
+			caps = le16dec(&htcap->hc_cap);
 			if ((caps & IEEE80211_HTCAP_CHWIDTH40) &&
 			    (caps & IEEE80211_HTCAP_SHORTGI40))
 				rmax = ieee80211_htrates[i].ht40_rate_400ns;
@@ -821,6 +863,9 @@ maxrate(const struct ieee80211_scan_entry *se)
  * that we assume compatibility/usability has already been checked
  * so we don't need to (e.g. validate whether privacy is supported).
  * Used to select the best scan candidate for association in a BSS.
+ *
+ * TODO: should we take 11n, 11ac into account when selecting the
+ * best?  Right now it just compares frequency band and RSSI.
  */
 static int
 sta_compare(const struct sta_entry *a, const struct sta_entry *b)
@@ -876,7 +921,6 @@ static int
 check_rate(struct ieee80211vap *vap, const struct ieee80211_channel *chan,
     const struct ieee80211_scan_entry *se)
 {
-#define	RV(v)	((v) & IEEE80211_RATE_VAL)
 	const struct ieee80211_rateset *srs;
 	int i, j, nrs, r, okrate, badrate, fixedrate, ucastrate;
 	const uint8_t *rs;
@@ -891,7 +935,7 @@ check_rate(struct ieee80211vap *vap, const struct ieee80211_channel *chan,
 	fixedrate = IEEE80211_FIXED_RATE_NONE;
 again:
 	for (i = 0; i < nrs; i++) {
-		r = RV(rs[i]);
+		r = IEEE80211_RV(rs[i]);
 		badrate = r;
 		/*
 		 * Check any fixed rate is included. 
@@ -902,7 +946,7 @@ again:
 		 * Check against our supported rates.
 		 */
 		for (j = 0; j < srs->rs_nrates; j++)
-			if (r == RV(srs->rs_rates[j])) {
+			if (r == IEEE80211_RV(srs->rs_rates[j])) {
 				if (r > okrate)		/* NB: track max */
 					okrate = r;
 				break;
@@ -928,8 +972,7 @@ back:
 	if (okrate == 0 || ucastrate != fixedrate)
 		return badrate | IEEE80211_RATE_BASIC;
 	else
-		return RV(okrate);
-#undef RV
+		return IEEE80211_RV(okrate);
 }
 
 static __inline int
@@ -1311,12 +1354,14 @@ sta_roam_check(struct ieee80211_scan_state *ss, struct ieee80211vap *vap)
 	mode = ieee80211_chan2mode(ic->ic_bsschan);
 	roamRate = vap->iv_roamparms[mode].rate;
 	roamRssi = vap->iv_roamparms[mode].rssi;
+	KASSERT(roamRate != 0 && roamRssi != 0, ("iv_roamparms are not"
+	    "initialized for %s mode!", ieee80211_phymode_name[mode]));
+
 	ucastRate = vap->iv_txparms[mode].ucastrate;
 	/* NB: the most up to date rssi is in the node, not the scan cache */
 	curRssi = ic->ic_node_getrssi(ni);
 	if (ucastRate == IEEE80211_FIXED_RATE_NONE) {
 		curRate = ni->ni_txrate;
-		roamRate &= IEEE80211_RATE_VAL;
 		IEEE80211_DPRINTF(vap, IEEE80211_MSG_ROAM,
 		    "%s: currssi %d currate %u roamrssi %d roamrate %u\n",
 		    __func__, curRssi, curRate, roamRssi, roamRate);
@@ -1330,7 +1375,7 @@ sta_roam_check(struct ieee80211_scan_state *ss, struct ieee80211vap *vap)
 	 * XXX deauth current ap
 	 */
 	if (curRate < roamRate || curRssi < roamRssi) {
-		if (time_after(ticks, ic->ic_lastscan + vap->iv_scanvalid)) {
+		if (ieee80211_time_after(ticks, ic->ic_lastscan + vap->iv_scanvalid)) {
 			/*
 			 * Scan cache contents are too old; force a scan now
 			 * if possible so we have current state to make a
@@ -1340,7 +1385,8 @@ sta_roam_check(struct ieee80211_scan_state *ss, struct ieee80211vap *vap)
 			 * XXX force immediate switch on scan complete
 			 */
 			if (!IEEE80211_IS_CHAN_DTURBO(ic->ic_curchan) &&
-			    time_after(ticks, ic->ic_lastdata + vap->iv_bgscanidle))
+			    ((vap->iv_flags_ext & IEEE80211_FEXT_SCAN_OFFLOAD) ||
+			     ieee80211_time_after(ticks, ic->ic_lastdata + vap->iv_bgscanidle)))
 				ieee80211_bg_scan(vap, 0);
 			return;
 		}
@@ -1621,7 +1667,6 @@ notfound:
 			} else
 				chan = vap->iv_des_chan;
 			if (chan != NULL) {
-				struct ieee80211com *ic = vap->iv_ic;
 				/*
 				 * Create a HT capable IBSS; the per-node
 				 * probe request/response will result in
@@ -1630,6 +1675,8 @@ notfound:
 				 */
 				chan = ieee80211_ht_adjust_channel(ic,
 				    chan, vap->iv_flags_ht);
+				chan = ieee80211_vht_adjust_channel(ic,
+				    chan, vap->iv_flags_vht);
 				ieee80211_create_ibss(vap, chan);
 				return 1;
 			}
@@ -1661,6 +1708,8 @@ notfound:
 	 */
 	chan = ieee80211_ht_adjust_channel(ic,
 	    chan, vap->iv_flags_ht);
+	chan = ieee80211_vht_adjust_channel(ic,
+	    chan, vap->iv_flags_vht);
 	if (!ieee80211_sta_join(vap, chan, &selbs->base))
 		goto notfound;
 	return 1;				/* terminate scan */
@@ -1706,26 +1755,6 @@ static const struct ieee80211_scanner adhoc_default = {
 IEEE80211_SCANNER_ALG(ibss, IEEE80211_M_IBSS, adhoc_default);
 IEEE80211_SCANNER_ALG(ahdemo, IEEE80211_M_AHDEMO, adhoc_default);
 
-static void
-ap_force_promisc(struct ieee80211com *ic)
-{
-	struct ifnet *ifp = ic->ic_ifp;
-
-	IEEE80211_LOCK(ic);
-	/* set interface into promiscuous mode */
-	ifp->if_flags |= IFF_PROMISC;
-	ieee80211_runtask(ic, &ic->ic_promisc_task);
-	IEEE80211_UNLOCK(ic);
-}
-
-static void
-ap_reset_promisc(struct ieee80211com *ic)
-{
-	IEEE80211_LOCK(ic);
-	ieee80211_syncifflag_locked(ic, IFF_PROMISC);
-	IEEE80211_UNLOCK(ic);
-}
-
 static int
 ap_start(struct ieee80211_scan_state *ss, struct ieee80211vap *vap)
 {
@@ -1741,7 +1770,6 @@ ap_start(struct ieee80211_scan_state *ss, struct ieee80211vap *vap)
 	st->st_scangen++;
 	st->st_newscan = 1;
 
-	ap_force_promisc(vap->iv_ic);
 	return 0;
 }
 
@@ -1751,7 +1779,6 @@ ap_start(struct ieee80211_scan_state *ss, struct ieee80211vap *vap)
 static int
 ap_cancel(struct ieee80211_scan_state *ss, struct ieee80211vap *vap)
 {
-	ap_reset_promisc(vap->iv_ic);
 	return 0;
 }
 
@@ -1802,7 +1829,7 @@ static int
 ap_end(struct ieee80211_scan_state *ss, struct ieee80211vap *vap)
 {
 	struct ieee80211com *ic = vap->iv_ic;
-	struct ieee80211_channel *bestchan;
+	struct ieee80211_channel *bestchan, *chan;
 
 	KASSERT(vap->iv_opmode == IEEE80211_M_HOSTAP,
 		("wrong opmode %u", vap->iv_opmode));
@@ -1825,7 +1852,6 @@ ap_end(struct ieee80211_scan_state *ss, struct ieee80211vap *vap)
 			return 0;
 		}
 	}
-	ap_reset_promisc(ic);
 	if (ss->ss_flags & (IEEE80211_SCAN_NOPICK | IEEE80211_SCAN_NOJOIN)) {
 		/*
 		 * Manual/background scan, don't select+join the
@@ -1835,8 +1861,10 @@ ap_end(struct ieee80211_scan_state *ss, struct ieee80211vap *vap)
 		ss->ss_flags &= ~IEEE80211_SCAN_NOPICK;
 		return 1;
 	}
-	ieee80211_create_ibss(vap,
-	    ieee80211_ht_adjust_channel(ic, bestchan, vap->iv_flags_ht));
+	chan = ieee80211_ht_adjust_channel(ic, bestchan, vap->iv_flags_ht);
+	chan = ieee80211_vht_adjust_channel(ic, chan, vap->iv_flags_vht);
+	ieee80211_create_ibss(vap, chan);
+
 	return 1;
 }
 
@@ -1908,10 +1936,14 @@ notfound:
 			    IEEE80211_IS_CHAN_RADAR(vap->iv_des_chan)) {
 				struct ieee80211com *ic = vap->iv_ic;
 
+				/* XXX VHT */
 				chan = adhoc_pick_channel(ss, 0);
-				if (chan != NULL)
+				if (chan != NULL) {
 					chan = ieee80211_ht_adjust_channel(ic,
 					    chan, vap->iv_flags_ht);
+					chan = ieee80211_vht_adjust_channel(ic,
+					    chan, vap->iv_flags_vht);
+					}
 			} else
 				chan = vap->iv_des_chan;
 			if (chan != NULL) {

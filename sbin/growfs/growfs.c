@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) 1980, 1989, 1993 The Regents of the University of California.
  * Copyright (c) 2000 Christoph Herrmann, Thomas-Henning von Kamptz
  * Copyright (c) 2012 The FreeBSD Foundation
@@ -64,6 +66,7 @@ __FBSDID("$FreeBSD$");
 #include <paths.h>
 #include <ctype.h>
 #include <err.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <fstab.h>
 #include <inttypes.h>
@@ -78,6 +81,7 @@ __FBSDID("$FreeBSD$");
 #include <ufs/ufs/dinode.h>
 #include <ufs/ffs/fs.h>
 #include <libutil.h>
+#include <libufs.h>
 
 #include "debug.h"
 
@@ -91,12 +95,6 @@ static union {
 } fsun1, fsun2;
 #define	sblock	fsun1.fs	/* the new superblock */
 #define	osblock	fsun2.fs	/* the old superblock */
-
-/*
- * Possible superblock locations ordered from most to least likely.
- */
-static int sblock_try[] = SBLOCKSEARCH;
-static ufs2_daddr_t sblockloc;
 
 static union {
 	struct cg	cg;
@@ -121,6 +119,7 @@ static void	updcsloc(time_t, int, int, unsigned int);
 static void	frag_adjust(ufs2_daddr_t, int);
 static void	updclst(int);
 static void	mount_reload(const struct statfs *stfs);
+static void	cgckhash(struct cg *);
 
 /*
  * Here we actually start growing the file system. We basically read the
@@ -152,11 +151,10 @@ growfs(int fsi, int fso, unsigned int Nflag)
 	fscs = (struct csum *)calloc((size_t)1, (size_t)sblock.fs_cssize);
 	if (fscs == NULL)
 		errx(1, "calloc failed");
-	for (i = 0; i < osblock.fs_cssize; i += osblock.fs_bsize) {
-		rdfs(fsbtodb(&osblock, osblock.fs_csaddr +
-		    numfrags(&osblock, i)), (size_t)MIN(osblock.fs_cssize - i,
-		    osblock.fs_bsize), (void *)(((char *)fscs) + i), fsi);
-	}
+	memcpy(fscs, osblock.fs_csp, osblock.fs_cssize);
+	free(osblock.fs_csp);
+	osblock.fs_csp = NULL;
+	sblock.fs_csp = fscs;
 
 #ifdef FS_DEBUG
 	{
@@ -230,13 +228,41 @@ growfs(int fsi, int fso, unsigned int Nflag)
 	updcsloc(modtime, fsi, fso, Nflag);
 
 	/*
-	 * Now write the cylinder summary back to disk.
+	 * Clean up the dynamic fields in our superblock.
+	 * 
+	 * XXX
+	 * The following fields are currently distributed from the superblock
+	 * to the copies:
+	 *     fs_minfree
+	 *     fs_rotdelay
+	 *     fs_maxcontig
+	 *     fs_maxbpg
+	 *     fs_minfree,
+	 *     fs_optim
+	 *     fs_flags
+	 *
+	 * We probably should rather change the summary for the cylinder group
+	 * statistics here to the value of what would be in there, if the file
+	 * system were created initially with the new size. Therefor we still
+	 * need to find an easy way of calculating that.
+	 * Possibly we can try to read the first superblock copy and apply the
+	 * "diffed" stats between the old and new superblock by still copying
+	 * certain parameters onto that.
 	 */
-	for (i = 0; i < sblock.fs_cssize; i += sblock.fs_bsize) {
-		wtfs(fsbtodb(&sblock, sblock.fs_csaddr + numfrags(&sblock, i)),
-		    (size_t)MIN(sblock.fs_cssize - i, sblock.fs_bsize),
-		    (void *)(((char *)fscs) + i), fso, Nflag);
-	}
+	sblock.fs_time = modtime;
+	sblock.fs_fmod = 0;
+	sblock.fs_clean = 1;
+	sblock.fs_ronly = 0;
+	sblock.fs_cgrotor = 0;
+	sblock.fs_state = 0;
+	memset((void *)&sblock.fs_fsmnt, 0, sizeof(sblock.fs_fsmnt));
+
+	/*
+	 * Now write the new superblock, its summary information,
+	 * and all the alternates back to disk.
+	 */
+	if (!Nflag && sbput(fso, &sblock, sblock.fs_ncg) != 0)
+		errc(2, EIO, "could not write updated superblock");
 	DBG_PRINT0("fscs written\n");
 
 #ifdef FS_DEBUG
@@ -254,53 +280,9 @@ growfs(int fsi, int fso, unsigned int Nflag)
 	}
 #endif /* FS_DEBUG */
 
-	/*
-	 * Now write the new superblock back to disk.
-	 */
-	sblock.fs_time = modtime;
-	wtfs(sblockloc, (size_t)SBLOCKSIZE, (void *)&sblock, fso, Nflag);
 	DBG_PRINT0("sblock written\n");
 	DBG_DUMP_FS(&sblock, "new initial sblock");
 
-	/*
-	 * Clean up the dynamic fields in our superblock copies.
-	 */
-	sblock.fs_fmod = 0;
-	sblock.fs_clean = 1;
-	sblock.fs_ronly = 0;
-	sblock.fs_cgrotor = 0;
-	sblock.fs_state = 0;
-	memset((void *)&sblock.fs_fsmnt, 0, sizeof(sblock.fs_fsmnt));
-	sblock.fs_flags &= FS_DOSOFTDEP;
-
-	/*
-	 * XXX
-	 * The following fields are currently distributed from the superblock
-	 * to the copies:
-	 *     fs_minfree
-	 *     fs_rotdelay
-	 *     fs_maxcontig
-	 *     fs_maxbpg
-	 *     fs_minfree,
-	 *     fs_optim
-	 *     fs_flags regarding SOFTPDATES
-	 *
-	 * We probably should rather change the summary for the cylinder group
-	 * statistics here to the value of what would be in there, if the file
-	 * system were created initially with the new size. Therefor we still
-	 * need to find an easy way of calculating that.
-	 * Possibly we can try to read the first superblock copy and apply the
-	 * "diffed" stats between the old and new superblock by still copying
-	 * certain parameters onto that.
-	 */
-
-	/*
-	 * Write out the duplicate super blocks.
-	 */
-	for (cylno = 0; cylno < sblock.fs_ncg; cylno++) {
-		wtfs(fsbtodb(&sblock, cgsblock(&sblock, cylno)),
-		    (size_t)SBLOCKSIZE, (void *)&sblock, fso, Nflag);
-	}
 	DBG_PRINT0("sblock copies written\n");
 	DBG_DUMP_FS(&sblock, "new other sblocks");
 
@@ -319,16 +301,21 @@ initcg(int cylno, time_t modtime, int fso, unsigned int Nflag)
 {
 	DBG_FUNC("initcg")
 	static caddr_t iobuf;
+	static long iobufsize;
 	long blkno, start;
 	ino_t ino;
 	ufs2_daddr_t i, cbase, dmax;
 	struct ufs1_dinode *dp1;
+	struct ufs2_dinode *dp2;
 	struct csum *cs;
 	uint j, d, dupper, dlower;
 
-	if (iobuf == NULL && (iobuf = malloc(sblock.fs_bsize * 3)) == NULL)
-		errx(37, "panic: cannot allocate I/O buffer");
-
+	if (iobuf == NULL) {
+		iobufsize = 2 * sblock.fs_bsize;
+		if ((iobuf = malloc(iobufsize)) == NULL)
+			errx(37, "panic: cannot allocate I/O buffer");
+		memset(iobuf, '\0', iobufsize);
+	}
 	/*
 	 * Determine block bounds for cylinder group.
 	 * Allow space for super block summary information in first
@@ -348,8 +335,7 @@ initcg(int cylno, time_t modtime, int fso, unsigned int Nflag)
 	acg.cg_magic = CG_MAGIC;
 	acg.cg_cgx = cylno;
 	acg.cg_niblk = sblock.fs_ipg;
-	acg.cg_initediblk = sblock.fs_ipg < 2 * INOPB(&sblock) ?
-	    sblock.fs_ipg : 2 * INOPB(&sblock);
+	acg.cg_initediblk = MIN(sblock.fs_ipg, 2 * INOPB(&sblock));
 	acg.cg_ndblk = dmax - cbase;
 	if (sblock.fs_contigsumsize > 0)
 		acg.cg_nclusterblks = acg.cg_ndblk / sblock.fs_frag;
@@ -389,17 +375,34 @@ initcg(int cylno, time_t modtime, int fso, unsigned int Nflag)
 	}
 	acg.cg_cs.cs_nifree += sblock.fs_ipg;
 	if (cylno == 0)
-		for (ino = 0; ino < ROOTINO; ino++) {
+		for (ino = 0; ino < UFS_ROOTINO; ino++) {
 			setbit(cg_inosused(&acg), ino);
 			acg.cg_cs.cs_nifree--;
 		}
 	/*
+	 * Initialize the initial inode blocks.
+	 */
+	dp1 = (struct ufs1_dinode *)(void *)iobuf;
+	dp2 = (struct ufs2_dinode *)(void *)iobuf;
+	for (i = 0; i < acg.cg_initediblk; i++) {
+		if (sblock.fs_magic == FS_UFS1_MAGIC) {
+			dp1->di_gen = arc4random();
+			dp1++;
+		} else {
+			dp2->di_gen = arc4random();
+			dp2++;
+		}
+	}
+	wtfs(fsbtodb(&sblock, cgimin(&sblock, cylno)), iobufsize, iobuf,
+	    fso, Nflag);
+	/*
 	 * For the old file system, we have to initialize all the inodes.
 	 */
-	if (sblock.fs_magic == FS_UFS1_MAGIC) {
-		bzero(iobuf, sblock.fs_bsize);
-		for (i = 0; i < sblock.fs_ipg / INOPF(&sblock);
-		    i += sblock.fs_frag) {
+	if (sblock.fs_magic == FS_UFS1_MAGIC &&
+	    sblock.fs_ipg > 2 * INOPB(&sblock)) {
+		for (i = 2 * sblock.fs_frag;
+		     i < sblock.fs_ipg / INOPF(&sblock);
+		     i += sblock.fs_frag) {
 			dp1 = (struct ufs1_dinode *)(void *)iobuf;
 			for (j = 0; j < INOPB(&sblock); j++) {
 				dp1->di_gen = arc4random();
@@ -481,12 +484,9 @@ initcg(int cylno, time_t modtime, int fso, unsigned int Nflag)
 	sblock.fs_cstotal.cs_nifree += acg.cg_cs.cs_nifree;
 	*cs = acg.cg_cs;
 
-	memcpy(iobuf, &acg, sblock.fs_cgsize);
-	memset(iobuf + sblock.fs_cgsize, '\0',
-	    sblock.fs_bsize * 3 - sblock.fs_cgsize);
-
-	wtfs(fsbtodb(&sblock, cgtod(&sblock, cylno)),
-	    sblock.fs_bsize * 3, iobuf, fso, Nflag);
+	cgckhash(&acg);
+	wtfs(fsbtodb(&sblock, cgtod(&sblock, cylno)), sblock.fs_cgsize, &acg,
+	    fso, Nflag);
 	DBG_DUMP_CG(&sblock, "new cg", &acg);
 
 	DBG_LEAVE;
@@ -772,6 +772,7 @@ updjcg(int cylno, time_t modtime, int fsi, int fso, unsigned int Nflag)
 	/*
 	 * Write the updated "joining" cylinder group back to disk.
 	 */
+	cgckhash(&acg);
 	wtfs(fsbtodb(&sblock, cgtod(&sblock, cylno)), (size_t)sblock.fs_cgsize,
 	    (void *)&acg, fso, Nflag);
 	DBG_PRINT0("jcg written\n");
@@ -1331,7 +1332,7 @@ getdev(const char *name)
 		return (name);
 
 	cp = strrchr(name, '/');
-	if (cp == 0) {
+	if (cp == NULL) {
 		snprintf(device, sizeof(device), "%s%s", _PATH_DEV, name);
 		if (is_dev(device))
 			return (device);
@@ -1369,11 +1370,12 @@ int
 main(int argc, char **argv)
 {
 	DBG_FUNC("main")
+	struct fs *fs;
 	const char *device;
 	const struct statfs *statfsp;
 	uint64_t size = 0;
 	off_t mediasize;
-	int error, i, j, fsi, fso, ch, Nflag = 0, yflag = 0;
+	int error, j, fsi, fso, ch, ret, Nflag = 0, yflag = 0;
 	char *p, reply[5], oldsizebuf[6], newsizebuf[6];
 	void *testbuf;
 
@@ -1447,19 +1449,17 @@ main(int argc, char **argv)
 	/*
 	 * Read the current superblock, and take a backup.
 	 */
-	for (i = 0; sblock_try[i] != -1; i++) {
-		sblockloc = sblock_try[i] / DEV_BSIZE;
-		rdfs(sblockloc, (size_t)SBLOCKSIZE, (void *)&(osblock), fsi);
-		if ((osblock.fs_magic == FS_UFS1_MAGIC ||
-		    (osblock.fs_magic == FS_UFS2_MAGIC &&
-		    osblock.fs_sblockloc == sblock_try[i])) &&
-		    osblock.fs_bsize <= MAXBSIZE &&
-		    osblock.fs_bsize >= (int32_t) sizeof(struct fs))
-			break;
+	if ((ret = sbget(fsi, &fs, STDSB)) != 0) {
+		switch (ret) {
+		case ENOENT:
+			errx(1, "superblock not recognized");
+		default:
+			errc(1, ret, "unable to read superblock");
+		}
 	}
-	if (sblock_try[i] == -1)
-		errx(1, "superblock not recognized");
-	memcpy((void *)&fsun1, (void *)&fsun2, sizeof(fsun2));
+	memcpy(&osblock, fs, fs->fs_sbsize);
+	free(fs);
+	memcpy((void *)&fsun1, (void *)&fsun2, osblock.fs_sbsize);
 
 	DBG_OPEN("/tmp/growfs.debug"); /* already here we need a superblock */
 	DBG_DUMP_FS(&sblock, "old sblock");
@@ -1541,12 +1541,12 @@ main(int argc, char **argv)
 		humanize_number(newsizebuf, sizeof(newsizebuf),
 		    sblock.fs_size * sblock.fs_fsize,
 		    "B", HN_AUTOSCALE, HN_B | HN_NOSPACE | HN_DECIMAL);
-		printf(" from %s to %s? [Yes/No] ", oldsizebuf, newsizebuf);
+		printf(" from %s to %s? [yes/no] ", oldsizebuf, newsizebuf);
 		fflush(stdout);
 		fgets(reply, (int)sizeof(reply), stdin);
-		if (strcasecmp(reply, "Yes\n")){
-			printf("\nNothing done\n");
-			exit (0);
+		if (strcasecmp(reply, "yes\n")){
+			printf("Response other than \"yes\"; aborting\n");
+			exit(0);
 		}
 	}
 
@@ -1739,4 +1739,17 @@ mount_reload(const struct statfs *stfs)
 		err(9, "%s: cannot reload filesystem%s%s", stfs->f_mntonname,
 		    *errmsg != '\0' ? ": " : "", errmsg);
 	}
+}
+
+/*
+ * Calculate the check-hash of the cylinder group.
+ */
+static void
+cgckhash(struct cg *cgp)
+{
+
+	if ((sblock.fs_metackhash & CK_CYLGRP) == 0)
+		return;
+	cgp->cg_ckhash = 0;
+	cgp->cg_ckhash = calculate_crc32c(~0L, (void *)cgp, sblock.fs_cgsize);
 }

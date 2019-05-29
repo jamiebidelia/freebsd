@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1980, 1991, 1993, 1994
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -10,7 +12,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 4. Neither the name of the University nor the names of its contributors
+ * 3. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -120,7 +122,7 @@ static struct entry {
 
 #define	W_DISPUSERSIZE	10
 #define	W_DISPLINESIZE	8
-#define	W_DISPHOSTSIZE	24
+#define	W_DISPHOSTSIZE	40
 
 static void		 pr_header(time_t *, int);
 static struct stat	*ttystat(char *);
@@ -135,7 +137,7 @@ main(int argc, char *argv[])
 	struct kinfo_proc *dkp;
 	struct stat *stp;
 	time_t touched;
-	int ch, i, nentries, nusers, wcmd, longidle, longattime, dropgid;
+	int ch, i, nentries, nusers, wcmd, longidle, longattime;
 	const char *memf, *nlistf, *p, *save_p;
 	char *x_suffix;
 	char buf[MAXHOSTNAMELEN], errbuf[_POSIX2_LINE_MAX];
@@ -159,7 +161,6 @@ main(int argc, char *argv[])
 		p = "dhiflM:N:nsuw";
 	}
 
-	dropgid = 0;
 	memf = _PATH_DEVNULL;
 	nlistf = NULL;
 	while ((ch = getopt(argc, argv, p)) != -1)
@@ -176,14 +177,12 @@ main(int argc, char *argv[])
 		case 'M':
 			header = 0;
 			memf = optarg;
-			dropgid = 1;
 			break;
 		case 'N':
 			nlistf = optarg;
-			dropgid = 1;
 			break;
 		case 'n':
-			nflag = 1;
+			nflag += 1;
 			break;
 		case 'f': case 'l': case 's': case 'u': case 'w':
 			warnx("[-flsuw] no longer supported");
@@ -199,13 +198,6 @@ main(int argc, char *argv[])
 		res_init();
 	_res.retrans = 2;	/* resolver timeout to 2 seconds per try */
 	_res.retry = 1;		/* only try once.. */
-
-	/*
-	 * Discard setgid privileges if not the running kernel so that bad
-	 * guys can't print interesting stuff from kernel memory.
-	 */
-	if (dropgid)
-		setgid(getgid());
 
 	if ((kd = kvm_openfiles(nlistf, memf, NULL, O_RDONLY, errbuf)) == NULL)
 		errx(1, "%s", errbuf);
@@ -388,12 +380,12 @@ main(int argc, char *argv[])
 			lsin->sin_family = AF_INET;
 			isaddr = 1;
 		}
-		if (!nflag) {
+		if (nflag == 0) {
 			/* Attempt to change an IP address into a name */
 			if (isaddr && realhostname_sa(fn, sizeof(fn), sa,
 			    sa->sa_len) == HOSTNAME_FOUND)
 				p = fn;
-		} else if (!isaddr) {
+		} else if (!isaddr && nflag > 1) {
 			/*
 			 * If a host has only one A/AAAA RR, change a
 			 * name into an IP address
@@ -521,12 +513,12 @@ pr_header(time_t *nowp, int nusers)
 	}
 
 	/* Print number of users logged in to system */
-	xo_emit(" {:users/%d} {N:user%s}", nusers, nusers == 1 ? "" : "s");
+	xo_emit(" {:users/%d} {Np:user,users}", nusers);
 
 	/*
 	 * Print 1, 5, and 15 minute load averages.
 	 */
-	if (getloadavg(avenrun, sizeof(avenrun) / sizeof(avenrun[0])) == -1)
+	if (getloadavg(avenrun, nitems(avenrun)) == -1)
 		xo_emit(", no load average information available\n");
 	else {
 	        static const char *format[] = {
@@ -535,7 +527,7 @@ pr_header(time_t *nowp, int nusers)
 		    " {:load-average-15/%.2f}",
 		};
 		xo_emit(", load averages:");
-		for (i = 0; i < (int)(sizeof(avenrun) / sizeof(avenrun[0])); i++) {
+		for (i = 0; i < (int)(nitems(avenrun)); i++) {
 			if (use_comma && i > 0)
 				xo_emit(",");
 			xo_emit(format[i], avenrun[i]);

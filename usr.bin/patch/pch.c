@@ -1,4 +1,3 @@
-
 /*-
  * Copyright 1986, Larry Wall
  * 
@@ -180,6 +179,9 @@ there_is_another_patch(void)
 			say("done\n");
 		return false;
 	}
+	if (p_filesize == 0)
+		return false;
+	nonempty_patchf_seen = true;
 	if (verbose)
 		say("Hmm...");
 	diff_type = intuit_diff_type();
@@ -217,8 +219,10 @@ there_is_another_patch(void)
 			filearg[0] = fetchname(buf, &exists, 0);
 		}
 		if (!exists) {
-			ask("No file found--skip this patch? [n] ");
-			if (*buf != 'y')
+			int def_skip = *bestguess == '\0';
+			ask("No file found--skip this patch? [%c] ",
+			    def_skip  ? 'y' : 'n');
+			if (*buf == 'n' || (!def_skip && *buf != 'y'))
 				continue;
 			if (verbose)
 				say("Skipping patch...\n");
@@ -263,6 +267,7 @@ intuit_diff_type(void)
 	char	*s, *t;
 	int	indent, retval;
 	struct file_name names[MAX_FILE];
+	int	piece_of_git = 0;
 
 	memset(names, 0, sizeof(names));
 	ok_to_create_file = false;
@@ -307,14 +312,22 @@ intuit_diff_type(void)
 		if (!stars_last_line && strnEQ(s, "*** ", 4))
 			names[OLD_FILE].path = fetchname(s + 4,
 			    &names[OLD_FILE].exists, strippath);
-		else if (strnEQ(s, "--- ", 4))
-			names[NEW_FILE].path = fetchname(s + 4,
+		else if (strnEQ(s, "--- ", 4)) {
+			size_t off = 4;
+			if (piece_of_git && strippath == 957 &&
+			    strnEQ(s, "--- a/", 6))
+				off = 6;
+			names[NEW_FILE].path = fetchname(s + off,
 			    &names[NEW_FILE].exists, strippath);
-		else if (strnEQ(s, "+++ ", 4))
+		} else if (strnEQ(s, "+++ ", 4)) {
 			/* pretend it is the old name */
-			names[OLD_FILE].path = fetchname(s + 4,
+			size_t off = 4;
+			if (piece_of_git && strippath == 957 &&
+			    strnEQ(s, "+++ b/", 6))
+				off = 6;
+			names[OLD_FILE].path = fetchname(s + off,
 			    &names[OLD_FILE].exists, strippath);
-		else if (strnEQ(s, "Index:", 6))
+		} else if (strnEQ(s, "Index:", 6))
 			names[INDEX_FILE].path = fetchname(s + 6,
 			    &names[INDEX_FILE].exists, strippath);
 		else if (strnEQ(s, "Prereq:", 7)) {
@@ -329,6 +342,9 @@ intuit_diff_type(void)
 				free(revision);
 				revision = NULL;
 			}
+		} else if (strnEQ(s, "diff --git a/", 13)) {
+			/* Git-style diffs. */
+			piece_of_git = 1;
 		} else if (strnEQ(s, "==== ", 5)) {
 			/* Perforce-style diffs. */
 			if ((t = strstr(s + 5, " - ")) != NULL)
@@ -500,7 +516,7 @@ another_hunk(void)
 	LINENUM	fillcnt;			/* #lines of missing ptrn or repl */
 	LINENUM	fillsrc;			/* index of first line to copy */
 	LINENUM	filldst;			/* index of first missing line */
-	bool	ptrn_spaces_eaten;		/* ptrn was slightly misformed */
+	bool	ptrn_spaces_eaten;		/* ptrn was slightly malformed */
 	bool	repl_could_be_missing;		/* no + or ! lines in this hunk */
 	bool	repl_missing;			/* we are now backtracking */
 	off_t	repl_backtrack_position;	/* file pos of first repl line */
@@ -1124,7 +1140,12 @@ hunk_done:
 			if (*buf != '>')
 				fatal("> expected at line %ld of patch\n",
 				    p_input_line);
-			p_line[i] = savestr(buf + 2);
+			/* Don't overrun if we don't have enough line */
+			if (len > 2)
+				p_line[i] = savestr(buf + 2);
+			else
+				p_line[i] = savestr("");
+
 			if (out_of_mem) {
 				p_end = i - 1;
 				return false;
@@ -1143,7 +1164,7 @@ hunk_done:
 			say("Not enough memory to swap next hunk!\n");
 #ifdef DEBUGGING
 	if (debug & 2) {
-		int	i;
+		LINENUM	i;
 		char	special;
 
 		for (i = 0; i <= p_end; i++) {
@@ -1151,7 +1172,7 @@ hunk_done:
 				special = '^';
 			else
 				special = ' ';
-			fprintf(stderr, "%3d %c %c %s", i, p_char[i],
+			fprintf(stderr, "%3ld %c %c %s", i, p_char[i],
 			    special, p_line[i]);
 			fflush(stderr);
 		}
@@ -1410,13 +1431,14 @@ do_ed_script(void)
 	char	*t;
 	off_t	beginning_of_this_line;
 	FILE	*pipefp = NULL;
+	int	continuation;
 
 	if (!skip_rest_of_patch) {
 		if (copy_file(filearg[0], TMPOUTNAME) < 0) {
 			unlink(TMPOUTNAME);
 			fatal("can't create temp file %s", TMPOUTNAME);
 		}
-		snprintf(buf, buf_size, "%s%s%s", _PATH_ED,
+		snprintf(buf, buf_size, "%s%s%s", _PATH_RED,
 		    verbose ? " " : " -s ", TMPOUTNAME);
 		pipefp = popen(buf, "w");
 	}
@@ -1434,7 +1456,19 @@ do_ed_script(void)
 		    (*t == 'a' || *t == 'c' || *t == 'd' || *t == 'i' || *t == 's')) {
 			if (pipefp != NULL)
 				fputs(buf, pipefp);
-			if (*t != 'd') {
+			if (*t == 's') {
+				for (;;) {
+					continuation = 0;
+					t = strchr(buf, '\0') - 1;
+					while (--t >= buf && *t == '\\')
+						continuation = !continuation;
+					if (!continuation ||
+					    pgets(true) == 0)
+						break;
+					if (pipefp != NULL)
+						fputs(buf, pipefp);
+				}
+			} else if (*t != 'd') {
 				while (pgets(true)) {
 					p_input_line++;
 					if (pipefp != NULL)
@@ -1489,17 +1523,8 @@ posix_name(const struct file_name *names, bool assume_exists)
 	}
 	if (path == NULL && !assume_exists) {
 		/*
-		 * No files found, look for something we can checkout from
-		 * RCS/SCCS dirs.  Same order as above.
-		 */
-		for (i = 0; i < MAX_FILE; i++) {
-			if (names[i].path != NULL &&
-			    (path = checked_in(names[i].path)) != NULL)
-				break;
-		}
-		/*
-		 * Still no match?  Check to see if the diff could be creating
-		 * a new file.
+		 * No files found, check to see if the diff could be
+		 * creating a new file.
 		 */
 		if (path == NULL && ok_to_create_file &&
 		    names[NEW_FILE].path != NULL)
@@ -1510,7 +1535,7 @@ posix_name(const struct file_name *names, bool assume_exists)
 }
 
 static char *
-compare_names(const struct file_name *names, bool assume_exists, int phase)
+compare_names(const struct file_name *names, bool assume_exists)
 {
 	size_t min_components, min_baselen, min_len, tmp;
 	char *best = NULL;
@@ -1527,9 +1552,7 @@ compare_names(const struct file_name *names, bool assume_exists, int phase)
 	min_components = min_baselen = min_len = SIZE_MAX;
 	for (i = INDEX_FILE; i >= OLD_FILE; i--) {
 		path = names[i].path;
-		if (path == NULL ||
-		    (phase == 1 && !names[i].exists && !assume_exists) ||
-		    (phase == 2 && checked_in(path) == NULL))
+		if (path == NULL || (!names[i].exists && !assume_exists))
 			continue;
 		if ((tmp = num_components(path)) > min_components)
 			continue;
@@ -1560,17 +1583,11 @@ best_name(const struct file_name *names, bool assume_exists)
 {
 	char *best;
 
-	best = compare_names(names, assume_exists, 1);
-	if (best == NULL) {
-		best = compare_names(names, assume_exists, 2);
-		/*
-		 * Still no match?  Check to see if the diff could be creating
-		 * a new file.
-		 */
-		if (best == NULL && ok_to_create_file &&
-		    names[NEW_FILE].path != NULL)
-			best = names[NEW_FILE].path;
-	}
+	best = compare_names(names, assume_exists);
+
+	/* No match?  Check to see if the diff could be creating a new file. */
+	if (best == NULL && ok_to_create_file)
+		best = names[NEW_FILE].path;
 
 	return best ? xstrdup(best) : NULL;
 }

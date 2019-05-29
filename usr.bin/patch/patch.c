@@ -53,6 +53,7 @@ size_t		buf_size;		/* size of the general purpose buffer */
 
 bool		using_plan_a = true;	/* try to keep everything in memory */
 bool		out_of_mem = false;	/* ran out of memory in plan a */
+bool		nonempty_patchf_seen = false;	/* seen nonempty patch file? */
 
 #define MAXFILEC 2
 
@@ -109,8 +110,10 @@ static bool	remove_empty_files = false;
 /* true if -R was specified on command line.  */
 static bool	reverse_flag_specified = false;
 
+static bool	Vflag = false;
+
 /* buffer holding the name of the rejected patch file. */
-static char	rejname[NAME_MAX + 1];
+static char	rejname[PATH_MAX];
 
 /* how many input lines have been irretractibly output */
 static LINENUM	last_frozen_line = 0;
@@ -201,7 +204,7 @@ main(int argc, char *argv[])
 	Argv = argv;
 	get_some_switches();
 
-	if (backup_type == none) {
+	if (!Vflag) {
 		if ((v = getenv("PATCH_VERSION_CONTROL")) == NULL)
 			v = getenv("VERSION_CONTROL");
 		if (v != NULL || !posix)
@@ -417,7 +420,7 @@ main(int argc, char *argv[])
 		set_signals(1);
 	}
 
-	if (!patch_seen)
+	if (!patch_seen && nonempty_patchf_seen)
 		error = 2;
 
 	my_exit(error);
@@ -595,6 +598,7 @@ get_some_switches(void)
 			break;
 		case 'V':
 			backup_type = get_version(optarg);
+			Vflag = true;
 			break;
 #ifdef DEBUGGING
 		case 'x':
@@ -631,8 +635,8 @@ usage(void)
 	fprintf(stderr,
 "usage: patch [-bCcEeflNnRstuv] [-B backup-prefix] [-D symbol] [-d directory]\n"
 "             [-F max-fuzz] [-i patchfile] [-o out-file] [-p strip-count]\n"
-"             [-r rej-name] [-V t | nil | never] [-x number] [-z backup-ext]\n"
-"             [--posix] [origfile [patchfile]]\n"
+"             [-r rej-name] [-V t | nil | never | none] [-x number]\n"
+"             [-z backup-ext] [--posix] [origfile [patchfile]]\n"
 "       patch <patchfile\n");
 	my_exit(EXIT_FAILURE);
 }
@@ -743,13 +747,13 @@ abort_context_hunk(void)
 static void
 rej_line(int ch, LINENUM i)
 {
-	unsigned short len;
+	size_t len;
 	const char *line = pfetch(i);
 
-	len = strnlen(line, USHRT_MAX);
+	len = strlen(line);
 
 	fprintf(rejfp, "%c%s", ch, line);
-	if (len == 0 || line[len-1] != '\n') {
+	if (len == 0 || line[len - 1] != '\n') {
 		if (len >= USHRT_MAX)
 			fprintf(rejfp, "\n\\ Line too long\n");
 		else
@@ -1023,6 +1027,9 @@ patch_match(LINENUM base, LINENUM offset, LINENUM fuzz)
 	const char	*plineptr;
 	unsigned short	plinelen;
 
+	/* Patch does not match if we don't have any more context to use */
+	if (pline > pat_lines)
+		return false;
 	for (iline = base + offset + fuzz; pline <= pat_lines; pline++, iline++) {
 		ilineptr = ifetch(iline, offset >= 0);
 		if (ilineptr == NULL)

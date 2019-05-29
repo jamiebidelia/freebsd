@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2005-2011 Daniel Braniss <danny@cs.huji.ac.il>
  * All rights reserved.
  *
@@ -29,6 +31,9 @@
 /*
  | $Id: iscsivar.h 743 2009-08-08 10:54:53Z danny $
  */
+#include <sys/lock.h>
+#include <sys/mutex.h>
+
 #define ISCSI_MAX_LUNS		128	// don't touch this
 #if ISCSI_MAX_LUNS > 8
 /*

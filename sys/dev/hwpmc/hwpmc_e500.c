@@ -242,9 +242,6 @@ static struct e500_event_code_map e500_event_codes[] = {
 	PMC_E500MC_ONLY(STWCX_FAILURES, 180),
 };
 
-const size_t e500_event_codes_size = 
-	sizeof(e500_event_codes) / sizeof(e500_event_codes[0]);
-
 static pmc_value_t
 e500_pmcn_read(unsigned int pmc)
 {
@@ -507,6 +504,7 @@ e500_allocate_pmc(int cpu, int ri, struct pmc *pm,
 	pe = a->pm_ev;
 	config = PMLCax_FCS | PMLCax_FCU |
 	    PMLCax_FCM1 | PMLCax_FCM1;
+
 	if (pe < PMC_EV_E500_FIRST || pe > PMC_EV_E500_LAST)
 		return (EINVAL);
 
@@ -517,13 +515,14 @@ e500_allocate_pmc(int cpu, int ri, struct pmc *pm,
 	vers = mfpvr() >> 16;
 	switch (vers) {
 	case FSL_E500v1:
-		pe_cpu_mask = ev->pe_code & PMC_PPC_E500V1;
+		pe_cpu_mask = ev->pe_cpu & PMC_PPC_E500V1;
 		break;
 	case FSL_E500v2:
-		pe_cpu_mask = ev->pe_code & PMC_PPC_E500V2;
+		pe_cpu_mask = ev->pe_cpu & PMC_PPC_E500V2;
 		break;
 	case FSL_E500mc:
-		pe_cpu_mask = ev->pe_code & PMC_PPC_E500MC;
+	case FSL_E5500:
+		pe_cpu_mask = ev->pe_cpu & PMC_PPC_E500MC;
 		break;
 	}
 	if (pe_cpu_mask == 0)
@@ -566,13 +565,14 @@ e500_release_pmc(int cpu, int ri, struct pmc *pmc)
 }
 
 static int
-e500_intr(int cpu, struct trapframe *tf)
+e500_intr(struct trapframe *tf)
 {
-	int i, error, retval;
+	int i, error, retval, cpu;
 	uint32_t config;
 	struct pmc *pm;
 	struct powerpc_cpu *pac;
 
+	cpu = curcpu;
 	KASSERT(cpu >= 0 && cpu < pmc_cpu_max(),
 	    ("[powerpc,%d] out of range CPU %d", __LINE__, cpu));
 
@@ -608,8 +608,7 @@ e500_intr(int cpu, struct trapframe *tf)
 			continue;
 
 		/* Stop the counter if logging fails. */
-		error = pmc_process_interrupt(cpu, PMC_HR, pm, tf,
-		    TRAPF_USERMODE(tf));
+		error = pmc_process_interrupt(PMC_HR, pm, tf);
 		if (error != 0)
 			e500_stop_pmc(cpu, i);
 
@@ -617,8 +616,10 @@ e500_intr(int cpu, struct trapframe *tf)
 		e500_write_pmc(cpu, i, pm->pm_sc.pm_reloadcount);
 	}
 
-	atomic_add_int(retval ? &pmc_stats.pm_intr_processed :
-	    &pmc_stats.pm_intr_ignored, 1);
+	if (retval)
+		counter_u64_add(pmc_stats.pm_intr_processed, 1);
+	else
+		counter_u64_add(pmc_stats.pm_intr_ignored, 1);
 
 	/* Re-enable PERF exceptions. */
 	if (retval)

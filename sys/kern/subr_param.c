@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1980, 1986, 1989, 1993
  *	The Regents of the University of California.  All rights reserved.
  * (c) UNIX System Laboratories, Inc.
@@ -15,7 +17,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 4. Neither the name of the University nor the names of its contributors
+ * 3. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -43,6 +45,7 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/buf.h>
 #include <sys/kernel.h>
 #include <sys/limits.h>
 #include <sys/msgbuf.h>
@@ -76,7 +79,7 @@ __FBSDID("$FreeBSD$");
 #define NBUF 0
 #endif
 #ifndef MAXFILES
-#define	MAXFILES (maxproc * 2)
+#define	MAXFILES (40 + 32 * maxusers)
 #endif
 
 static int sysctl_kern_vm_guest(SYSCTL_HANDLER_ARGS);
@@ -139,23 +142,20 @@ SYSCTL_PROC(_kern, OID_AUTO, vm_guest, CTLFLAG_RD | CTLTYPE_STRING,
     "Virtual machine guest detected?");
 
 /*
- * These have to be allocated somewhere; allocating
- * them here forces loader errors if this file is omitted
- * (if they've been externed everywhere else; hah!).
- */
-struct	buf *swbuf;
-
-/*
  * The elements of this array are ordered based upon the values of the
  * corresponding enum VM_GUEST members.
  */
 static const char *const vm_guest_sysctl_names[] = {
-	"none",
-	"generic",
-	"xen",
-	"hv",
-	"vmware",
-	NULL
+	[VM_GUEST_NO] = "none",
+	[VM_GUEST_VM] = "generic",
+	[VM_GUEST_XEN] = "xen",
+	[VM_GUEST_HV] = "hv",
+	[VM_GUEST_VMWARE] = "vmware",
+	[VM_GUEST_KVM] = "kvm",
+	[VM_GUEST_BHYVE] = "bhyve",
+	[VM_GUEST_VBOX] = "vbox",
+	[VM_GUEST_PARALLELS] = "parallels",
+	[VM_LAST] = NULL
 };
 CTASSERT(nitems(vm_guest_sysctl_names) - 1 == VM_LAST);
 
@@ -166,6 +166,9 @@ void
 init_param1(void)
 {
 
+#if !defined(__mips__) && !defined(__arm64__) && !defined(__sparc64__)
+	TUNABLE_INT_FETCH("kern.kstack_pages", &kstack_pages);
+#endif
 	hz = -1;
 	TUNABLE_INT_FETCH("kern.hz", &hz);
 	if (hz == -1)
@@ -173,6 +176,12 @@ init_param1(void)
 	tick = 1000000 / hz;
 	tick_sbt = SBT_1S / hz;
 	tick_bt = sbttobt(tick_sbt);
+
+	/*
+	 * Arrange for ticks to wrap 10 minutes after boot to help catch
+	 * sign problems sooner.
+	 */
+	ticks = INT_MAX - (hz * 10 * 60);
 
 #ifdef VM_SWZONE_SIZE_MAX
 	maxswzone = VM_SWZONE_SIZE_MAX;
@@ -257,6 +266,8 @@ init_param2(long physpages)
 	TUNABLE_INT_FETCH("kern.maxproc", &maxproc);
 	if (maxproc > (physpages / 12))
 		maxproc = physpages / 12;
+	if (maxproc > pid_max)
+		maxproc = pid_max;
 	maxprocperuid = (maxproc * 9) / 10;
 
 	/*
@@ -269,13 +280,20 @@ init_param2(long physpages)
 	if (maxfiles > (physpages / 4))
 		maxfiles = physpages / 4;
 	maxfilesperproc = (maxfiles / 10) * 9;
-	
+	TUNABLE_INT_FETCH("kern.maxfilesperproc", &maxfilesperproc);
+
 	/*
 	 * Cannot be changed after boot.
 	 */
 	nbuf = NBUF;
 	TUNABLE_INT_FETCH("kern.nbuf", &nbuf);
 	TUNABLE_INT_FETCH("kern.bio_transient_maxcnt", &bio_transient_maxcnt);
+
+	/*
+	 * Physical buffers are pre-allocated buffers (struct buf) that
+	 * are used as temporary holders for I/O, such as paging I/O.
+	 */
+	TUNABLE_INT_FETCH("kern.nswbuf", &nswbuf);
 
 	/*
 	 * The default for maxpipekva is min(1/64 of the kernel address space,

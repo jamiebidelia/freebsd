@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (C) 2009 Gabor Kovesdan <gabor@FreeBSD.org>
  * Copyright (C) 2012 Oleg Moskalenko <mom040267@gmail.com>
  * All rights reserved.
@@ -34,6 +36,7 @@ __FBSDID("$FreeBSD$");
 
 #include <err.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <getopt.h>
 #include <limits.h>
 #include <locale.h>
@@ -59,13 +62,7 @@ nl_catd catalog;
 
 #define	OPTIONS	"bcCdfghik:Mmno:RrsS:t:T:uVz"
 
-#define DEFAULT_RANDOM_SORT_SEED_FILE ("/dev/random")
-#define MAX_DEFAULT_RANDOM_SEED_DATA_SIZE (1024)
-
 static bool need_random;
-static const char *random_source = DEFAULT_RANDOM_SORT_SEED_FILE;
-static const void *random_seed;
-static size_t random_seed_size;
 
 MD5_CTX md5_ctx;
 
@@ -209,14 +206,10 @@ sort_modifier_empty(struct sort_mods *sm)
 static void
 usage(bool opt_err)
 {
-	struct option *o;
 	FILE *out;
 
-	out = stdout;
-	o = &(long_options[0]);
+	out = opt_err ? stderr : stdout;
 
-	if (opt_err)
-		out = stderr;
 	fprintf(out, getstr(12), getprogname());
 	if (opt_err)
 		exit(2);
@@ -271,8 +264,6 @@ set_hw_params(void)
 {
 	long pages, psize;
 
-	pages = psize = 0;
-
 #if defined(SORT_THREADS)
 	ncpu = 1;
 #endif
@@ -280,7 +271,7 @@ set_hw_params(void)
 	pages = sysconf(_SC_PHYS_PAGES);
 	if (pages < 1) {
 		perror("sysconf pages");
-		psize = 1;
+		pages = 1;
 	}
 	psize = sysconf(_SC_PAGESIZE);
 	if (psize < 1) {
@@ -570,55 +561,58 @@ static bool
 set_sort_modifier(struct sort_mods *sm, int c)
 {
 
-	if (sm) {
-		switch (c){
-		case 'b':
-			sm->bflag = true;
-			break;
-		case 'd':
-			sm->dflag = true;
-			break;
-		case 'f':
-			sm->fflag = true;
-			break;
-		case 'g':
-			sm->gflag = true;
-			need_hint = true;
-			break;
-		case 'i':
-			sm->iflag = true;
-			break;
-		case 'R':
-			sm->Rflag = true;
-			need_random = true;
-			break;
-		case 'M':
-			initialise_months();
-			sm->Mflag = true;
-			need_hint = true;
-			break;
-		case 'n':
-			sm->nflag = true;
-			need_hint = true;
-			print_symbols_on_debug = true;
-			break;
-		case 'r':
-			sm->rflag = true;
-			break;
-		case 'V':
-			sm->Vflag = true;
-			break;
-		case 'h':
-			sm->hflag = true;
-			need_hint = true;
-			print_symbols_on_debug = true;
-			break;
-		default:
-			return false;
-		}
-		sort_opts_vals.complex_sort = true;
-		sm->func = get_sort_func(sm);
+	if (sm == NULL)
+		return (true);
+
+	switch (c){
+	case 'b':
+		sm->bflag = true;
+		break;
+	case 'd':
+		sm->dflag = true;
+		break;
+	case 'f':
+		sm->fflag = true;
+		break;
+	case 'g':
+		sm->gflag = true;
+		need_hint = true;
+		break;
+	case 'i':
+		sm->iflag = true;
+		break;
+	case 'R':
+		sm->Rflag = true;
+		need_hint = true;
+		need_random = true;
+		break;
+	case 'M':
+		initialise_months();
+		sm->Mflag = true;
+		need_hint = true;
+		break;
+	case 'n':
+		sm->nflag = true;
+		need_hint = true;
+		print_symbols_on_debug = true;
+		break;
+	case 'r':
+		sm->rflag = true;
+		break;
+	case 'V':
+		sm->Vflag = true;
+		break;
+	case 'h':
+		sm->hflag = true;
+		need_hint = true;
+		print_symbols_on_debug = true;
+		break;
+	default:
+		return (false);
 	}
+
+	sort_opts_vals.complex_sort = true;
+	sm->func = get_sort_func(sm);
 	return (true);
 }
 
@@ -909,59 +903,76 @@ fix_obsolete_keys(int *argc, char **argv)
 }
 
 /*
- * Set random seed
+ * Seed random sort
  */
 static void
-set_random_seed(void)
+get_random_seed(const char *random_source)
 {
-	if (need_random) {
+	char randseed[32];
+	struct stat fsb, rsb;
+	ssize_t rd;
+	int rsfd;
 
-		if (strcmp(random_source, DEFAULT_RANDOM_SORT_SEED_FILE) == 0) {
-			FILE* fseed;
-			MD5_CTX ctx;
-			char rsd[MAX_DEFAULT_RANDOM_SEED_DATA_SIZE];
-			size_t sz = 0;
+	rsfd = -1;
+	rd = sizeof(randseed);
 
-			fseed = openfile(random_source, "r");
-			while (!feof(fseed)) {
-				int cr;
-
-				cr = fgetc(fseed);
-				if (cr == EOF)
-					break;
-
-				rsd[sz++] = (char) cr;
-
-				if (sz >= MAX_DEFAULT_RANDOM_SEED_DATA_SIZE)
-					break;
-			}
-
-			closefile(fseed, random_source);
-
-			MD5Init(&ctx);
-			MD5Update(&ctx, rsd, sz);
-
-			random_seed = MD5End(&ctx, NULL);
-			random_seed_size = strlen(random_seed);
-
-		} else {
-			MD5_CTX ctx;
-			char *b;
-
-			MD5Init(&ctx);
-			b = MD5File(random_source, NULL);
-			if (b == NULL)
-				err(2, NULL);
-
-			random_seed = b;
-			random_seed_size = strlen(b);
-		}
-
-		MD5Init(&md5_ctx);
-		if(random_seed_size>0) {
-			MD5Update(&md5_ctx, random_seed, random_seed_size);
-		}
+	if (random_source == NULL) {
+		if (getentropy(randseed, sizeof(randseed)) < 0)
+			err(EX_SOFTWARE, "getentropy");
+		goto out;
 	}
+
+	rsfd = open(random_source, O_RDONLY | O_CLOEXEC);
+	if (rsfd < 0)
+		err(EX_NOINPUT, "open: %s", random_source);
+
+	if (fstat(rsfd, &fsb) != 0)
+		err(EX_SOFTWARE, "fstat");
+
+	if (!S_ISREG(fsb.st_mode) && !S_ISCHR(fsb.st_mode))
+		err(EX_USAGE,
+		    "random seed isn't a regular file or /dev/random");
+
+	/*
+	 * Regular files: read up to maximum seed size and explicitly
+	 * reject longer files.
+	 */
+	if (S_ISREG(fsb.st_mode)) {
+		if (fsb.st_size > (off_t)sizeof(randseed))
+			errx(EX_USAGE, "random seed is too large (%jd >"
+			    " %zu)!", (intmax_t)fsb.st_size,
+			    sizeof(randseed));
+		else if (fsb.st_size < 1)
+			errx(EX_USAGE, "random seed is too small ("
+			    "0 bytes)");
+
+		memset(randseed, 0, sizeof(randseed));
+
+		rd = read(rsfd, randseed, fsb.st_size);
+		if (rd < 0)
+			err(EX_SOFTWARE, "reading random seed file %s",
+			    random_source);
+		if (rd < (ssize_t)fsb.st_size)
+			errx(EX_SOFTWARE, "short read from %s", random_source);
+	} else if (S_ISCHR(fsb.st_mode)) {
+		if (stat("/dev/random", &rsb) < 0)
+			err(EX_SOFTWARE, "stat");
+
+		if (fsb.st_dev != rsb.st_dev ||
+		    fsb.st_ino != rsb.st_ino)
+			errx(EX_USAGE, "random seed is a character "
+			    "device other than /dev/random");
+
+		if (getentropy(randseed, sizeof(randseed)) < 0)
+			err(EX_SOFTWARE, "getentropy");
+	}
+
+out:
+	if (rsfd >= 0)
+		close(rsfd);
+
+	MD5Init(&md5_ctx);
+	MD5Update(&md5_ctx, randseed, rd);
 }
 
 /*
@@ -971,6 +982,7 @@ int
 main(int argc, char **argv)
 {
 	char *outfile, *real_outfile;
+	char *random_source = NULL;
 	int c, result;
 	bool mef_flags[NUMBER_OF_MUTUALLY_EXCLUSIVE_FLAGS] =
 	    { false, false, false, false, false, false };
@@ -1168,6 +1180,11 @@ main(int argc, char **argv)
 	argc -= optind;
 	argv += optind;
 
+	if (argv_from_file0) {
+		argc = argc_from_file0;
+		argv = argv_from_file0;
+	}
+
 #ifndef WITHOUT_NLS
 	catalog = catopen("sort", NL_CAT_LOCALE);
 #endif
@@ -1205,11 +1222,6 @@ main(int argc, char **argv)
 		ks->sm.func = get_sort_func(&(ks->sm));
 	}
 
-	if (argv_from_file0) {
-		argc = argc_from_file0;
-		argv = argv_from_file0;
-	}
-
 	if (debug_sort) {
 		printf("Memory to be used for sorting: %llu\n",available_free_memory);
 #if defined(SORT_THREADS)
@@ -1230,7 +1242,8 @@ main(int argc, char **argv)
 		}
 	}
 
-	set_random_seed();
+	if (need_random)
+		get_random_seed(random_source);
 
 	/* Case when the outfile equals one of the input files: */
 	if (strcmp(outfile, "-")) {
@@ -1303,7 +1316,11 @@ main(int argc, char **argv)
 		struct file_list fl;
 
 		file_list_init(&fl, false);
-		file_list_populate(&fl, argc, argv, true);
+		/* No file arguments remaining means "read from stdin." */
+		if (argc == 0)
+			file_list_add(&fl, "-", true);
+		else
+			file_list_populate(&fl, argc, argv, true);
 		merge_files(&fl, outfile);
 		file_list_clean(&fl);
 	}

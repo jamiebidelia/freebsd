@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 1998, 2001 Nicolas Souchu
  * All rights reserved.
  *
@@ -40,7 +42,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/mutex.h>
 #include <sys/rman.h>
 #include <sys/sysctl.h>
-#include <sys/bus.h> 
+#include <sys/bus.h>
 
 #include <dev/iicbus/iiconf.h>
 #include <dev/iicbus/iicbus.h>
@@ -61,7 +63,7 @@ iicbus_probe(device_t dev)
 }
 
 #if SCAN_IICBUS
-static int 
+static int
 iic_probe_device(device_t dev, u_char addr)
 {
 	int count;
@@ -127,7 +129,7 @@ iicbus_attach(device_t dev)
 	bus_generic_attach(dev);
         return (0);
 }
-  
+
 static int
 iicbus_detach(device_t dev)
 {
@@ -135,10 +137,11 @@ iicbus_detach(device_t dev)
 
 	iicbus_reset(dev, IIC_FASTEST, 0, NULL);
 	bus_generic_detach(dev);
+	device_delete_children(dev);
 	mtx_destroy(&sc->lock);
 	return (0);
 }
-  
+
 static int
 iicbus_print_child(device_t dev, device_t child)
 {
@@ -148,7 +151,7 @@ iicbus_print_child(device_t dev, device_t child)
 	retval += bus_print_child_header(dev, child);
 	if (devi->addr != 0)
 		retval += printf(" at addr %#x", devi->addr);
-	resource_list_print_type(&devi->rl, "irq", SYS_RES_IRQ, "%ld");
+	resource_list_print_type(&devi->rl, "irq", SYS_RES_IRQ, "%jd");
 	retval += bus_print_child_footer(dev, child);
 
 	return (retval);
@@ -191,6 +194,22 @@ iicbus_read_ivar(device_t bus, device_t child, int which, uintptr_t *result)
 	case IICBUS_IVAR_ADDR:
 		*result = devi->addr;
 		break;
+	}
+	return (0);
+}
+
+static int
+iicbus_write_ivar(device_t bus, device_t child, int which, uintptr_t value)
+{
+	struct iicbus_ivar *devi = IICBUS_IVAR(child);
+
+	switch (which) {
+	default:
+		return (EINVAL);
+	case IICBUS_IVAR_ADDR:
+		if (devi->addr != 0)
+			return (EINVAL);
+		devi->addr = value;
 	}
 	return (0);
 }
@@ -327,6 +346,7 @@ static device_method_t iicbus_methods[] = {
 	DEVMETHOD(bus_print_child,	iicbus_print_child),
 	DEVMETHOD(bus_probe_nomatch,	iicbus_probe_nomatch),
 	DEVMETHOD(bus_read_ivar,	iicbus_read_ivar),
+	DEVMETHOD(bus_write_ivar,	iicbus_write_ivar),
 	DEVMETHOD(bus_child_pnpinfo_str, iicbus_child_pnpinfo_str),
 	DEVMETHOD(bus_child_location_str, iicbus_child_location_str),
 	DEVMETHOD(bus_hinted_child,	iicbus_hinted_child),

@@ -13,7 +13,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "ClangSACheckers.h"
+#include "clang/StaticAnalyzer/Checkers/BuiltinCheckerRegistration.h"
 #include "clang/StaticAnalyzer/Core/BugReporter/BugType.h"
 #include "clang/StaticAnalyzer/Core/Checker.h"
 #include "clang/StaticAnalyzer/Core/CheckerManager.h"
@@ -80,16 +80,16 @@ void ReturnUndefChecker::checkPreStmt(const ReturnStmt *RS,
 
 static void emitBug(CheckerContext &C, BuiltinBug &BT, const Expr *RetE,
                     const Expr *TrackingE = nullptr) {
-  ExplodedNode *N = C.generateSink();
+  ExplodedNode *N = C.generateErrorNode();
   if (!N)
     return;
 
-  BugReport *Report = new BugReport(BT, BT.getDescription(), N);
+  auto Report = llvm::make_unique<BugReport>(BT, BT.getDescription(), N);
 
   Report->addRange(RetE->getSourceRange());
-  bugreporter::trackNullOrUndefValue(N, TrackingE ? TrackingE : RetE, *Report);
+  bugreporter::trackExpressionValue(N, TrackingE ? TrackingE : RetE, *Report);
 
-  C.emitReport(Report);
+  C.emitReport(std::move(Report));
 }
 
 void ReturnUndefChecker::emitUndef(CheckerContext &C, const Expr *RetE) const {

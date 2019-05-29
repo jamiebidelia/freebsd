@@ -50,16 +50,39 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm.h>
 #include <vm/pmap.h>
 
+#include <dev/ofw/openfirm.h>
+#include <dev/ofw/ofw_pci.h>
+#include <dev/ofw/ofw_bus.h>
+#include <dev/ofw/ofw_bus_subr.h>
+
 #include <dev/pci/pcivar.h>
 #include <dev/pci/pcireg.h>
 #include <dev/pci/pcib_private.h>
 
+#include <machine/intr_machdep.h>
+
 #include "pcib_if.h"
+
+DECLARE_CLASS(ofw_pcib_pci_driver);
+
+struct fsl_pcib_softc {
+        /*
+         * This is here so that we can use pci bridge methods, too - the
+         * generic routines only need the dev, secbus and subbus members
+         * filled.
+         *
+         * XXX: This should be extracted from ofw_pcib_pci.c, and shared in a
+         * header.
+         */
+        struct pcib_softc       ops_pcib_sc;
+	phandle_t		ops_node;
+        struct ofw_bus_iinfo    ops_iinfo;
+};
 
 static int
 fsl_pcib_rc_probe(device_t dev)
 {
-	printf("Probe called\n");
+
 	if (pci_get_vendor(dev) != 0x1957)
 		return (ENXIO);
 	if (pci_get_progif(dev) != 0)
@@ -72,33 +95,13 @@ fsl_pcib_rc_probe(device_t dev)
 	return (BUS_PROBE_DEFAULT);
 }
 
-static int
-fsl_pcib_rc_attach(device_t dev)
-{
-	struct pcib_softc *sc;
-	device_t child;
-
-	pcib_bridge_init(dev);
-	pcib_attach_common(dev);
-
-	sc = device_get_softc(dev);
-	if (sc->bus.sec != 0) {
-		child = device_add_child(dev, "pci", -1);
-		if (child != NULL)
-			return (bus_generic_attach(dev));
-	}
-
-	return (0);
-}
-
 static device_method_t fsl_pcib_rc_methods[] = {
 	DEVMETHOD(device_probe,		fsl_pcib_rc_probe),
-	DEVMETHOD(device_attach,	fsl_pcib_rc_attach),
 	DEVMETHOD_END
 };
 
 static devclass_t fsl_pcib_rc_devclass;
 DEFINE_CLASS_1(pcib, fsl_pcib_rc_driver, fsl_pcib_rc_methods,
-    sizeof(struct pcib_softc), pcib_driver);
-DRIVER_MODULE(rcpcib, pci, fsl_pcib_rc_driver, fsl_pcib_rc_devclass, 0, 0);
-
+    sizeof(struct fsl_pcib_softc), ofw_pcib_pci_driver);
+EARLY_DRIVER_MODULE(rcpcib, pci, fsl_pcib_rc_driver, fsl_pcib_rc_devclass, 0, 0,
+    BUS_PASS_BUS);

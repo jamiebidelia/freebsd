@@ -32,9 +32,19 @@
 #ifndef _GIC_V3_VAR_H_
 #define _GIC_V3_VAR_H_
 
+#include <arm/arm/gic_common.h>
+
 #define	GIC_V3_DEVSTR	"ARM Generic Interrupt Controller v3.0"
 
 DECLARE_CLASS(gic_v3_driver);
+
+struct gic_v3_irqsrc;
+
+struct redist_lpis {
+	vm_offset_t		conf_base;
+	vm_offset_t		pend_base[MAXCPU];
+	uint64_t		flags;
+};
 
 struct gic_redists {
 	/*
@@ -47,6 +57,8 @@ struct gic_redists {
 	u_int			nregions;
 	/* Per-CPU Re-Distributor handler */
 	struct resource *	pcpu[MAXCPU];
+	/* LPIs data */
+	struct redist_lpis	lpis;
 };
 
 struct gic_v3_softc {
@@ -58,17 +70,46 @@ struct gic_v3_softc {
 	/* Re-Distributors */
 	struct gic_redists	gic_redists;
 
+	uint32_t		gic_pidr2;
+	u_int			gic_bus;
+
 	u_int			gic_nirqs;
 	u_int			gic_idbits;
 
 	boolean_t		gic_registered;
+
+	int			gic_nchildren;
+	device_t		*gic_children;
+	struct intr_pic		*gic_pic;
+	struct gic_v3_irqsrc	*gic_irqs;
 };
 
+
+struct gic_v3_devinfo {
+	int gic_domain;
+	int msi_xref;
+};
+
+#define GIC_INTR_ISRC(sc, irq)	(&sc->gic_irqs[irq].gi_isrc)
+
 MALLOC_DECLARE(M_GIC_V3);
+
+/* ivars */
+#define	GICV3_IVAR_NIRQS	1000
+#define	GICV3_IVAR_REDIST_VADDR	1001
+
+__BUS_ACCESSOR(gicv3, nirqs, GICV3, NIRQS, u_int);
+__BUS_ACCESSOR(gicv3, redist_vaddr, GICV3, REDIST_VADDR, void *);
 
 /* Device methods */
 int gic_v3_attach(device_t dev);
 int gic_v3_detach(device_t dev);
+int arm_gic_v3_intr(void *);
+
+uint32_t gic_r_read_4(device_t, bus_size_t);
+uint64_t gic_r_read_8(device_t, bus_size_t);
+void gic_r_write_4(device_t, bus_size_t, uint32_t var);
+void gic_r_write_8(device_t, bus_size_t, uint64_t var);
 
 /*
  * GIC Distributor accessors.

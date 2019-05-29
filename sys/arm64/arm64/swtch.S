@@ -29,52 +29,67 @@
  *
  */
 
-#include "assym.s"
+#include "assym.inc"
+#include "opt_kstack_pages.h"
+#include "opt_sched.h"
 
 #include <machine/asm.h>
 
 __FBSDID("$FreeBSD$");
 
+.macro clear_step_flag pcbflags, tmp
+	tbz	\pcbflags, #PCB_SINGLE_STEP_SHIFT, 999f
+	mrs	\tmp, mdscr_el1
+	bic	\tmp, \tmp, #1
+	msr	mdscr_el1, \tmp
+	isb
+999:
+.endm
+
+.macro set_step_flag pcbflags, tmp
+	tbz	\pcbflags, #PCB_SINGLE_STEP_SHIFT, 999f
+	mrs	\tmp, mdscr_el1
+	orr	\tmp, \tmp, #1
+	msr	mdscr_el1, \tmp
+	isb
+999:
+.endm
+
 /*
  * void cpu_throw(struct thread *old, struct thread *new)
  */
 ENTRY(cpu_throw)
-#ifdef SMP
-#error cpu_throw needs to be ported to support SMP
-#endif
+	/* Of old == NULL skip disabling stepping */
+	cbz	x0, 1f
+
+	/* If we were single stepping, disable it */
+	ldr	x4, [x0, #TD_PCB]
+	ldr	w5, [x4, #PCB_FLAGS]
+	clear_step_flag w5, x6
+1:
 
 #ifdef VFP
 	/* Backup the new thread pointer around a call to C code */
-	mov	x19, x1
+	mov	x19, x0
+	mov	x20, x1
 	bl	vfp_discard
-	mov	x1, x19
+	mov	x1, x20
+	mov	x0, x19
 #endif
 
-	/* Store the new curthread */
-	str	x1, [x18, #PC_CURTHREAD]
-	/* And the new pcb */
-	ldr	x4, [x1, #TD_PCB]
-	str	x4, [x18, #PC_CURPCB]
+	bl	pmap_switch
+	mov	x4, x0
 
-	/*
-	 * TODO: We may need to flush the cache here.
-	 */
-
-	/* Switch to the new pmap */
-	ldr	x5, [x4, #PCB_L1ADDR]
-	msr	ttbr0_el1, x5
-	isb
-
-	/* Invalidate the TLB */
-	dsb	sy
-	tlbi	vmalle1is
-	dsb	sy
-	isb
+	/* If we are single stepping, enable it */
+	ldr	w5, [x4, #PCB_FLAGS]
+	set_step_flag w5, x6
 
 	/* Restore the registers */
 	ldp	x5, x6, [x4, #PCB_SP]
 	mov	sp, x5
 	msr	tpidr_el0, x6
+	ldr	x6, [x4, #PCB_TPIDRRO]
+	msr	tpidrro_el0, x6
 	ldp	x8, x9, [x4, #PCB_REGS + 8 * 8]
 	ldp	x10, x11, [x4, #PCB_REGS + 10 * 8]
 	ldp	x12, x13, [x4, #PCB_REGS + 12 * 8]
@@ -100,16 +115,6 @@ END(cpu_throw)
  * x3 to x7, x16 and x17 are caller saved
  */
 ENTRY(cpu_switch)
-#ifdef SMP
-#error cpu_switch needs to be ported to support SMP
-#endif
-
-	/* Store the new curthread */
-	str	x1, [x18, #PC_CURTHREAD]
-	/* And the new pcb */
-	ldr	x4, [x1, #TD_PCB]
-	str	x4, [x18, #PC_CURPCB]
-
 	/*
 	 * Save the old context.
 	 */
@@ -130,50 +135,58 @@ ENTRY(cpu_switch)
 	str	x30, [x4, #PCB_REGS + 30 * 8]
 	/* And the old stack pointer */
 	mov	x5, sp
+	mrs	x6, tpidrro_el0
+	str	x6, [x4, #PCB_TPIDRRO]
 	mrs	x6, tpidr_el0
 	stp	x5, x6, [x4, #PCB_SP]
 
-#ifdef VFP
+	/* If we were single stepping, disable it */
+	ldr	w5, [x4, #PCB_FLAGS]
+	clear_step_flag w5, x6
+
 	mov	x19, x0
 	mov	x20, x1
 	mov	x21, x2
+
+#ifdef VFP
+	/* Load the pcb address */
+	mov	x1, x4
 	bl	vfp_save_state
-	mov	x2, x21
 	mov	x1, x20
 	mov	x0, x19
 #endif
 
-	/*
-	 * Restore the saved context.
-	 */
-	ldr	x4, [x1, #TD_PCB]
+	bl	pmap_switch
+	/* Move the new pcb out of the way */
+	mov	x4, x0
+
+	mov	x2, x21
+	mov	x1, x20
+	mov	x0, x19
 
 	/*
-	 * TODO: We may need to flush the cache here if switching
-	 * to a user process.
+	 * Release the old thread.
 	 */
-
-	/* Switch to the new pmap */
-	ldr	x5, [x4, #PCB_L1ADDR]
-	msr	ttbr0_el1, x5
-	isb
-
-	/* Invalidate the TLB */
-	dsb	sy
-	tlbi	vmalle1is
-	dsb	sy
-	isb
-
-	/* Release the old thread */
-	str	x2, [x0, #TD_LOCK]
+	stlr	x2, [x0, #TD_LOCK]
 #if defined(SCHED_ULE) && defined(SMP)
-#error We may need to wait for the lock here
+	/* Spin if TD_LOCK points to a blocked_lock */
+	ldr	x2, =_C_LABEL(blocked_lock)
+1:
+	ldar	x3, [x1, #TD_LOCK]
+	cmp	x3, x2
+	b.eq	1b
 #endif
+
+	/* If we are single stepping, enable it */
+	ldr	w5, [x4, #PCB_FLAGS]
+	set_step_flag w5, x6
 
 	/* Restore the registers */
 	ldp	x5, x6, [x4, #PCB_SP]
 	mov	sp, x5
 	msr	tpidr_el0, x6
+	ldr	x6, [x4, #PCB_TPIDRRO]
+	msr	tpidrro_el0, x6
 	ldp	x8, x9, [x4, #PCB_REGS + 8 * 8]
 	ldp	x10, x11, [x4, #PCB_REGS + 10 * 8]
 	ldp	x12, x13, [x4, #PCB_REGS + 12 * 8]
@@ -200,11 +213,6 @@ ENTRY(fork_trampoline)
 	mov	fp, #0	/* Stack traceback stops here. */
 	bl	_C_LABEL(fork_exit)
 
-	/* Restore sp and lr */
-	ldp	x0, x1, [sp]
-	msr	sp_el0, x0
-	mov	lr, x1
-
 	/* Restore the registers other than x0 and x1 */
 	ldp	x2, x3, [sp, #TF_X + 2 * 8]
 	ldp	x4, x5, [sp, #TF_X + 4 * 8]
@@ -220,16 +228,20 @@ ENTRY(fork_trampoline)
 	ldp	x24, x25, [sp, #TF_X + 24 * 8]
 	ldp	x26, x27, [sp, #TF_X + 26 * 8]
 	ldp	x28, x29, [sp, #TF_X + 28 * 8]
-	/* Skip x30 as it was restored above as lr */
 
 	/*
 	 * Disable interrupts to avoid
-	 * overwriting spsr_el1 by an IRQ exception.
+	 * overwriting spsr_el1 and sp_el0 by an IRQ exception.
 	 */
 	msr	daifset, #2
 
+	/* Restore sp and lr */
+	ldp	x0, x1, [sp, #TF_SP]
+	msr	sp_el0, x0
+	mov	lr, x1
+
 	/* Restore elr and spsr */
-	ldp	x0, x1, [sp, #16]
+	ldp	x0, x1, [sp, #TF_ELR]
 	msr	elr_el1, x0
 	msr	spsr_el1, x1
 
@@ -246,10 +258,35 @@ ENTRY(fork_trampoline)
 END(fork_trampoline)
 
 ENTRY(savectx)
-	adr	x0, .Lsavectx_panic_str
-	bl	panic
+	/* Store the callee-saved registers */
+	stp	x8,  x9,  [x0, #PCB_REGS + 8 * 8]
+	stp	x10, x11, [x0, #PCB_REGS + 10 * 8]
+	stp	x12, x13, [x0, #PCB_REGS + 12 * 8]
+	stp	x14, x15, [x0, #PCB_REGS + 14 * 8]
+	stp	x16, x17, [x0, #PCB_REGS + 16 * 8]
+	stp	x18, x19, [x0, #PCB_REGS + 18 * 8]
+	stp	x20, x21, [x0, #PCB_REGS + 20 * 8]
+	stp	x22, x23, [x0, #PCB_REGS + 22 * 8]
+	stp	x24, x25, [x0, #PCB_REGS + 24 * 8]
+	stp	x26, x27, [x0, #PCB_REGS + 26 * 8]
+	stp	x28, x29, [x0, #PCB_REGS + 28 * 8]
+	str	x30, [x0, #PCB_REGS + 30 * 8]
+	/* And the old stack pointer */
+	mov	x5, sp
+	mrs	x6, tpidrro_el0
+	str	x6, [x0, #PCB_TPIDRRO]
+	mrs	x6, tpidr_el0
+	stp	x5, x6, [x0, #PCB_SP]
+
+	/* Store the VFP registers */
+#ifdef VFP
+	mov	x28, lr
+	mov	x1, x0			/* move pcb to the correct register */
+	mov	x0, xzr			/* td = NULL */
+	bl	vfp_save_state
+	mov	lr, x28
+#endif
+
 	ret
-.Lsavectx_panic_str:
-	.asciz "savectx"
 END(savectx)
 

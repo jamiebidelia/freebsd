@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1982, 1986, 1988, 1990, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -10,7 +12,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 4. Neither the name of the University nor the names of its contributors
+ * 3. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -33,7 +35,7 @@
 __FBSDID("$FreeBSD$");
 
 #include "opt_inet.h"
-#include "opt_ipfw.h"
+#include "opt_ratelimit.h"
 #include "opt_ipsec.h"
 #include "opt_mbuf_stress_test.h"
 #include "opt_mpath.h"
@@ -44,11 +46,13 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
+#include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/mbuf.h>
 #include <sys/priv.h>
 #include <sys/proc.h>
 #include <sys/protosw.h>
+#include <sys/rmlock.h>
 #include <sys/sdt.h>
 #include <sys/socket.h>
 #include <sys/socketvar.h>
@@ -61,7 +65,6 @@ __FBSDID("$FreeBSD$");
 #include <net/netisr.h>
 #include <net/pfil.h>
 #include <net/route.h>
-#include <net/flowtable.h>
 #ifdef RADIX_MPATH
 #include <net/radix_mpath.h>
 #endif
@@ -69,6 +72,7 @@ __FBSDID("$FreeBSD$");
 #include <net/vnet.h>
 
 #include <netinet/in.h>
+#include <netinet/in_fib.h>
 #include <netinet/in_kdtrace.h>
 #include <netinet/in_systm.h>
 #include <netinet/ip.h>
@@ -77,15 +81,16 @@ __FBSDID("$FreeBSD$");
 #include <netinet/in_var.h>
 #include <netinet/ip_var.h>
 #include <netinet/ip_options.h>
+
+#include <netinet/udp.h>
+#include <netinet/udp_var.h>
+
 #ifdef SCTP
 #include <netinet/sctp.h>
 #include <netinet/sctp_crc32.h>
 #endif
 
-#ifdef IPSEC
-#include <netinet/ip_ipsec.h>
-#include <netipsec/ipsec.h>
-#endif /* IPSEC*/
+#include <netipsec/ipsec_support.h>
 
 #include <machine/in_cksum.h>
 
@@ -97,12 +102,152 @@ SYSCTL_INT(_net_inet_ip, OID_AUTO, mbuf_frag_size, CTLFLAG_RW,
 	&mbuf_frag_size, 0, "Fragment outgoing mbufs to this size");
 #endif
 
-static void	ip_mloopback
-	(struct ifnet *, struct mbuf *, struct sockaddr_in *, int);
+static void	ip_mloopback(struct ifnet *, const struct mbuf *, int);
 
 
 extern int in_mcast_loop;
 extern	struct protosw inetsw[];
+
+static inline int
+ip_output_pfil(struct mbuf **mp, struct ifnet *ifp, struct inpcb *inp,
+    struct sockaddr_in *dst, int *fibnum, int *error)
+{
+	struct m_tag *fwd_tag = NULL;
+	struct mbuf *m;
+	struct in_addr odst;
+	struct ip *ip;
+
+	m = *mp;
+	ip = mtod(m, struct ip *);
+
+	/* Run through list of hooks for output packets. */
+	odst.s_addr = ip->ip_dst.s_addr;
+	switch (pfil_run_hooks(V_inet_pfil_head, mp, ifp, PFIL_OUT, inp)) {
+	case PFIL_DROPPED:
+		*error = EPERM;
+		/* FALLTHROUGH */
+	case PFIL_CONSUMED:
+		return 1; /* Finished */
+	case PFIL_PASS:
+		*error = 0;
+	}
+	m = *mp;
+	ip = mtod(m, struct ip *);
+
+	/* See if destination IP address was changed by packet filter. */
+	if (odst.s_addr != ip->ip_dst.s_addr) {
+		m->m_flags |= M_SKIP_FIREWALL;
+		/* If destination is now ourself drop to ip_input(). */
+		if (in_localip(ip->ip_dst)) {
+			m->m_flags |= M_FASTFWD_OURS;
+			if (m->m_pkthdr.rcvif == NULL)
+				m->m_pkthdr.rcvif = V_loif;
+			if (m->m_pkthdr.csum_flags & CSUM_DELAY_DATA) {
+				m->m_pkthdr.csum_flags |=
+					CSUM_DATA_VALID | CSUM_PSEUDO_HDR;
+				m->m_pkthdr.csum_data = 0xffff;
+			}
+			m->m_pkthdr.csum_flags |=
+				CSUM_IP_CHECKED | CSUM_IP_VALID;
+#ifdef SCTP
+			if (m->m_pkthdr.csum_flags & CSUM_SCTP)
+				m->m_pkthdr.csum_flags |= CSUM_SCTP_VALID;
+#endif
+			*error = netisr_queue(NETISR_IP, m);
+			return 1; /* Finished */
+		}
+
+		bzero(dst, sizeof(*dst));
+		dst->sin_family = AF_INET;
+		dst->sin_len = sizeof(*dst);
+		dst->sin_addr = ip->ip_dst;
+
+		return -1; /* Reloop */
+	}
+	/* See if fib was changed by packet filter. */
+	if ((*fibnum) != M_GETFIB(m)) {
+		m->m_flags |= M_SKIP_FIREWALL;
+		*fibnum = M_GETFIB(m);
+		return -1; /* Reloop for FIB change */
+	}
+
+	/* See if local, if yes, send it to netisr with IP_FASTFWD_OURS. */
+	if (m->m_flags & M_FASTFWD_OURS) {
+		if (m->m_pkthdr.rcvif == NULL)
+			m->m_pkthdr.rcvif = V_loif;
+		if (m->m_pkthdr.csum_flags & CSUM_DELAY_DATA) {
+			m->m_pkthdr.csum_flags |=
+				CSUM_DATA_VALID | CSUM_PSEUDO_HDR;
+			m->m_pkthdr.csum_data = 0xffff;
+		}
+#ifdef SCTP
+		if (m->m_pkthdr.csum_flags & CSUM_SCTP)
+			m->m_pkthdr.csum_flags |= CSUM_SCTP_VALID;
+#endif
+		m->m_pkthdr.csum_flags |=
+			CSUM_IP_CHECKED | CSUM_IP_VALID;
+
+		*error = netisr_queue(NETISR_IP, m);
+		return 1; /* Finished */
+	}
+	/* Or forward to some other address? */
+	if ((m->m_flags & M_IP_NEXTHOP) &&
+	    ((fwd_tag = m_tag_find(m, PACKET_TAG_IPFORWARD, NULL)) != NULL)) {
+		bcopy((fwd_tag+1), dst, sizeof(struct sockaddr_in));
+		m->m_flags |= M_SKIP_FIREWALL;
+		m->m_flags &= ~M_IP_NEXTHOP;
+		m_tag_delete(m, fwd_tag);
+
+		return -1; /* Reloop for CHANGE of dst */
+	}
+
+	return 0;
+}
+
+static int
+ip_output_send(struct inpcb *inp, struct ifnet *ifp, struct mbuf *m,
+    const struct sockaddr_in *gw, struct route *ro)
+{
+	struct m_snd_tag *mst;
+	int error;
+
+	MPASS((m->m_pkthdr.csum_flags & CSUM_SND_TAG) == 0);
+	mst = NULL;
+
+#ifdef RATELIMIT
+	if (inp != NULL) {
+		if ((inp->inp_flags2 & INP_RATE_LIMIT_CHANGED) != 0 ||
+		    (inp->inp_snd_tag != NULL &&
+		    inp->inp_snd_tag->ifp != ifp))
+			in_pcboutput_txrtlmt(inp, ifp, m);
+
+		if (inp->inp_snd_tag != NULL)
+			mst = inp->inp_snd_tag;
+	}
+#endif
+	if (mst != NULL) {
+		KASSERT(m->m_pkthdr.rcvif == NULL,
+		    ("trying to add a send tag to a forwarded packet"));
+		if (mst->ifp != ifp) {
+			error = EAGAIN;
+			goto done;
+		}
+
+		/* stamp send tag on mbuf */
+		m->m_pkthdr.snd_tag = m_snd_tag_ref(mst);
+		m->m_pkthdr.csum_flags |= CSUM_SND_TAG;
+	}
+
+	error = (*ifp->if_output)(ifp, m, (const struct sockaddr *)gw, ro);
+
+done:
+	/* Check for route change invalidating send tags. */
+#ifdef RATELIMIT
+	if (error == EAGAIN)
+		in_pcboutput_eagain(inp);
+#endif
+	return (error);
+}
 
 /*
  * IP output.  The packet in mbuf chain m contains a skeletal IP
@@ -120,25 +265,22 @@ int
 ip_output(struct mbuf *m, struct mbuf *opt, struct route *ro, int flags,
     struct ip_moptions *imo, struct inpcb *inp)
 {
+	struct rm_priotracker in_ifa_tracker;
+	struct epoch_tracker et;
 	struct ip *ip;
 	struct ifnet *ifp = NULL;	/* keep compiler happy */
 	struct mbuf *m0;
 	int hlen = sizeof (struct ip);
 	int mtu;
 	int error = 0;
-	struct sockaddr_in *dst;
+	struct sockaddr_in *dst, sin;
 	const struct sockaddr_in *gw;
 	struct in_ifaddr *ia;
+	struct in_addr src;
 	int isbroadcast;
 	uint16_t ip_len, ip_off;
-	struct route iproute;
-	struct rtentry *rte;	/* cache for ro->ro_rt */
-	struct in_addr odst;
-	struct m_tag *fwd_tag = NULL;
 	uint32_t fibnum;
-	int have_ia_ref;
-	int needfiblookup;
-#ifdef IPSEC
+#if defined(IPSEC) || defined(IPSEC_SUPPORT)
 	int no_route_but_check_spd = 0;
 #endif
 	M_ASSERTPKTHDR(m);
@@ -150,17 +292,10 @@ ip_output(struct mbuf *m, struct mbuf *opt, struct route *ro, int flags,
 			m->m_pkthdr.flowid = inp->inp_flowid;
 			M_HASHTYPE_SET(m, inp->inp_flowtype);
 		}
-	}
-
-	if (ro == NULL) {
-		ro = &iproute;
-		bzero(ro, sizeof (*ro));
-	}
-
-#ifdef FLOWTABLE
-	if (ro->ro_rt == NULL)
-		(void )flowtable_lookup(AF_INET, m, ro);
+#ifdef NUMA
+		m->m_pkthdr.numa_domain = inp->inp_numa_domain;
 #endif
+	}
 
 	if (opt) {
 		int len = 0;
@@ -176,47 +311,54 @@ ip_output(struct mbuf *m, struct mbuf *opt, struct route *ro, int flags,
 		ip->ip_v = IPVERSION;
 		ip->ip_hl = hlen >> 2;
 		ip_fillid(ip);
-		IPSTAT_INC(ips_localout);
 	} else {
 		/* Header already set, fetch hlen from there */
 		hlen = ip->ip_hl << 2;
 	}
+	if ((flags & IP_FORWARDING) == 0)
+		IPSTAT_INC(ips_localout);
 
 	/*
 	 * dst/gw handling:
 	 *
-	 * dst can be rewritten but always points to &ro->ro_dst.
 	 * gw is readonly but can point either to dst OR rt_gateway,
 	 * therefore we need restore gw if we're redoing lookup.
 	 */
-	gw = dst = (struct sockaddr_in *)&ro->ro_dst;
 	fibnum = (inp != NULL) ? inp->inp_inc.inc_fibnum : M_GETFIB(m);
-again:
-	ia = NULL;
-	have_ia_ref = 0;
-	/*
-	 * If there is a cached route, check that it is to the same
-	 * destination and is still up.  If not, free it and try again.
-	 * The address family should also be checked in case of sharing
-	 * the cache with IPv6.
-	 */
-	rte = ro->ro_rt;
-	if (rte && ((rte->rt_flags & RTF_UP) == 0 ||
-		    rte->rt_ifp == NULL ||
-		    !RT_LINK_IS_UP(rte->rt_ifp) ||
-			  dst->sin_family != AF_INET ||
-			  dst->sin_addr.s_addr != ip->ip_dst.s_addr)) {
-		RO_RTFREE(ro);
-		ro->ro_lle = NULL;
-		rte = NULL;
-		gw = dst;
-	}
-	if (rte == NULL && fwd_tag == NULL) {
+	if (ro != NULL)
+		dst = (struct sockaddr_in *)&ro->ro_dst;
+	else
+		dst = &sin;
+	if (ro == NULL || ro->ro_rt == NULL) {
 		bzero(dst, sizeof(*dst));
 		dst->sin_family = AF_INET;
 		dst->sin_len = sizeof(*dst);
 		dst->sin_addr = ip->ip_dst;
 	}
+	gw = dst;
+	NET_EPOCH_ENTER(et);
+again:
+	/*
+	 * Validate route against routing table additions;
+	 * a better/more specific route might have been added.
+	 */
+	if (inp != NULL && ro != NULL && ro->ro_rt != NULL)
+		RT_VALIDATE(ro, &inp->inp_rt_cookie, fibnum);
+	/*
+	 * If there is a cached route,
+	 * check that it is to the same destination
+	 * and is still up.  If not, free it and try again.
+	 * The address family should also be checked in case of sharing the
+	 * cache with IPv6.
+	 * Also check whether routing cache needs invalidation.
+	 */
+	if (ro != NULL && ro->ro_rt != NULL &&
+	    ((ro->ro_rt->rt_flags & RTF_UP) == 0 ||
+	    ro->ro_rt->rt_ifp == NULL || !RT_LINK_IS_UP(ro->ro_rt->rt_ifp) ||
+	    dst->sin_family != AF_INET ||
+	    dst->sin_addr.s_addr != ip->ip_dst.s_addr))
+		RO_INVALIDATE_CACHE(ro);
+	ia = NULL;
 	/*
 	 * If routing to interface only, short circuit routing lookup.
 	 * The use of an all-ones broadcast address implies this; an
@@ -232,12 +374,13 @@ again:
 			error = ENETUNREACH;
 			goto bad;
 		}
-		have_ia_ref = 1;
 		ip->ip_dst.s_addr = INADDR_BROADCAST;
 		dst->sin_addr = ip->ip_dst;
 		ifp = ia->ia_ifp;
+		mtu = ifp->if_mtu;
 		ip->ip_ttl = 1;
 		isbroadcast = 1;
+		src = IA_SIN(ia)->sin_addr;
 	} else if (flags & IP_ROUTETOIF) {
 		if ((ia = ifatoia(ifa_ifwithdstaddr(sintosa(dst),
 						    M_GETFIB(m)))) == NULL &&
@@ -247,10 +390,12 @@ again:
 			error = ENETUNREACH;
 			goto bad;
 		}
-		have_ia_ref = 1;
 		ifp = ia->ia_ifp;
+		mtu = ifp->if_mtu;
 		ip->ip_ttl = 1;
-		isbroadcast = in_broadcast(dst->sin_addr, ifp);
+		isbroadcast = ifp->if_flags & IFF_BROADCAST ?
+		    in_ifaddr_broadcast(dst->sin_addr, ia) : 0;
+		src = IA_SIN(ia)->sin_addr;
 	} else if (IN_MULTICAST(ntohl(ip->ip_dst.s_addr)) &&
 	    imo != NULL && imo->imo_multicast_ifp != NULL) {
 		/*
@@ -258,17 +403,21 @@ again:
 		 * packets if the interface is specified.
 		 */
 		ifp = imo->imo_multicast_ifp;
-		IFP_TO_IA(ifp, ia);
-		if (ia)
-			have_ia_ref = 1;
+		mtu = ifp->if_mtu;
+		IFP_TO_IA(ifp, ia, &in_ifa_tracker);
 		isbroadcast = 0;	/* fool gcc */
-	} else {
-		/*
-		 * We want to do any cloning requested by the link layer,
-		 * as this is probably required in all cases for correct
-		 * operation (as it is for ARP).
-		 */
-		if (rte == NULL) {
+		/* Interface may have no addresses. */
+		if (ia != NULL)
+			src = IA_SIN(ia)->sin_addr;
+		else
+			src.s_addr = INADDR_ANY;
+	} else if (ro != NULL) {
+		if (ro->ro_rt == NULL) {
+			/*
+			 * We want to do any cloning requested by the link
+			 * layer, as this is probably required in all cases
+			 * for correct operation (as it is for ARP).
+			 */
 #ifdef RADIX_MPATH
 			rtalloc_mpath_fib(ro,
 			    ntohl(ip->ip_src.s_addr ^ ip->ip_dst.s_addr),
@@ -276,12 +425,48 @@ again:
 #else
 			in_rtalloc_ign(ro, 0, fibnum);
 #endif
-			rte = ro->ro_rt;
+			if (ro->ro_rt == NULL ||
+			    (ro->ro_rt->rt_flags & RTF_UP) == 0 ||
+			    ro->ro_rt->rt_ifp == NULL ||
+			    !RT_LINK_IS_UP(ro->ro_rt->rt_ifp)) {
+#if defined(IPSEC) || defined(IPSEC_SUPPORT)
+				/*
+				 * There is no route for this packet, but it is
+				 * possible that a matching SPD entry exists.
+				 */
+				no_route_but_check_spd = 1;
+				mtu = 0; /* Silence GCC warning. */
+				goto sendit;
+#endif
+				IPSTAT_INC(ips_noroute);
+				error = EHOSTUNREACH;
+				goto bad;
+			}
 		}
-		if (rte == NULL ||
-		    rte->rt_ifp == NULL ||
-		    !RT_LINK_IS_UP(rte->rt_ifp)) {
-#ifdef IPSEC
+		ia = ifatoia(ro->ro_rt->rt_ifa);
+		ifp = ro->ro_rt->rt_ifp;
+		counter_u64_add(ro->ro_rt->rt_pksent, 1);
+		rt_update_ro_flags(ro);
+		if (ro->ro_rt->rt_flags & RTF_GATEWAY)
+			gw = (struct sockaddr_in *)ro->ro_rt->rt_gateway;
+		if (ro->ro_rt->rt_flags & RTF_HOST)
+			isbroadcast = (ro->ro_rt->rt_flags & RTF_BROADCAST);
+		else if (ifp->if_flags & IFF_BROADCAST)
+			isbroadcast = in_ifaddr_broadcast(gw->sin_addr, ia);
+		else
+			isbroadcast = 0;
+		if (ro->ro_rt->rt_flags & RTF_HOST)
+			mtu = ro->ro_rt->rt_mtu;
+		else
+			mtu = ifp->if_mtu;
+		src = IA_SIN(ia)->sin_addr;
+	} else {
+		struct nhop4_extended nh;
+
+		bzero(&nh, sizeof(nh));
+		if (fib4_lookup_nh_ext(M_GETFIB(m), ip->ip_dst, 0, 0, &nh) !=
+		    0) {
+#if defined(IPSEC) || defined(IPSEC_SUPPORT)
 			/*
 			 * There is no route for this packet, but it is
 			 * possible that a matching SPD entry exists.
@@ -294,27 +479,30 @@ again:
 			error = EHOSTUNREACH;
 			goto bad;
 		}
-		ia = ifatoia(rte->rt_ifa);
-		ifp = rte->rt_ifp;
-		counter_u64_add(rte->rt_pksent, 1);
-		if (rte->rt_flags & RTF_GATEWAY)
-			gw = (struct sockaddr_in *)rte->rt_gateway;
-		if (rte->rt_flags & RTF_HOST)
-			isbroadcast = (rte->rt_flags & RTF_BROADCAST);
-		else
-			isbroadcast = in_broadcast(gw->sin_addr, ifp);
+		ifp = nh.nh_ifp;
+		mtu = nh.nh_mtu;
+		/*
+		 * We are rewriting here dst to be gw actually, contradicting
+		 * comment at the beginning of the function. However, in this
+		 * case we are always dealing with on stack dst.
+		 * In case if pfil(9) sends us back to beginning of the
+		 * function, the dst would be rewritten by ip_output_pfil().
+		 */
+		MPASS(dst == &sin);
+		dst->sin_addr = nh.nh_addr;
+		ia = nh.nh_ia;
+		src = nh.nh_src;
+		isbroadcast = (((nh.nh_flags & (NHF_HOST | NHF_BROADCAST)) ==
+		    (NHF_HOST | NHF_BROADCAST)) ||
+		    ((ifp->if_flags & IFF_BROADCAST) &&
+		    in_ifaddr_broadcast(dst->sin_addr, ia)));
 	}
-	/*
-	 * Calculate MTU.  If we have a route that is up, use that,
-	 * otherwise use the interface's MTU.
-	 */
-	if (rte != NULL && (rte->rt_flags & (RTF_UP|RTF_HOST)))
-		mtu = rte->rt_mtu;
-	else
-		mtu = ifp->if_mtu;
+
 	/* Catch a possible divide by zero later. */
-	KASSERT(mtu > 0, ("%s: mtu %d <= 0, rte=%p (rt_flags=0x%08x) ifp=%p",
-	    __func__, mtu, rte, (rte != NULL) ? rte->rt_flags : 0, ifp));
+	KASSERT(mtu > 0, ("%s: mtu %d <= 0, ro=%p (rt_flags=0x%08x) ifp=%p",
+	    __func__, mtu, ro,
+	    (ro != NULL && ro->ro_rt != NULL) ? ro->ro_rt->rt_flags : 0, ifp));
+
 	if (IN_MULTICAST(ntohl(ip->ip_dst.s_addr))) {
 		m->m_flags |= M_MCAST;
 		/*
@@ -349,11 +537,8 @@ again:
 		 * If source address not specified yet, use address
 		 * of outgoing interface.
 		 */
-		if (ip->ip_src.s_addr == INADDR_ANY) {
-			/* Interface may have no addresses. */
-			if (ia != NULL)
-				ip->ip_src = IA_SIN(ia)->sin_addr;
-		}
+		if (ip->ip_src.s_addr == INADDR_ANY)
+			ip->ip_src = src;
 
 		if ((imo == NULL && in_mcast_loop) ||
 		    (imo && imo->imo_multicast_loop)) {
@@ -364,7 +549,7 @@ again:
 			 * thus deferring a hash lookup and mutex acquisition
 			 * at the expense of a cheap copy using m_copym().
 			 */
-			ip_mloopback(ifp, m, dst, hlen);
+			ip_mloopback(ifp, m, hlen);
 		} else {
 			/*
 			 * If we are acting as a multicast router, perform
@@ -416,12 +601,8 @@ again:
 	 * If the source address is not specified yet, use the address
 	 * of the outoing interface.
 	 */
-	if (ip->ip_src.s_addr == INADDR_ANY) {
-		/* Interface may have no addresses. */
-		if (ia != NULL) {
-			ip->ip_src = IA_SIN(ia)->sin_addr;
-		}
-	}
+	if (ip->ip_src.s_addr == INADDR_ANY)
+		ip->ip_src = src;
 
 	/*
 	 * Look for broadcast address and
@@ -448,15 +629,13 @@ again:
 	}
 
 sendit:
-#ifdef IPSEC
-	switch(ip_ipsec_output(&m, inp, &error)) {
-	case 1:
-		goto bad;
-	case -1:
-		goto done;
-	case 0:
-	default:
-		break;	/* Continue with packet processing. */
+#if defined(IPSEC) || defined(IPSEC_SUPPORT)
+	if (IPSEC_ENABLED(ipv4)) {
+		if ((error = IPSEC_OUTPUT(ipv4, m, inp)) != 0) {
+			if (error == EINPROGRESS)
+				error = 0;
+			goto done;
+		}
 	}
 	/*
 	 * Check if there was a route for this packet; return error if not.
@@ -472,90 +651,31 @@ sendit:
 #endif /* IPSEC */
 
 	/* Jump over all PFIL processing if hooks are not active. */
-	if (!PFIL_HOOKED(&V_inet_pfil_hook))
-		goto passout;
-
-	/* Run through list of hooks for output packets. */
-	odst.s_addr = ip->ip_dst.s_addr;
-	error = pfil_run_hooks(&V_inet_pfil_hook, &m, ifp, PFIL_OUT, inp);
-	if (error != 0 || m == NULL)
-		goto done;
-
-	ip = mtod(m, struct ip *);
-	needfiblookup = 0;
-
-	/* See if destination IP address was changed by packet filter. */
-	if (odst.s_addr != ip->ip_dst.s_addr) {
-		m->m_flags |= M_SKIP_FIREWALL;
-		/* If destination is now ourself drop to ip_input(). */
-		if (in_localip(ip->ip_dst)) {
-			m->m_flags |= M_FASTFWD_OURS;
-			if (m->m_pkthdr.rcvif == NULL)
-				m->m_pkthdr.rcvif = V_loif;
-			if (m->m_pkthdr.csum_flags & CSUM_DELAY_DATA) {
-				m->m_pkthdr.csum_flags |=
-				    CSUM_DATA_VALID | CSUM_PSEUDO_HDR;
-				m->m_pkthdr.csum_data = 0xffff;
-			}
-			m->m_pkthdr.csum_flags |=
-			    CSUM_IP_CHECKED | CSUM_IP_VALID;
-#ifdef SCTP
-			if (m->m_pkthdr.csum_flags & CSUM_SCTP)
-				m->m_pkthdr.csum_flags |= CSUM_SCTP_VALID;
-#endif
-			error = netisr_queue(NETISR_IP, m);
+	if (PFIL_HOOKED_OUT(V_inet_pfil_head)) {
+		switch (ip_output_pfil(&m, ifp, inp, dst, &fibnum, &error)) {
+		case 1: /* Finished */
 			goto done;
-		} else {
-			if (have_ia_ref)
-				ifa_free(&ia->ia_ifa);
-			needfiblookup = 1; /* Redo the routing table lookup. */
+
+		case 0: /* Continue normally */
+			ip = mtod(m, struct ip *);
+			break;
+
+		case -1: /* Need to try again */
+			/* Reset everything for a new round */
+			if (ro != NULL) {
+				RO_RTFREE(ro);
+				ro->ro_prepend = NULL;
+			}
+			gw = dst;
+			ip = mtod(m, struct ip *);
+			goto again;
+
 		}
 	}
-	/* See if fib was changed by packet filter. */
-	if (fibnum != M_GETFIB(m)) {
-		m->m_flags |= M_SKIP_FIREWALL;
-		fibnum = M_GETFIB(m);
-		RO_RTFREE(ro);
-		needfiblookup = 1;
-	}
-	if (needfiblookup)
-		goto again;
 
-	/* See if local, if yes, send it to netisr with IP_FASTFWD_OURS. */
-	if (m->m_flags & M_FASTFWD_OURS) {
-		if (m->m_pkthdr.rcvif == NULL)
-			m->m_pkthdr.rcvif = V_loif;
-		if (m->m_pkthdr.csum_flags & CSUM_DELAY_DATA) {
-			m->m_pkthdr.csum_flags |=
-			    CSUM_DATA_VALID | CSUM_PSEUDO_HDR;
-			m->m_pkthdr.csum_data = 0xffff;
-		}
-#ifdef SCTP
-		if (m->m_pkthdr.csum_flags & CSUM_SCTP)
-			m->m_pkthdr.csum_flags |= CSUM_SCTP_VALID;
-#endif
-		m->m_pkthdr.csum_flags |=
-			    CSUM_IP_CHECKED | CSUM_IP_VALID;
-
-		error = netisr_queue(NETISR_IP, m);
-		goto done;
-	}
-	/* Or forward to some other address? */
-	if ((m->m_flags & M_IP_NEXTHOP) &&
-	    (fwd_tag = m_tag_find(m, PACKET_TAG_IPFORWARD, NULL)) != NULL) {
-		bcopy((fwd_tag+1), dst, sizeof(struct sockaddr_in));
-		m->m_flags |= M_SKIP_FIREWALL;
-		m->m_flags &= ~M_IP_NEXTHOP;
-		m_tag_delete(m, fwd_tag);
-		if (have_ia_ref)
-			ifa_free(&ia->ia_ifa);
-		goto again;
-	}
-
-passout:
-	/* 127/8 must not appear on wire - RFC1122. */
-	if ((ntohl(ip->ip_dst.s_addr) >> IN_CLASSA_NSHIFT) == IN_LOOPBACKNET ||
-	    (ntohl(ip->ip_src.s_addr) >> IN_CLASSA_NSHIFT) == IN_LOOPBACKNET) {
+	/* IN_LOOPBACK must not appear on the wire - RFC1122. */
+	if (IN_LOOPBACK(ntohl(ip->ip_dst.s_addr)) ||
+	    IN_LOOPBACK(ntohl(ip->ip_src.s_addr))) {
 		if ((ifp->if_flags & IFF_LOOPBACK) == 0) {
 			IPSTAT_INC(ips_badaddr);
 			error = EADDRNOTAVAIL;
@@ -612,8 +732,7 @@ passout:
 		 */
 		m_clrprotoflags(m);
 		IP_PROBE(send, NULL, NULL, ip, ifp, ip, NULL);
-		error = (*ifp->if_output)(ifp, m,
-		    (const struct sockaddr *)gw, ro);
+		error = ip_output_send(inp, ifp, m, gw, ro);
 		goto done;
 	}
 
@@ -647,9 +766,9 @@ passout:
 			 */
 			m_clrprotoflags(m);
 
-			IP_PROBE(send, NULL, NULL, ip, ifp, ip, NULL);
-			error = (*ifp->if_output)(ifp, m,
-			    (const struct sockaddr *)gw, ro);
+			IP_PROBE(send, NULL, NULL, mtod(m, struct ip *), ifp,
+			    mtod(m, struct ip *), NULL);
+			error = ip_output_send(inp, ifp, m, gw, ro);
 		} else
 			m_freem(m);
 	}
@@ -658,12 +777,9 @@ passout:
 		IPSTAT_INC(ips_fragmented);
 
 done:
-	if (ro == &iproute)
-		RO_RTFREE(ro);
-	if (have_ia_ref)
-		ifa_free(&ia->ia_ifa);
+	NET_EPOCH_EXIT(et);
 	return (error);
-bad:
+ bad:
 	m_freem(m);
 	goto done;
 }
@@ -853,24 +969,35 @@ void
 in_delayed_cksum(struct mbuf *m)
 {
 	struct ip *ip;
-	uint16_t csum, offset, ip_len;
+	struct udphdr *uh;
+	uint16_t cklen, csum, offset;
 
 	ip = mtod(m, struct ip *);
 	offset = ip->ip_hl << 2 ;
-	ip_len = ntohs(ip->ip_len);
-	csum = in_cksum_skip(m, ip_len, offset);
-	if (m->m_pkthdr.csum_flags & CSUM_UDP && csum == 0)
-		csum = 0xffff;
+
+	if (m->m_pkthdr.csum_flags & CSUM_UDP) {
+		/* if udp header is not in the first mbuf copy udplen */
+		if (offset + sizeof(struct udphdr) > m->m_len) {
+			m_copydata(m, offset + offsetof(struct udphdr,
+			    uh_ulen), sizeof(cklen), (caddr_t)&cklen);
+			cklen = ntohs(cklen);
+		} else {
+			uh = (struct udphdr *)mtodo(m, offset);
+			cklen = ntohs(uh->uh_ulen);
+		}
+		csum = in_cksum_skip(m, cklen + offset, offset);
+		if (csum == 0)
+			csum = 0xffff;
+	} else {
+		cklen = ntohs(ip->ip_len);
+		csum = in_cksum_skip(m, cklen, offset);
+	}
 	offset += m->m_pkthdr.csum_data;	/* checksum offset */
 
-	/* find the mbuf in the chain where the checksum starts*/
-	while ((m != NULL) && (offset >= m->m_len)) {
-		offset -= m->m_len;
-		m = m->m_next;
-	}
-	KASSERT(m != NULL, ("in_delayed_cksum: checksum outside mbuf chain."));
-	KASSERT(offset + sizeof(u_short) <= m->m_len, ("in_delayed_cksum: checksum split between mbufs."));
-	*(u_short *)(m->m_data + offset) = csum;
+	if (offset + sizeof(csum) > m->m_len)
+		m_copyback(m, offset, sizeof(csum), (caddr_t)&csum);
+	else
+		*(u_short *)mtodo(m, offset) = csum;
 }
 
 /*
@@ -911,11 +1038,30 @@ ip_ctloutput(struct socket *so, struct sockopt *sopt)
 				INP_WUNLOCK(inp);
 				error = 0;
 				break;
+			case SO_REUSEPORT_LB:
+				INP_WLOCK(inp);
+				if ((so->so_options & SO_REUSEPORT_LB) != 0)
+					inp->inp_flags2 |= INP_REUSEPORT_LB;
+				else
+					inp->inp_flags2 &= ~INP_REUSEPORT_LB;
+				INP_WUNLOCK(inp);
+				error = 0;
+				break;
 			case SO_SETFIB:
 				INP_WLOCK(inp);
 				inp->inp_inc.inc_fibnum = so->so_fibnum;
 				INP_WUNLOCK(inp);
 				error = 0;
+				break;
+			case SO_MAX_PACING_RATE:
+#ifdef RATELIMIT
+				INP_WLOCK(inp);
+				inp->inp_flags2 |= INP_RATE_LIMIT_CHANGED;
+				INP_WUNLOCK(inp);
+				error = 0;
+#else
+				error = EOPNOTSUPP;
+#endif
 				break;
 			default:
 				break;
@@ -972,6 +1118,7 @@ ip_ctloutput(struct socket *so, struct sockopt *sopt)
 		case IP_MINTTL:
 		case IP_RECVOPTS:
 		case IP_RECVRETOPTS:
+		case IP_ORIGDSTADDR:
 		case IP_RECVDSTADDR:
 		case IP_RECVTTL:
 		case IP_RECVIF:
@@ -1031,6 +1178,10 @@ ip_ctloutput(struct socket *so, struct sockopt *sopt)
 
 			case IP_RECVDSTADDR:
 				OPTSET(INP_RECVDSTADDR);
+				break;
+
+			case IP_ORIGDSTADDR:
+				OPTSET2(INP_ORIGDSTADDR, optval);
 				break;
 
 			case IP_RECVTTL:
@@ -1132,23 +1283,13 @@ ip_ctloutput(struct socket *so, struct sockopt *sopt)
 			INP_WUNLOCK(inp);
 			break;
 
-#ifdef IPSEC
+#if defined(IPSEC) || defined(IPSEC_SUPPORT)
 		case IP_IPSEC_POLICY:
-		{
-			caddr_t req;
-			struct mbuf *m;
-
-			if ((error = soopt_getm(sopt, &m)) != 0) /* XXX */
+			if (IPSEC_ENABLED(ipv4)) {
+				error = IPSEC_PCBCTL(ipv4, inp, sopt);
 				break;
-			if ((error = soopt_mcopyin(sopt, m)) != 0) /* XXX */
-				break;
-			req = mtod(m, caddr_t);
-			error = ipsec_set_policy(inp, sopt->sopt_name, req,
-			    m->m_len, (sopt->sopt_td != NULL) ?
-			    sopt->sopt_td->td_ucred : NULL);
-			m_freem(m);
-			break;
-		}
+			}
+			/* FALLTHROUGH */
 #endif /* IPSEC */
 
 		default:
@@ -1161,13 +1302,24 @@ ip_ctloutput(struct socket *so, struct sockopt *sopt)
 		switch (sopt->sopt_name) {
 		case IP_OPTIONS:
 		case IP_RETOPTS:
-			if (inp->inp_options)
-				error = sooptcopyout(sopt,
-						     mtod(inp->inp_options,
-							  char *),
-						     inp->inp_options->m_len);
-			else
+			INP_RLOCK(inp);
+			if (inp->inp_options) {
+				struct mbuf *options;
+
+				options = m_copym(inp->inp_options, 0,
+				    M_COPYALL, M_NOWAIT);
+				INP_RUNLOCK(inp);
+				if (options != NULL) {
+					error = sooptcopyout(sopt,
+							     mtod(options, char *),
+							     options->m_len);
+					m_freem(options);
+				} else
+					error = ENOMEM;
+			} else {
+				INP_RUNLOCK(inp);
 				sopt->sopt_valsize = 0;
+			}
 			break;
 
 		case IP_TOS:
@@ -1175,6 +1327,7 @@ ip_ctloutput(struct socket *so, struct sockopt *sopt)
 		case IP_MINTTL:
 		case IP_RECVOPTS:
 		case IP_RECVRETOPTS:
+		case IP_ORIGDSTADDR:
 		case IP_RECVDSTADDR:
 		case IP_RECVTTL:
 		case IP_RECVIF:
@@ -1218,6 +1371,10 @@ ip_ctloutput(struct socket *so, struct sockopt *sopt)
 
 			case IP_RECVDSTADDR:
 				optval = OPTBIT(INP_RECVDSTADDR);
+				break;
+
+			case IP_ORIGDSTADDR:
+				optval = OPTBIT2(INP_ORIGDSTADDR);
 				break;
 
 			case IP_RECVTTL:
@@ -1291,24 +1448,13 @@ ip_ctloutput(struct socket *so, struct sockopt *sopt)
 			error = inp_getmoptions(inp, sopt);
 			break;
 
-#ifdef IPSEC
+#if defined(IPSEC) || defined(IPSEC_SUPPORT)
 		case IP_IPSEC_POLICY:
-		{
-			struct mbuf *m = NULL;
-			caddr_t req = NULL;
-			size_t len = 0;
-
-			if (m != 0) {
-				req = mtod(m, caddr_t);
-				len = m->m_len;
+			if (IPSEC_ENABLED(ipv4)) {
+				error = IPSEC_PCBCTL(ipv4, inp, sopt);
+				break;
 			}
-			error = ipsec_get_policy(sotoinpcb(so), req, len, &m);
-			if (error == 0)
-				error = soopt_mcopyout(sopt, m); /* XXX */
-			if (error == 0)
-				m_freem(m);
-			break;
-		}
+			/* FALLTHROUGH */
 #endif /* IPSEC */
 
 		default:
@@ -1328,10 +1474,9 @@ ip_ctloutput(struct socket *so, struct sockopt *sopt)
  * replicating that code here.
  */
 static void
-ip_mloopback(struct ifnet *ifp, struct mbuf *m, struct sockaddr_in *dst,
-    int hlen)
+ip_mloopback(struct ifnet *ifp, const struct mbuf *m, int hlen)
 {
-	register struct ip *ip;
+	struct ip *ip;
 	struct mbuf *copym;
 
 	/*
@@ -1357,13 +1502,6 @@ ip_mloopback(struct ifnet *ifp, struct mbuf *m, struct sockaddr_in *dst,
 		ip = mtod(copym, struct ip *);
 		ip->ip_sum = 0;
 		ip->ip_sum = in_cksum(copym, hlen);
-#if 1 /* XXX */
-		if (dst->sin_family != AF_INET) {
-			printf("ip_mloopback: bad address family %d\n",
-						dst->sin_family);
-			dst->sin_family = AF_INET;
-		}
-#endif
-		if_simloop(ifp, copym, dst->sin_family, 0);
+		if_simloop(ifp, copym, AF_INET, 0);
 	}
 }

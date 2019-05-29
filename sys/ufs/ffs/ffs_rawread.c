@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2000-2003 Tor Egge
  * All rights reserved.
  *
@@ -62,8 +64,7 @@ static int ffs_rawread_readahead(struct vnode *vp,
 				 off_t offset,
 				 size_t len,
 				 struct thread *td,
-				 struct buf *bp,
-				 caddr_t sa);
+				 struct buf *bp);
 static int ffs_rawread_main(struct vnode *vp,
 			    struct uio *uio);
 
@@ -73,9 +74,7 @@ int ffs_rawread(struct vnode *vp, struct uio *uio, int *workdone);
 
 SYSCTL_DECL(_vfs_ffs);
 
-static int ffsrawbufcnt = 4;
-SYSCTL_INT(_vfs_ffs, OID_AUTO, ffsrawbufcnt, CTLFLAG_RD, &ffsrawbufcnt, 0,
-	   "Buffers available for raw reads");
+static uma_zone_t ffsraw_pbuf_zone;
 
 static int allowrawread = 1;
 SYSCTL_INT(_vfs_ffs, OID_AUTO, allowrawread, CTLFLAG_RW, &allowrawread, 0,
@@ -89,7 +88,8 @@ static void
 ffs_rawread_setup(void *arg __unused)
 {
 
-	ffsrawbufcnt = (nswbuf > 100 ) ? (nswbuf - (nswbuf >> 4)) : nswbuf - 8;
+	ffsraw_pbuf_zone = pbuf_zsecond_create("ffsrawpbuf",
+	    (nswbuf > 100 ) ?  (nswbuf - (nswbuf >> 4)) : nswbuf - 8);
 }
 SYSINIT(ffs_raw, SI_SUB_VM_CONF, SI_ORDER_ANY, ffs_rawread_setup, NULL);
 
@@ -190,8 +190,7 @@ ffs_rawread_readahead(struct vnode *vp,
 		      off_t offset,
 		      size_t len,
 		      struct thread *td,
-		      struct buf *bp,
-		      caddr_t sa)
+		      struct buf *bp)
 {
 	int error;
 	u_int iolen;
@@ -206,7 +205,7 @@ ffs_rawread_readahead(struct vnode *vp,
 	bsize = vp->v_mount->mnt_stat.f_iosize;
 	
 	ip = VTOI(vp);
-	dp = ip->i_devvp;
+	dp = ITODEVVP(ip);
 
 	iolen = ((vm_offset_t) udata) & PAGE_MASK;
 	bp->b_bcount = len;
@@ -219,7 +218,6 @@ ffs_rawread_readahead(struct vnode *vp,
 	bp->b_iocmd = BIO_READ;
 	bp->b_iodone = bdone;
 	bp->b_data = udata;
-	bp->b_saveaddr = sa;
 	blockno = offset / bsize;
 	blockoff = (offset % bsize) / DEV_BSIZE;
 	if ((daddr_t) blockno != blockno) {
@@ -272,9 +270,7 @@ ffs_rawread_main(struct vnode *vp,
 {
 	int error, nerror;
 	struct buf *bp, *nbp, *tbp;
-	caddr_t sa, nsa, tsa;
 	u_int iolen;
-	int spl;
 	caddr_t udata;
 	long resid;
 	off_t offset;
@@ -295,29 +291,24 @@ ffs_rawread_main(struct vnode *vp,
 	
 	bp = NULL;
 	nbp = NULL;
-	sa = NULL;
-	nsa = NULL;
 	
 	while (resid > 0) {
 		
 		if (bp == NULL) { /* Setup first read */
-			/* XXX: Leave some bufs for swap */
-			bp = getpbuf(&ffsrawbufcnt);
-			sa = bp->b_data;
+			bp = uma_zalloc(ffsraw_pbuf_zone, M_WAITOK);
 			pbgetvp(vp, bp);
 			error = ffs_rawread_readahead(vp, udata, offset,
-						     resid, td, bp, sa);
+						     resid, td, bp);
 			if (error != 0)
 				break;
 			
 			if (resid > bp->b_bufsize) { /* Setup fist readahead */
-				/* XXX: Leave bufs for swap */
 				if (rawreadahead != 0) 
-					nbp = trypbuf(&ffsrawbufcnt);
+					nbp = uma_zalloc(ffsraw_pbuf_zone,
+					    M_NOWAIT);
 				else
 					nbp = NULL;
 				if (nbp != NULL) {
-					nsa = nbp->b_data;
 					pbgetvp(vp, nbp);
 					
 					nerror = ffs_rawread_readahead(vp, 
@@ -328,21 +319,18 @@ ffs_rawread_main(struct vnode *vp,
 								       resid -
 								       bp->b_bufsize,
 								       td,
-								       nbp,
-								       nsa);
+								       nbp);
 					if (nerror) {
 						pbrelvp(nbp);
-						relpbuf(nbp, &ffsrawbufcnt);
+						uma_zfree(ffsraw_pbuf_zone,
+						    nbp);
 						nbp = NULL;
 					}
 				}
 			}
 		}
 		
-		spl = splbio();
 		bwait(bp, PRIBIO, "rawrd");
-		splx(spl);
-		
 		vunmapbuf(bp);
 		
 		iolen = bp->b_bcount - bp->b_resid;
@@ -365,8 +353,7 @@ ffs_rawread_main(struct vnode *vp,
 						      offset,
 						      bp->b_bufsize - iolen,
 						      td,
-						      bp,
-						      sa);
+						      bp);
 			if (error != 0)
 				break;
 		} else if (nbp != NULL) { /* Complete read with readahead */
@@ -375,13 +362,9 @@ ffs_rawread_main(struct vnode *vp,
 			bp = nbp;
 			nbp = tbp;
 			
-			tsa = sa;
-			sa = nsa;
-			nsa = tsa;
-			
 			if (resid <= bp->b_bufsize) { /* No more readaheads */
 				pbrelvp(nbp);
-				relpbuf(nbp, &ffsrawbufcnt);
+				uma_zfree(ffsraw_pbuf_zone, nbp);
 				nbp = NULL;
 			} else { /* Setup next readahead */
 				nerror = ffs_rawread_readahead(vp,
@@ -392,11 +375,10 @@ ffs_rawread_main(struct vnode *vp,
 							       resid -
 							       bp->b_bufsize,
 							       td,
-							       nbp,
-							       nsa);
+							       nbp);
 				if (nerror != 0) {
 					pbrelvp(nbp);
-					relpbuf(nbp, &ffsrawbufcnt);
+					uma_zfree(ffsraw_pbuf_zone, nbp);
 					nbp = NULL;
 				}
 			}
@@ -404,7 +386,7 @@ ffs_rawread_main(struct vnode *vp,
 			break;		
 		}  else if (resid > 0) { /* More to read, no readahead */
 			error = ffs_rawread_readahead(vp, udata, offset,
-						      resid, td, bp, sa);
+						      resid, td, bp);
 			if (error != 0)
 				break;
 		}
@@ -412,15 +394,13 @@ ffs_rawread_main(struct vnode *vp,
 	
 	if (bp != NULL) {
 		pbrelvp(bp);
-		relpbuf(bp, &ffsrawbufcnt);
+		uma_zfree(ffsraw_pbuf_zone, bp);
 	}
 	if (nbp != NULL) {			/* Run down readahead buffer */
-		spl = splbio();
 		bwait(nbp, PRIBIO, "rawrd");
-		splx(spl);
 		vunmapbuf(nbp);
 		pbrelvp(nbp);
-		relpbuf(nbp, &ffsrawbufcnt);
+		uma_zfree(ffsraw_pbuf_zone, nbp);
 	}
 	
 	if (error == 0)
@@ -455,7 +435,7 @@ ffs_rawread(struct vnode *vp,
 
 		/* Only handle sector aligned reads */
 		ip = VTOI(vp);
-		secsize = ip->i_devvp->v_bufobj.bo_bsize;
+		secsize = ITODEVVP(ip)->v_bufobj.bo_bsize;
 		if ((uio->uio_offset & (secsize - 1)) == 0 &&
 		    (uio->uio_resid & (secsize - 1)) == 0) {
 			
@@ -475,7 +455,7 @@ ffs_rawread(struct vnode *vp,
 				}
 				
 				partialbytes = ((unsigned int) ip->i_size) %
-					ip->i_fs->fs_bsize;
+				    ITOFS(ip)->fs_bsize;
 				blockbytes = (int) filebytes - partialbytes;
 				if (blockbytes > 0) {
 					skipbytes = uio->uio_resid -

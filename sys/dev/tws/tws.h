@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2010, LSI Corp.
  * All rights reserved.
  * Author : Manjunath Ranganathaiah
@@ -35,16 +37,17 @@
  */
 
 #include <sys/param.h>        /* defines used in kernel.h */
-#include <sys/module.h>
-#include <sys/systm.h>
-#include <sys/proc.h>
+#include <sys/bus.h>          /* structs, prototypes for pci bus stuff */
+#include <sys/conf.h>         /* cdevsw struct */
 #include <sys/errno.h>
 #include <sys/kernel.h>       /* types used in module initialization */
-#include <sys/conf.h>         /* cdevsw struct */
-#include <sys/uio.h>          /* uio struct */
+#include <sys/lock.h>
 #include <sys/malloc.h>
-#include <sys/bus.h>          /* structs, prototypes for pci bus stuff */
-
+#include <sys/module.h>
+#include <sys/mutex.h>
+#include <sys/proc.h>
+#include <sys/systm.h>
+#include <sys/uio.h>          /* uio struct */
 
 #include <machine/bus.h>
 #include <sys/rman.h>
@@ -67,7 +70,7 @@ extern int tws_queue_depth;
 
 #define TWS_DRIVER_VERSION_STRING "10.80.00.005"
 #define TWS_MAX_NUM_UNITS             65 
-#define TWS_MAX_NUM_LUNS              16
+#define TWS_MAX_NUM_LUNS              32
 #define TWS_MAX_IRQS                  2
 #define TWS_SCSI_INITIATOR_ID         66
 #define TWS_MAX_IO_SIZE               0x20000 /* 128kB */

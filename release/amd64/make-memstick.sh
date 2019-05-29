@@ -10,6 +10,11 @@
 # $FreeBSD$
 #
 
+set -e
+
+scriptdir=$(dirname $(realpath $0))
+. ${scriptdir}/../../tools/boot/install-boot.sh
+
 PATH=/bin:/usr/bin:/sbin:/usr/sbin
 export PATH
 
@@ -29,13 +34,21 @@ if [ -e ${2} ]; then
 fi
 
 echo '/dev/ufs/FreeBSD_Install / ufs ro,noatime 1 1' > ${1}/etc/fstab
-makefs -B little -o label=FreeBSD_Install ${2}.part ${1}
-if [ $? -ne 0 ]; then
-	echo "makefs failed"
-	exit 1
-fi
+echo 'root_rw_mount="NO"' > ${1}/etc/rc.conf.local
+makefs -B little -o label=FreeBSD_Install -o version=2 ${2}.part ${1}
 rm ${1}/etc/fstab
+rm ${1}/etc/rc.conf.local
 
-mkimg -s gpt -b ${1}/boot/pmbr -p efi:=${1}/boot/boot1.efifat -p freebsd-boot:=${1}/boot/gptboot -p freebsd-ufs:=${2}.part -p freebsd-swap::1M -o ${2}
+# Make an ESP in a file.
+espfilename=$(mktemp /tmp/efiboot.XXXXXX)
+make_esp_file ${espfilename} ${fat32min} ${1}/boot/loader.efi
+
+mkimg -s mbr \
+    -b ${1}/boot/mbr \
+    -p efi:=${espfilename} \
+    -p freebsd:-"mkimg -s bsd -b ${1}/boot/boot -p freebsd-ufs:=${2}.part" \
+    -a 2 \
+    -o ${2}
+rm ${espfilename}
 rm ${2}.part
 

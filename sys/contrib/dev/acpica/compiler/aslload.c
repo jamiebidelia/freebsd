@@ -4,9 +4,117 @@
  *
  *****************************************************************************/
 
-/*
- * Copyright (C) 2000 - 2015, Intel Corp.
+/******************************************************************************
+ *
+ * 1. Copyright Notice
+ *
+ * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
  * All rights reserved.
+ *
+ * 2. License
+ *
+ * 2.1. This is your license from Intel Corp. under its intellectual property
+ * rights. You may have additional license terms from the party that provided
+ * you this software, covering your right to use that party's intellectual
+ * property rights.
+ *
+ * 2.2. Intel grants, free of charge, to any person ("Licensee") obtaining a
+ * copy of the source code appearing in this file ("Covered Code") an
+ * irrevocable, perpetual, worldwide license under Intel's copyrights in the
+ * base code distributed originally by Intel ("Original Intel Code") to copy,
+ * make derivatives, distribute, use and display any portion of the Covered
+ * Code in any form, with the right to sublicense such rights; and
+ *
+ * 2.3. Intel grants Licensee a non-exclusive and non-transferable patent
+ * license (with the right to sublicense), under only those claims of Intel
+ * patents that are infringed by the Original Intel Code, to make, use, sell,
+ * offer to sell, and import the Covered Code and derivative works thereof
+ * solely to the minimum extent necessary to exercise the above copyright
+ * license, and in no event shall the patent license extend to any additions
+ * to or modifications of the Original Intel Code. No other license or right
+ * is granted directly or by implication, estoppel or otherwise;
+ *
+ * The above copyright and patent license is granted only if the following
+ * conditions are met:
+ *
+ * 3. Conditions
+ *
+ * 3.1. Redistribution of Source with Rights to Further Distribute Source.
+ * Redistribution of source code of any substantial portion of the Covered
+ * Code or modification with rights to further distribute source must include
+ * the above Copyright Notice, the above License, this list of Conditions,
+ * and the following Disclaimer and Export Compliance provision. In addition,
+ * Licensee must cause all Covered Code to which Licensee contributes to
+ * contain a file documenting the changes Licensee made to create that Covered
+ * Code and the date of any change. Licensee must include in that file the
+ * documentation of any changes made by any predecessor Licensee. Licensee
+ * must include a prominent statement that the modification is derived,
+ * directly or indirectly, from Original Intel Code.
+ *
+ * 3.2. Redistribution of Source with no Rights to Further Distribute Source.
+ * Redistribution of source code of any substantial portion of the Covered
+ * Code or modification without rights to further distribute source must
+ * include the following Disclaimer and Export Compliance provision in the
+ * documentation and/or other materials provided with distribution. In
+ * addition, Licensee may not authorize further sublicense of source of any
+ * portion of the Covered Code, and must include terms to the effect that the
+ * license from Licensee to its licensee is limited to the intellectual
+ * property embodied in the software Licensee provides to its licensee, and
+ * not to intellectual property embodied in modifications its licensee may
+ * make.
+ *
+ * 3.3. Redistribution of Executable. Redistribution in executable form of any
+ * substantial portion of the Covered Code or modification must reproduce the
+ * above Copyright Notice, and the following Disclaimer and Export Compliance
+ * provision in the documentation and/or other materials provided with the
+ * distribution.
+ *
+ * 3.4. Intel retains all right, title, and interest in and to the Original
+ * Intel Code.
+ *
+ * 3.5. Neither the name Intel nor any other trademark owned or controlled by
+ * Intel shall be used in advertising or otherwise to promote the sale, use or
+ * other dealings in products derived from or relating to the Covered Code
+ * without prior written authorization from Intel.
+ *
+ * 4. Disclaimer and Export Compliance
+ *
+ * 4.1. INTEL MAKES NO WARRANTY OF ANY KIND REGARDING ANY SOFTWARE PROVIDED
+ * HERE. ANY SOFTWARE ORIGINATING FROM INTEL OR DERIVED FROM INTEL SOFTWARE
+ * IS PROVIDED "AS IS," AND INTEL WILL NOT PROVIDE ANY SUPPORT, ASSISTANCE,
+ * INSTALLATION, TRAINING OR OTHER SERVICES. INTEL WILL NOT PROVIDE ANY
+ * UPDATES, ENHANCEMENTS OR EXTENSIONS. INTEL SPECIFICALLY DISCLAIMS ANY
+ * IMPLIED WARRANTIES OF MERCHANTABILITY, NONINFRINGEMENT AND FITNESS FOR A
+ * PARTICULAR PURPOSE.
+ *
+ * 4.2. IN NO EVENT SHALL INTEL HAVE ANY LIABILITY TO LICENSEE, ITS LICENSEES
+ * OR ANY OTHER THIRD PARTY, FOR ANY LOST PROFITS, LOST DATA, LOSS OF USE OR
+ * COSTS OF PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES, OR FOR ANY INDIRECT,
+ * SPECIAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF THIS AGREEMENT, UNDER ANY
+ * CAUSE OF ACTION OR THEORY OF LIABILITY, AND IRRESPECTIVE OF WHETHER INTEL
+ * HAS ADVANCE NOTICE OF THE POSSIBILITY OF SUCH DAMAGES. THESE LIMITATIONS
+ * SHALL APPLY NOTWITHSTANDING THE FAILURE OF THE ESSENTIAL PURPOSE OF ANY
+ * LIMITED REMEDY.
+ *
+ * 4.3. Licensee shall not export, either directly or indirectly, any of this
+ * software or system incorporating such software without first obtaining any
+ * required license or other approval from the U. S. Department of Commerce or
+ * any other agency or department of the United States Government. In the
+ * event Licensee exports any such software from the United States or
+ * re-exports any such software from a foreign destination, Licensee shall
+ * ensure that the distribution and export/re-export of the software is in
+ * compliance with all laws, regulations, orders, or other restrictions of the
+ * U.S. Export Administration Regulations. Licensee agrees that neither it nor
+ * any of its subsidiaries will export/re-export any technical data, process,
+ * software, or service, directly or indirectly, to any country for which the
+ * United States government or any agency thereof requires an export license,
+ * other governmental approval, or letter of assurance, without first obtaining
+ * such license, approval or letter.
+ *
+ *****************************************************************************
+ *
+ * Alternatively, you may choose to be licensed under the terms of the
+ * following license:
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -23,30 +131,31 @@
  *    of any contributors may be used to endorse or promote products derived
  *    from this software without specific prior written permission.
  *
- * Alternatively, this software may be distributed under the terms of the
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * Alternatively, you may choose to be licensed under the terms of the
  * GNU General Public License ("GPL") version 2 as published by the Free
  * Software Foundation.
  *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
- */
+ *****************************************************************************/
 
 #include <contrib/dev/acpica/compiler/aslcompiler.h>
 #include <contrib/dev/acpica/include/amlcode.h>
 #include <contrib/dev/acpica/include/acdispat.h>
 #include <contrib/dev/acpica/include/acnamesp.h>
-
+#include <contrib/dev/acpica/include/acparser.h>
 #include "aslcompiler.y.h"
+
 
 #define _COMPONENT          ACPI_COMPILER
         ACPI_MODULE_NAME    ("aslload")
@@ -104,8 +213,6 @@ LdLoadNamespace (
     ACPI_WALK_STATE         *WalkState;
 
 
-    DbgPrint (ASL_DEBUG_OUTPUT, "\nCreating namespace\n\n");
-
     /* Create a new walk state */
 
     WalkState = AcpiDsCreateWalkState (0, NULL, NULL, NULL);
@@ -126,7 +233,11 @@ LdLoadNamespace (
 
     /* Dump the namespace if debug is enabled */
 
-    AcpiNsDumpTables (ACPI_NS_ALL, ACPI_UINT32_MAX);
+    if (AcpiDbgLevel & ACPI_LV_TABLES)
+    {
+        AcpiNsDumpTables (ACPI_NS_ALL, ACPI_UINT32_MAX);
+    }
+
     ACPI_FREE (WalkState);
     return (AE_OK);
 }
@@ -152,9 +263,28 @@ LdLoadFieldElements (
     ACPI_WALK_STATE         *WalkState)
 {
     ACPI_PARSE_OBJECT       *Child = NULL;
+    ACPI_PARSE_OBJECT       *SourceRegion;
     ACPI_NAMESPACE_NODE     *Node;
     ACPI_STATUS             Status;
 
+
+
+    SourceRegion = UtGetArg (Op, 0);
+    if (SourceRegion)
+    {
+        Status = AcpiNsLookup (WalkState->ScopeInfo,
+            SourceRegion->Asl.Value.String,
+            ACPI_TYPE_REGION, ACPI_IMODE_EXECUTE,
+            ACPI_NS_DONT_OPEN_SCOPE, NULL, &Node);
+        if (Status == AE_NOT_FOUND)
+        {
+            /*
+             * If the named object is not found, it means that it is either a
+             * forward reference or the named object does not exist.
+             */
+            SourceRegion->Asl.CompileFlags |= OP_NOT_FOUND_DURING_LOAD;
+        }
+    }
 
     /* Get the first named field element */
 
@@ -196,12 +326,11 @@ LdLoadFieldElements (
         default:
 
             Status = AcpiNsLookup (WalkState->ScopeInfo,
-                        Child->Asl.Value.String,
-                        ACPI_TYPE_LOCAL_REGION_FIELD,
-                        ACPI_IMODE_LOAD_PASS1,
-                        ACPI_NS_NO_UPSEARCH | ACPI_NS_DONT_OPEN_SCOPE |
-                            ACPI_NS_ERROR_IF_FOUND,
-                        NULL, &Node);
+                Child->Asl.Value.String,
+                ACPI_TYPE_LOCAL_REGION_FIELD,
+                ACPI_IMODE_LOAD_PASS1,
+                ACPI_NS_NO_UPSEARCH | ACPI_NS_DONT_OPEN_SCOPE |
+                    ACPI_NS_ERROR_IF_FOUND, NULL, &Node);
             if (ACPI_FAILURE (Status))
             {
                 if (Status != AE_ALREADY_EXISTS)
@@ -210,13 +339,22 @@ LdLoadFieldElements (
                         Child->Asl.Value.String);
                     return (Status);
                 }
-
-                /*
-                 * The name already exists in this scope
-                 * But continue processing the elements
-                 */
-                AslError (ASL_ERROR, ASL_MSG_NAME_EXISTS, Child,
-                    Child->Asl.Value.String);
+                else if (Status == AE_ALREADY_EXISTS &&
+                    (Node->Flags & ANOBJ_IS_EXTERNAL))
+                {
+                    Node->Type = (UINT8) ACPI_TYPE_LOCAL_REGION_FIELD;
+                    Node->Flags &= ~ANOBJ_IS_EXTERNAL;
+                }
+                else
+                {
+                    /*
+                     * The name already exists in this scope
+                     * But continue processing the elements
+                     */
+                    AslDualParseOpError (ASL_WARNING, ASL_MSG_NAME_EXISTS, Child,
+                        Child->Asl.Value.String, ASL_MSG_FOUND_HERE, Node->Op,
+                        Node->Op->Asl.ExternalName);
+                }
             }
             else
             {
@@ -266,17 +404,19 @@ LdLoadResourceElements (
      * This opens a scope, so later field names are guaranteed to be new/unique.
      */
     Status = AcpiNsLookup (WalkState->ScopeInfo, Op->Asl.Namepath,
-                ACPI_TYPE_LOCAL_RESOURCE, ACPI_IMODE_LOAD_PASS1,
-                ACPI_NS_NO_UPSEARCH | ACPI_NS_ERROR_IF_FOUND,
-                WalkState, &Node);
+        ACPI_TYPE_LOCAL_RESOURCE, ACPI_IMODE_LOAD_PASS1,
+        ACPI_NS_NO_UPSEARCH | ACPI_NS_ERROR_IF_FOUND,
+        WalkState, &Node);
     if (ACPI_FAILURE (Status))
     {
         if (Status == AE_ALREADY_EXISTS)
         {
             /* Actual node causing the error was saved in ParentMethod */
 
-            AslError (ASL_ERROR, ASL_MSG_NAME_EXISTS,
-                (ACPI_PARSE_OBJECT *) Op->Asl.ParentMethod, Op->Asl.Namepath);
+            AslDualParseOpError (ASL_ERROR, ASL_MSG_NAME_EXISTS,
+                (ACPI_PARSE_OBJECT *) Op->Asl.ParentMethod,
+                Op->Asl.Namepath, ASL_MSG_FOUND_HERE, Node->Op,
+                Node->Op->Asl.ExternalName);
             return (AE_OK);
         }
         return (Status);
@@ -296,11 +436,9 @@ LdLoadResourceElements (
         if (InitializerOp->Asl.ExternalName)
         {
             Status = AcpiNsLookup (WalkState->ScopeInfo,
-                        InitializerOp->Asl.ExternalName,
-                        ACPI_TYPE_LOCAL_RESOURCE_FIELD,
-                        ACPI_IMODE_LOAD_PASS1,
-                        ACPI_NS_NO_UPSEARCH | ACPI_NS_DONT_OPEN_SCOPE,
-                        NULL, &Node);
+                InitializerOp->Asl.ExternalName,
+                ACPI_TYPE_LOCAL_RESOURCE_FIELD, ACPI_IMODE_LOAD_PASS1,
+                ACPI_NS_NO_UPSEARCH | ACPI_NS_DONT_OPEN_SCOPE, NULL, &Node);
             if (ACPI_FAILURE (Status))
             {
                 return (Status);
@@ -344,6 +482,7 @@ LdNamespace1Begin (
 {
     ACPI_WALK_STATE         *WalkState = (ACPI_WALK_STATE *) Context;
     ACPI_NAMESPACE_NODE     *Node;
+    ACPI_PARSE_OBJECT       *MethodOp;
     ACPI_STATUS             Status;
     ACPI_OBJECT_TYPE        ObjectType;
     ACPI_OBJECT_TYPE        ActualObjectType = ACPI_TYPE_ANY;
@@ -352,9 +491,13 @@ LdNamespace1Begin (
     ACPI_PARSE_OBJECT       *Arg;
     UINT32                  i;
     BOOLEAN                 ForceNewScope = FALSE;
+    const ACPI_OPCODE_INFO  *OpInfo;
+    ACPI_PARSE_OBJECT       *ParentOp;
 
 
     ACPI_FUNCTION_NAME (LdNamespace1Begin);
+
+
     ACPI_DEBUG_PRINT ((ACPI_DB_DISPATCH, "Op %p [%s]\n",
         Op, Op->Asl.ParseOpName));
 
@@ -413,6 +556,69 @@ LdNamespace1Begin (
         return (AE_OK);
     }
 
+    /* Check for a possible illegal forward reference */
+
+    if ((Op->Asl.ParseOpcode == PARSEOP_NAMESEG) ||
+        (Op->Asl.ParseOpcode == PARSEOP_NAMESTRING))
+    {
+        /*
+         * Op->Asl.Namepath will be NULL for these opcodes.
+         * These opcodes are guaranteed to have a parent.
+         * Examine the parent opcode.
+         */
+        Status = AE_OK;
+        ParentOp = Op->Asl.Parent;
+        OpInfo = AcpiPsGetOpcodeInfo (ParentOp->Asl.AmlOpcode);
+
+        /*
+         * Exclude all operators that actually declare a new name:
+         *      Name (ABCD, 1) -> Ignore (AML_CLASS_NAMED_OBJECT)
+         * We only want references to named objects:
+         *      Store (2, WXYZ) -> Attempt to resolve the name
+         */
+        if (OpInfo->Class == AML_CLASS_NAMED_OBJECT)
+        {
+            return (AE_OK);
+        }
+
+        /*
+         * Check if the referenced object exists at this point during
+         * the load:
+         * 1) If it exists, then this cannot be a forward reference.
+         * 2) If it does not exist, it could be a forward reference or
+         * it truly does not exist (and no external declaration).
+         */
+        Status = AcpiNsLookup (WalkState->ScopeInfo,
+            Op->Asl.Value.Name, ACPI_TYPE_ANY, ACPI_IMODE_EXECUTE,
+            ACPI_NS_SEARCH_PARENT | ACPI_NS_DONT_OPEN_SCOPE,
+            WalkState, &Node);
+        if (Status == AE_NOT_FOUND)
+        {
+            /*
+             * This is either a forward reference or the object truly
+             * does not exist. The two cases can only be differentiated
+             * during the cross-reference stage later. Mark the Op/Name
+             * as not-found for now to indicate the need for further
+             * processing.
+             *
+             * Special case: Allow forward references from elements of
+             * Package objects. This provides compatibility with other
+             * ACPI implementations. To correctly implement this, the
+             * ACPICA table load defers package resolution until the entire
+             * namespace has been loaded.
+             */
+            if ((ParentOp->Asl.ParseOpcode != PARSEOP_PACKAGE) &&
+                (ParentOp->Asl.ParseOpcode != PARSEOP_VAR_PACKAGE))
+            {
+                Op->Asl.CompileFlags |= OP_NOT_FOUND_DURING_LOAD;
+            }
+
+            return (AE_OK);
+        }
+
+        return (Status);
+    }
+
     Path = Op->Asl.Namepath;
     if (!Path)
     {
@@ -433,7 +639,7 @@ LdNamespace1Begin (
          * a new scope so that the resource subfield names can be entered into
          * the namespace underneath this name
          */
-        if (Op->Asl.CompileFlags & NODE_IS_RESOURCE_DESC)
+        if (Op->Asl.CompileFlags & OP_IS_RESOURCE_DESC)
         {
             ForceNewScope = TRUE;
         }
@@ -448,7 +654,6 @@ LdNamespace1Begin (
             ObjectType++;
         }
         break;
-
 
     case PARSEOP_EXTERNAL:
         /*
@@ -483,7 +688,7 @@ LdNamespace1Begin (
 
     case PARSEOP_DEFAULT_ARG:
 
-        if (Op->Asl.CompileFlags == NODE_IS_RESOURCE_DESC)
+        if (Op->Asl.CompileFlags == OP_IS_RESOURCE_DESC)
         {
             Status = LdLoadResourceElements (Op, WalkState);
             return_ACPI_STATUS (Status);
@@ -500,8 +705,7 @@ LdNamespace1Begin (
          * handle this case. Perhaps someday this case can go away.
          */
         Status = AcpiNsLookup (WalkState->ScopeInfo, Path, ACPI_TYPE_ANY,
-                    ACPI_IMODE_EXECUTE, ACPI_NS_SEARCH_PARENT,
-                    WalkState, &(Node));
+            ACPI_IMODE_EXECUTE, ACPI_NS_SEARCH_PARENT, WalkState, &Node);
         if (ACPI_FAILURE (Status))
         {
             if (Status == AE_NOT_FOUND)
@@ -509,23 +713,26 @@ LdNamespace1Begin (
                 /* The name was not found, go ahead and create it */
 
                 Status = AcpiNsLookup (WalkState->ScopeInfo, Path,
-                            ACPI_TYPE_LOCAL_SCOPE,
-                            ACPI_IMODE_LOAD_PASS1, Flags,
-                            WalkState, &(Node));
+                    ACPI_TYPE_LOCAL_SCOPE, ACPI_IMODE_LOAD_PASS1,
+                    Flags, WalkState, &Node);
                 if (ACPI_FAILURE (Status))
                 {
                     return_ACPI_STATUS (Status);
                 }
 
-                /*
-                 * However, this is an error -- primarily because the MS
-                 * interpreter can't handle a forward reference from the
-                 * Scope() operator.
-                 */
-                AslError (ASL_ERROR, ASL_MSG_NOT_FOUND, Op,
-                    Op->Asl.ExternalName);
-                AslError (ASL_ERROR, ASL_MSG_SCOPE_FWD_REF, Op,
-                    Op->Asl.ExternalName);
+                /* However, this is an error -- operand to Scope must exist */
+
+                if (strlen (Op->Asl.ExternalName) == ACPI_NAMESEG_SIZE)
+                {
+                    AslError (ASL_ERROR, ASL_MSG_NOT_FOUND, Op,
+                        Op->Asl.ExternalName);
+                }
+                else
+                {
+                    AslError (ASL_ERROR, ASL_MSG_NAMEPATH_NOT_EXIST, Op,
+                        Op->Asl.ExternalName);
+                }
+
                 goto FinishNode;
             }
 
@@ -533,6 +740,35 @@ LdNamespace1Begin (
                 "Failure from namespace lookup", FALSE);
 
             return_ACPI_STATUS (Status);
+        }
+        else /* Status AE_OK */
+        {
+            /*
+             * Do not allow references to external scopes from the DSDT.
+             * This is because the DSDT is always loaded first, and the
+             * external reference cannot be resolved -- causing a runtime
+             * error because Scope() must be resolved immediately.
+             * 10/2015.
+             */
+            if ((Node->Flags & ANOBJ_IS_EXTERNAL) &&
+                (ACPI_COMPARE_NAMESEG (AslGbl_TableSignature, "DSDT")))
+            {
+                /* However, allowed if the reference is within a method */
+
+                MethodOp = Op->Asl.Parent;
+                while (MethodOp &&
+                      (MethodOp->Asl.ParseOpcode != PARSEOP_METHOD))
+                {
+                    MethodOp = MethodOp->Asl.Parent;
+                }
+
+                if (!MethodOp)
+                {
+                    /* Not in a control method, error */
+
+                    AslError (ASL_ERROR, ASL_MSG_CROSS_TABLE_SCOPE, Op, NULL);
+                }
+            }
         }
 
         /* We found a node with this name, now check the type */
@@ -561,15 +797,15 @@ LdNamespace1Begin (
              * Which is used to workaround the fact that the MS interpreter
              * does not allow Scope() forward references.
              */
-            sprintf (MsgBuffer, "%s [%s], changing type to [Scope]",
+            sprintf (AslGbl_MsgBuffer, "%s [%s], changing type to [Scope]",
                 Op->Asl.ExternalName, AcpiUtGetTypeName (Node->Type));
-            AslError (ASL_REMARK, ASL_MSG_SCOPE_TYPE, Op, MsgBuffer);
+            AslError (ASL_REMARK, ASL_MSG_SCOPE_TYPE, Op, AslGbl_MsgBuffer);
 
             /* Switch the type to scope, open the new scope */
 
             Node->Type = ACPI_TYPE_LOCAL_SCOPE;
             Status = AcpiDsScopeStackPush (Node, ACPI_TYPE_LOCAL_SCOPE,
-                        WalkState);
+                WalkState);
             if (ACPI_FAILURE (Status))
             {
                 return_ACPI_STATUS (Status);
@@ -580,9 +816,9 @@ LdNamespace1Begin (
 
             /* All other types are an error */
 
-            sprintf (MsgBuffer, "%s [%s]", Op->Asl.ExternalName,
+            sprintf (AslGbl_MsgBuffer, "%s [%s]", Op->Asl.ExternalName,
                 AcpiUtGetTypeName (Node->Type));
-            AslError (ASL_ERROR, ASL_MSG_SCOPE_TYPE, Op, MsgBuffer);
+            AslError (ASL_ERROR, ASL_MSG_SCOPE_TYPE, Op, AslGbl_MsgBuffer);
 
             /*
              * However, switch the type to be an actual scope so
@@ -591,7 +827,7 @@ LdNamespace1Begin (
              */
             Node->Type = ACPI_TYPE_LOCAL_SCOPE;
             Status = AcpiDsScopeStackPush (Node, ACPI_TYPE_LOCAL_SCOPE,
-                        WalkState);
+                WalkState);
             if (ACPI_FAILURE (Status))
             {
                 return_ACPI_STATUS (Status);
@@ -602,20 +838,30 @@ LdNamespace1Begin (
         Status = AE_OK;
         goto FinishNode;
 
-
     default:
 
         ObjectType = AslMapNamedOpcodeToDataType (Op->Asl.AmlOpcode);
         break;
     }
 
-
     ACPI_DEBUG_PRINT ((ACPI_DB_DISPATCH, "Loading name: %s, (%s)\n",
-            Op->Asl.ExternalName, AcpiUtGetTypeName (ObjectType)));
+        Op->Asl.ExternalName, AcpiUtGetTypeName (ObjectType)));
 
     /* The name must not already exist */
 
     Flags |= ACPI_NS_ERROR_IF_FOUND;
+
+    /*
+     * For opcodes that enter new names into the namespace,
+     * all prefix NameSegs must exist.
+     */
+    WalkState->OpInfo = AcpiPsGetOpcodeInfo (Op->Asl.AmlOpcode);
+    if (((WalkState->OpInfo->Flags & AML_NAMED) ||
+        (WalkState->OpInfo->Flags & AML_CREATE)) &&
+        (Op->Asl.AmlOpcode != AML_EXTERNAL_OP))
+    {
+        Flags |= ACPI_NS_PREFIX_MUST_EXIST;
+    }
 
     /*
      * Enter the named type into the internal namespace. We enter the name
@@ -624,7 +870,7 @@ LdNamespace1Begin (
      * parse tree later.
      */
     Status = AcpiNsLookup (WalkState->ScopeInfo, Path, ObjectType,
-                    ACPI_IMODE_LOAD_PASS1, Flags, WalkState, &Node);
+        ACPI_IMODE_LOAD_PASS1, Flags, WalkState, &Node);
     if (ACPI_FAILURE (Status))
     {
         if (Status == AE_ALREADY_EXISTS)
@@ -658,19 +904,62 @@ LdNamespace1Begin (
                         return_ACPI_STATUS (Status);
                     }
                 }
+
                 Status = AE_OK;
+            }
+            else if (!(Node->Flags & ANOBJ_IS_EXTERNAL) &&
+                     (Op->Asl.ParseOpcode == PARSEOP_EXTERNAL))
+            {
+                /*
+                 * Allow externals in same scope as the definition of the
+                 * actual object. Similar to C. Allows multiple definition
+                 * blocks that refer to each other in the same file.
+                 */
+                Status = AE_OK;
+            }
+            else if ((Node->Flags & ANOBJ_IS_EXTERNAL) &&
+                     (Op->Asl.ParseOpcode == PARSEOP_EXTERNAL) &&
+                     (ObjectType == ACPI_TYPE_ANY))
+            {
+                /* Allow update of externals of unknown type. */
+
+                if (AcpiNsOpensScope (ActualObjectType))
+                {
+                    Node->Type = (UINT8) ActualObjectType;
+                    Status = AE_OK;
+                }
+                else
+                {
+                    sprintf (AslGbl_MsgBuffer, "%s [%s]", Op->Asl.ExternalName,
+                        AcpiUtGetTypeName (Node->Type));
+                    AslError (ASL_ERROR, ASL_MSG_SCOPE_TYPE, Op, AslGbl_MsgBuffer);
+                    return_ACPI_STATUS (AE_OK);
+                }
             }
             else
             {
                 /* Valid error, object already exists */
 
-                AslError (ASL_ERROR, ASL_MSG_NAME_EXISTS, Op,
-                    Op->Asl.ExternalName);
+                AslDualParseOpError (ASL_ERROR, ASL_MSG_NAME_EXISTS, Op,
+                    Op->Asl.ExternalName, ASL_MSG_FOUND_HERE, Node->Op,
+                    Node->Op->Asl.ExternalName);
                 return_ACPI_STATUS (AE_OK);
             }
         }
+        else if (AE_NOT_FOUND)
+        {
+            /*
+             * One or more prefix NameSegs of the NamePath do not exist
+             * (all of them must exist). Attempt to continue compilation
+             * by setting the current scope to the root.
+             */
+            Node = AcpiGbl_RootNode;
+            Status = AE_OK;
+        }
         else
         {
+            /* Flag all other errors as coming from the ACPICA core */
+
             AslCoreSubsystemError (Op, Status,
                 "Failure from namespace lookup", FALSE);
             return_ACPI_STATUS (Status);
@@ -765,7 +1054,7 @@ LdNamespace2Begin (
     /* Get the type to determine if we should push the scope */
 
     if ((Op->Asl.ParseOpcode == PARSEOP_DEFAULT_ARG) &&
-        (Op->Asl.CompileFlags == NODE_IS_RESOURCE_DESC))
+        (Op->Asl.CompileFlags == OP_IS_RESOURCE_DESC))
     {
         ObjectType = ACPI_TYPE_LOCAL_RESOURCE;
     }
@@ -778,7 +1067,7 @@ LdNamespace2Begin (
 
     if (Op->Asl.ParseOpcode == PARSEOP_NAME)
     {
-        if (Op->Asl.CompileFlags & NODE_IS_RESOURCE_DESC)
+        if (Op->Asl.CompileFlags & OP_IS_RESOURCE_DESC)
         {
             ForceNewScope = TRUE;
         }
@@ -797,10 +1086,10 @@ LdNamespace2Begin (
 
     if (Op->Asl.ParseOpcode == PARSEOP_ALIAS)
     {
-        /* Complete the alias node by getting and saving the target node */
-
-        /* First child is the alias target */
-
+        /*
+         * Complete the alias node by getting and saving the target node.
+         * First child is the alias target
+         */
         Arg = Op->Asl.Child;
 
         /* Get the target pathname */
@@ -818,24 +1107,40 @@ LdNamespace2Begin (
         /* Get the NS node associated with the target. It must exist. */
 
         Status = AcpiNsLookup (WalkState->ScopeInfo, Path, ACPI_TYPE_ANY,
-                    ACPI_IMODE_EXECUTE, ACPI_NS_SEARCH_PARENT | ACPI_NS_DONT_OPEN_SCOPE,
-                    WalkState, &TargetNode);
+            ACPI_IMODE_EXECUTE, ACPI_NS_SEARCH_PARENT | ACPI_NS_DONT_OPEN_SCOPE,
+            WalkState, &TargetNode);
         if (ACPI_FAILURE (Status))
         {
             if (Status == AE_NOT_FOUND)
             {
-                AslError (ASL_ERROR, ASL_MSG_NOT_FOUND, Op,
-                    Op->Asl.ExternalName);
+                /* Standalone NameSeg vs. NamePath */
 
+                if (strlen (Arg->Asl.ExternalName) == ACPI_NAMESEG_SIZE)
+                {
+                    AslError (ASL_ERROR, ASL_MSG_NOT_FOUND, Op,
+                        Arg->Asl.ExternalName);
+                }
+                else
+                {
+                    AslError (ASL_ERROR, ASL_MSG_NAMEPATH_NOT_EXIST, Op,
+                        Arg->Asl.ExternalName);
+                }
+
+#if 0
+/*
+ * NOTE: Removed 10/2018 to enhance compiler error reporting. No
+ * regressions seen.
+ */
                 /*
                  * The name was not found, go ahead and create it.
                  * This prevents more errors later.
                  */
                 Status = AcpiNsLookup (WalkState->ScopeInfo, Path,
-                            ACPI_TYPE_ANY,
-                            ACPI_IMODE_LOAD_PASS1, ACPI_NS_NO_UPSEARCH,
-                            WalkState, &(Node));
-                return (AE_OK);
+                    ACPI_TYPE_ANY, ACPI_IMODE_LOAD_PASS1,
+                    ACPI_NS_NO_UPSEARCH, WalkState, &Node);
+#endif
+                return (Status);
+/* Removed: return (AE_OK)*/
             }
 
             AslCoreSubsystemError (Op, Status,
@@ -889,7 +1194,7 @@ LdCommonNamespaceEnd (
     /* Get the type to determine if we should pop the scope */
 
     if ((Op->Asl.ParseOpcode == PARSEOP_DEFAULT_ARG) &&
-        (Op->Asl.CompileFlags == NODE_IS_RESOURCE_DESC))
+        (Op->Asl.CompileFlags == OP_IS_RESOURCE_DESC))
     {
         /* TBD: Merge into AcpiDsMapNamedOpcodeToDataType */
 
@@ -904,7 +1209,7 @@ LdCommonNamespaceEnd (
 
     if (Op->Asl.ParseOpcode == PARSEOP_NAME)
     {
-        if (Op->Asl.CompileFlags & NODE_IS_RESOURCE_DESC)
+        if (Op->Asl.CompileFlags & OP_IS_RESOURCE_DESC)
         {
             ForceNewScope = TRUE;
         }

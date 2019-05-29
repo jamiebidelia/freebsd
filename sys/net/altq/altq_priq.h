@@ -32,6 +32,7 @@
 
 #include <net/altq/altq.h>
 #include <net/altq/altq_classq.h>
+#include <net/altq/altq_codel.h>
 #include <net/altq/altq_red.h>
 #include <net/altq/altq_rio.h>
 
@@ -41,59 +42,18 @@ extern "C" {
 
 #define	PRIQ_MAXPRI	16	/* upper limit of the number of priorities */
 
-#ifdef ALTQ3_COMPAT
-struct priq_interface {
-	char	ifname[IFNAMSIZ];	/* interface name (e.g., fxp0) */
-	u_long	arg;			/* request-specific argument */
-};
-
-struct priq_add_class {
-	struct priq_interface	iface;
-	int			pri;	/* priority (0 is the lowest) */
-	int			qlimit;	/* queue size limit */
-	int			flags;	/* misc flags (see below) */
-
-	u_int32_t		class_handle;  /* return value */
-};
-#endif /* ALTQ3_COMPAT */
 
 /* priq class flags */
 #define	PRCF_RED		0x0001	/* use RED */
 #define	PRCF_ECN		0x0002  /* use RED/ECN */
 #define	PRCF_RIO		0x0004  /* use RIO */
+#define	PRCF_CODEL		0x0008	/* use CoDel */
 #define	PRCF_CLEARDSCP		0x0010  /* clear diffserv codepoint */
 #define	PRCF_DEFAULTCLASS	0x1000	/* default class */
 
 /* special class handles */
 #define	PRIQ_NULLCLASS_HANDLE	0
 
-#ifdef ALTQ3_COMPAT
-struct priq_delete_class {
-	struct priq_interface	iface;
-	u_int32_t		class_handle;
-};
-
-struct priq_modify_class {
-	struct priq_interface	iface;
-	u_int32_t		class_handle;
-	int			pri;
-	int			qlimit;
-	int			flags;
-};
-
-struct priq_add_filter {
-	struct priq_interface	iface;
-	u_int32_t		class_handle;
-	struct flow_filter	filter;
-
-	u_long			filter_handle;  /* return value */
-};
-
-struct priq_delete_filter {
-	struct priq_interface	iface;
-	u_long			filter_handle;
-};
-#endif /* ALTQ3_COMPAT */
 
 struct priq_classstats {
 	u_int32_t		class_handle;
@@ -104,39 +64,30 @@ struct priq_classstats {
 	struct pktcntr		xmitcnt;  /* transmitted packet counter */
 	struct pktcntr		dropcnt;  /* dropped packet counter */
 
-	/* red and rio related info */
+	/* codel, red and rio related info */
 	int			qtype;
 	struct redstats		red[3];	/* rio has 3 red stats */
+	struct codel_stats	codel;
 };
 
-#ifdef ALTQ3_COMPAT
-struct priq_class_stats {
-	struct priq_interface	iface;
-	int			maxpri;	  /* in/out */
+/*
+ * PRIQ_STATS_VERSION is defined in altq.h to work around issues stemming
+ * from mixing of public-API and internal bits in each scheduler-specific
+ * header.
+ */
 
-	struct priq_classstats	*stats;   /* pointer to stats array */
-};
-
-#define	PRIQ_IF_ATTACH		_IOW('Q', 1, struct priq_interface)
-#define	PRIQ_IF_DETACH		_IOW('Q', 2, struct priq_interface)
-#define	PRIQ_ENABLE		_IOW('Q', 3, struct priq_interface)
-#define	PRIQ_DISABLE		_IOW('Q', 4, struct priq_interface)
-#define	PRIQ_CLEAR		_IOW('Q', 5, struct priq_interface)
-#define	PRIQ_ADD_CLASS		_IOWR('Q', 7, struct priq_add_class)
-#define	PRIQ_DEL_CLASS		_IOW('Q', 8, struct priq_delete_class)
-#define	PRIQ_MOD_CLASS		_IOW('Q', 9, struct priq_modify_class)
-#define	PRIQ_ADD_FILTER		_IOWR('Q', 10, struct priq_add_filter)
-#define	PRIQ_DEL_FILTER		_IOW('Q', 11, struct priq_delete_filter)
-#define	PRIQ_GETSTATS		_IOWR('Q', 12, struct priq_class_stats)
-
-#endif /* ALTQ3_COMPAT */
 
 #ifdef _KERNEL
 
 struct priq_class {
 	u_int32_t	cl_handle;	/* class handle */
 	class_queue_t	*cl_q;		/* class queue structure */
-	struct red	*cl_red;	/* RED state */
+	union {
+		struct red	*cl_red;	/* RED state */
+		struct codel	*cl_codel;	/* CoDel state */
+	} cl_aqm;
+#define	cl_red		cl_aqm.cl_red
+#define	cl_codel	cl_aqm.cl_codel
 	int		cl_pri;		/* priority */
 	int		cl_flags;	/* class flags */
 	struct priq_if	*cl_pif;	/* back pointer to pif */

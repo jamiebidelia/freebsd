@@ -1,4 +1,4 @@
-/* $NetBSD: t_cond.c,v 1.6 2014/09/03 16:23:24 gson Exp $ */
+/* $NetBSD: t_cond.c,v 1.7 2016/07/03 14:24:59 christos Exp $ */
 
 /*
  * Copyright (c) 2008 The NetBSD Foundation, Inc.
@@ -29,7 +29,7 @@
 #include <sys/cdefs.h>
 __COPYRIGHT("@(#) Copyright (c) 2008\
  The NetBSD Foundation, inc. All rights reserved.");
-__RCSID("$NetBSD: t_cond.c,v 1.6 2014/09/03 16:23:24 gson Exp $");
+__RCSID("$NetBSD: t_cond.c,v 1.7 2016/07/03 14:24:59 christos Exp $");
 
 #include <sys/time.h>
 
@@ -493,6 +493,51 @@ ATF_TC_BODY(bogus_timedwaits, tc)
 	PTHREAD_REQUIRE(pthread_mutex_unlock(&static_mutex));
 }
 
+#ifdef __FreeBSD__
+static void *
+destroy_busy_threadfunc(void *arg)
+{
+	PTHREAD_REQUIRE(pthread_mutex_lock(&mutex));
+
+	share = 1;
+	PTHREAD_REQUIRE(pthread_cond_broadcast(&cond));
+	PTHREAD_REQUIRE(pthread_cond_wait(&cond, &mutex));
+
+	PTHREAD_REQUIRE(pthread_mutex_unlock(&mutex));
+
+	return NULL;
+}
+
+ATF_TC(destroy_busy);
+ATF_TC_HEAD(destroy_busy, tc)
+{
+	atf_tc_set_md_var(tc, "descr", "Checks non-standard behaviour of "
+	    "returning EBUSY when attempting to destroy an active condvar");
+}
+ATF_TC_BODY(destroy_busy, tc)
+{
+	pthread_t thread;
+
+	PTHREAD_REQUIRE(pthread_mutex_init(&mutex, NULL));
+	PTHREAD_REQUIRE(pthread_cond_init(&cond, NULL));
+	PTHREAD_REQUIRE(pthread_mutex_lock(&mutex));
+	PTHREAD_REQUIRE(pthread_create(&thread, NULL, destroy_busy_threadfunc,
+	    NULL));
+
+	while (share == 0) {
+		PTHREAD_REQUIRE(pthread_cond_wait(&cond, &mutex));
+	}
+
+	PTHREAD_REQUIRE_STATUS(pthread_cond_destroy(&cond), EBUSY);
+	PTHREAD_REQUIRE(pthread_cond_signal(&cond));
+	PTHREAD_REQUIRE(pthread_cond_destroy(&cond));
+
+	PTHREAD_REQUIRE(pthread_mutex_unlock(&mutex));
+	PTHREAD_REQUIRE(pthread_join(thread, NULL));
+	PTHREAD_REQUIRE(pthread_mutex_destroy(&mutex));
+}
+#endif
+
 static void
 unlock(void *arg)
 {
@@ -547,6 +592,69 @@ ATF_TC_BODY(destroy_after_cancel, tc)
 	PTHREAD_REQUIRE(pthread_mutex_destroy(&mutex));
 }
 
+static void *
+destroy_after_signal_threadfunc(void *arg)
+{
+	PTHREAD_REQUIRE(pthread_mutex_lock(&mutex));
+
+	share = 1;
+	PTHREAD_REQUIRE(pthread_cond_broadcast(&cond));
+	PTHREAD_REQUIRE(pthread_cond_wait(&cond, &mutex));
+
+	PTHREAD_REQUIRE(pthread_mutex_unlock(&mutex));
+
+	return NULL;
+}
+
+ATF_TC(destroy_after_signal);
+ATF_TC_HEAD(destroy_after_signal, tc)
+{
+	atf_tc_set_md_var(tc, "descr", "Checks destroying a condition variable "
+	    "immediately after signaling waiters");
+}
+ATF_TC_BODY(destroy_after_signal, tc)
+{
+	pthread_t thread;
+
+	PTHREAD_REQUIRE(pthread_mutex_init(&mutex, NULL));
+	PTHREAD_REQUIRE(pthread_cond_init(&cond, NULL));
+	PTHREAD_REQUIRE(pthread_mutex_lock(&mutex));
+	PTHREAD_REQUIRE(pthread_create(&thread, NULL,
+	    destroy_after_signal_threadfunc, NULL));
+
+	while (share == 0) {
+		PTHREAD_REQUIRE(pthread_cond_wait(&cond, &mutex));
+	}
+
+	PTHREAD_REQUIRE(pthread_cond_signal(&cond));
+	PTHREAD_REQUIRE(pthread_cond_destroy(&cond));
+	PTHREAD_REQUIRE(pthread_mutex_unlock(&mutex));
+
+	PTHREAD_REQUIRE(pthread_join(thread, NULL));
+
+	PTHREAD_REQUIRE(pthread_mutex_destroy(&mutex));
+}
+
+ATF_TC(condattr);
+ATF_TC_HEAD(condattr, tc)
+{
+	atf_tc_set_md_var(tc, "descr", "Checks Condattr");
+}
+ATF_TC_BODY(condattr, tc)
+{
+	pthread_condattr_t condattr;
+	clockid_t clockid;
+
+	PTHREAD_REQUIRE(pthread_condattr_init(&condattr));
+	PTHREAD_REQUIRE(pthread_condattr_setclock(&condattr, CLOCK_REALTIME));
+	PTHREAD_REQUIRE(pthread_condattr_getclock(&condattr, &clockid));
+	ATF_REQUIRE_EQ(clockid, CLOCK_REALTIME);
+	
+	PTHREAD_REQUIRE(pthread_condattr_setclock(&condattr, CLOCK_MONOTONIC));
+	PTHREAD_REQUIRE(pthread_condattr_getclock(&condattr, &clockid));	
+ 	ATF_REQUIRE_EQ(clockid, CLOCK_MONOTONIC);
+}
+
 ATF_TP_ADD_TCS(tp)
 {
 
@@ -557,7 +665,12 @@ ATF_TP_ADD_TCS(tp)
 	ATF_TP_ADD_TC(tp, cond_timedwait_race);
 	ATF_TP_ADD_TC(tp, broadcast);
 	ATF_TP_ADD_TC(tp, bogus_timedwaits);
+#ifdef __FreeBSD__
+	ATF_TP_ADD_TC(tp, destroy_busy);
+#endif
 	ATF_TP_ADD_TC(tp, destroy_after_cancel);
+	ATF_TP_ADD_TC(tp, destroy_after_signal);
+	ATF_TP_ADD_TC(tp, condattr);
 
 	return atf_no_error();
 }

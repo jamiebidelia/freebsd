@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: Beerware
+ *
  * ----------------------------------------------------------------------------
  * "THE BEER-WARE LICENSE" (Revision 42):
  * <phk@FreeBSD.ORG> wrote this file.  As long as you retain this notice you
@@ -123,6 +125,7 @@ read_worklist(off_t t)
 		new_lump(s, l, state);
 		d -= l;
 	}
+	fclose(file);
 	(void)fprintf(stderr, " done.\n");
 	/*
 	 * Return the number of bytes already read
@@ -207,7 +210,7 @@ main(int argc, char * const argv[])
 			sectorsize = stripesize;
 
 		minsize = sectorsize;
-		bigsize = (bigsize / sectorsize) * sectorsize;
+		bigsize = rounddown(bigsize, sectorsize);
 
 		error = ioctl(fdr, DIOCGMEDIASIZE, &t);
 		if (error < 0)
@@ -222,7 +225,7 @@ main(int argc, char * const argv[])
 	for (ch = 0; (bigsize >> ch) > minsize; ch++)
 		continue;
 	medsize = bigsize >> (ch / 2);
-	medsize = (medsize / minsize) * minsize;
+	medsize = rounddown(medsize, minsize);
 
 	fprintf(stderr, "Bigsize = %zu, medsize = %zu, minsize = %zu\n",
 	    bigsize, medsize, minsize);

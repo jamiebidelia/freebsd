@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2013-2014 Devin Teske <dteske@FreeBSD.org>
+ * Copyright (c) 2013-2018 Devin Teske <dteske@FreeBSD.org>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -261,6 +261,13 @@ dialog_spawn_gauge(char *init_prompt, pid_t *pid)
 			errx(EXIT_FAILURE, "Out of memory?!");
 		sprintf(dargv[n++], "--title");
 		dargv[n++] = title;
+	} else {
+		if ((dargv[n] = malloc(8)) == NULL)
+			errx(EXIT_FAILURE, "Out of memory?!");
+		sprintf(dargv[n++], "--title");
+		if ((dargv[n] = malloc(1)) == NULL)
+			errx(EXIT_FAILURE, "Out of memory?!");
+		*dargv[n++] = '\0';
 	}
 	if (backtitle != NULL) {
 		if ((dargv[n] = malloc(12)) == NULL)
@@ -321,8 +328,7 @@ dialog_spawn_gauge(char *init_prompt, pid_t *pid)
 	posix_spawn_file_actions_addclose(&action, stdin_pipe[1]);
 	error = posix_spawnp(pid, dialog, &action,
 	    (const posix_spawnattr_t *)NULL, dargv, environ);
-	if (error != 0)
-		err(EXIT_FAILURE, "%s: posix_spawnp(3)", __func__);
+	if (error != 0) err(EXIT_FAILURE, "%s", dialog);
 
 	/* NB: Do not free(3) *dargv[], else SIGSEGV */
 

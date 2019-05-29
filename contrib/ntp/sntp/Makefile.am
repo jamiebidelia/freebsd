@@ -4,14 +4,17 @@ ACLOCAL_AMFLAGS = -I m4 -I libevent/m4 -I libopts/m4
 
 NULL =
 
-AM_CFLAGS = $(CFLAGS_NTP)
+AM_CFLAGS  = $(CFLAGS_NTP)
+AM_CFLAGS += $(NTP_HARD_CFLAGS)
 
 AM_CPPFLAGS  = $(SNTP_INCS)
 AM_CPPFLAGS += $(LIBOPTS_CFLAGS)
 AM_CPPFLAGS += $(CPPFLAGS_LIBEVENT)
 AM_CPPFLAGS += $(CPPFLAGS_NTP)
+AM_CPPFLAGS += $(NTP_HARD_CPPFLAGS)
 
-AM_LDFLAGS = $(LDFLAGS_NTP)
+AM_LDFLAGS  = $(LDFLAGS_NTP)
+AM_LDFLAGS += $(NTP_HARD_LDFLAGS)
 
 LDADD  = version.o
 LDADD += libsntp.a
@@ -38,27 +41,13 @@ bin_PROGRAMS =		@SNTP_DB@
 libexec_PROGRAMS =	@SNTP_DL@
 sbin_PROGRAMS =		@SNTP_DS@
 
-##
-## DIST_SUBDIRS is typically automatically derived by automake including
-## all possible SUBDIRS values, as even items which are not built are
-## typically distributed.
-##
-## To allow us to avoid configuring the libevent tearoff entirely when
-## it is not needed, we define DIST_SUBDIRS manually excluding libevent
-## when not building it, and in that case arrange for its distribution
-## with EXTRA_DIST copying the entire directory and libevent-dist-hook
-## cleaning unwanted VCS remnants.
-##
-## When we are building libevent, it is distributed conventionally, by
-## recursive make dist in sntp including libevent.
-##
-
-SUBDIRS = include scripts
-DIST_SUBDIRS = include scripts
+SUBDIRS = include scripts unity
+DIST_FAIL =
 
 if BUILD_LIBEVENT
 SUBDIRS += libevent
-DIST_SUBDIRS += libevent
+else
+DIST_FAIL += "--enable-local-libevent"
 endif
 
 if NEED_LIBOPTS
@@ -67,12 +56,8 @@ endif
 
 if BUILD_SNTP
 noinst_LIBRARIES = libsntp.a
-if GTEST_AVAILABLE
 SUBDIRS += tests
 endif
-endif
-
-DIST_SUBDIRS += libopts tests
 
 libsntp_a_SOURCES =		\
 	crypto.c		\
@@ -96,7 +81,6 @@ noinst_HEADERS =		\
 	main.h			\
 	networking.h		\
 	sntp-opts.h		\
-	tests_main.h		\
 	utilities.h		\
 	$(NULL)
 
@@ -111,9 +95,11 @@ EXTRA_DIST =				\
 	$(srcdir)/COPYRIGHT		\
 	ag-tpl				\
 	deps-ver			\
+	harden				\
 	invoke-sntp.menu		\
 	invoke-sntp.texi		\
 	@NTP_FORCE_LIBEVENT_DIST@	\
+	libpkgver 			\
 	loc				\
 	sntp-opts.def			\
 	sntp.1sntpman			\
@@ -122,6 +108,7 @@ EXTRA_DIST =				\
 	sntp.mdoc.in			\
 	sntp.html			\
 	sntp.texi			\
+	unity/auto			\
 	$(srcdir)/scm-rev		\
 	$(srcdir)/m4/version.m4		\
 	$(NULL)
@@ -204,8 +191,7 @@ check-scm-rev: $(srcdir)/scm-rev
 	@: do-nothing
 
 $(srcdir)/scm-rev:
-	-test -r $(srcdir)/../SCCS/s.ChangeSet &&		\
-	    (bk version) >/dev/null 2>&1 &&			\
+	-bk root $(srcdir) >/dev/null 2>&1 &&			\
 	    cd $(srcdir)/.. &&					\
 	    x=`bk -R prs -hr+ -nd:I: ChangeSet` &&		\
 	    y=`cat sntp/scm-rev 2>/dev/null` || true &&		\
@@ -285,11 +271,19 @@ $(srcdir)/sntp.html: $(srcdir)/invoke-sntp.menu $(srcdir)/invoke-sntp.texi $(src
 libtool: $(LIBTOOL_DEPS)
 	./config.status --recheck
 
-libevent-dist-hook:
-	if test -n "$(NTP_FORCE_LIBEVENT_DIST)" ; then rm -rf $(distdir)/libevent/autom4te.cache $(distdir)/libevent/config.h.in~ ; find $(distdir)/libevent -type d -name SCCS -print | xargs rm -rf ; fi
+# HMS: libevent/ is a target if it's in EXTRA_DIST via NTP_FORCE_LIBEVENT_DIST.
+# Note that libevent/ is already in DIST_SUBDIRS (implicit in Makefile.am
+# but explicit in Makefile.in).  This check doesn't help with distclean.
+libevent: distdir-pre-check
 
-dist-hook: libevent-dist-hook
-	@: do-nothing action to avoid default SCCS get
+# HMS: Stops the build for gmake or pmake
+distdir-pre-check:
+	case "$(DIST_FAIL)" in	\
+	 '')  ;;		\
+	 *) $(error re-run configure adding $(DIST_FAIL) if you want to make a distribution.);	\
+	    echo "re-run configure adding $(DIST_FAIL) if you want to make a distribution.";	\
+	    exit 1 ;;		\
+	esac
 
 include $(top_srcdir)/bincheck.mf
 include $(top_srcdir)/check-libntp.mf

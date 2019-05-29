@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2011 Nathan Whitehorn
  * All rights reserved.
  *
@@ -34,6 +36,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/conf.h>
 #include <sys/clock.h>
 #include <sys/cpu.h>
+#include <sys/eventhandler.h>
 #include <sys/kernel.h>
 #include <sys/reboot.h>
 #include <sys/sysctl.h>

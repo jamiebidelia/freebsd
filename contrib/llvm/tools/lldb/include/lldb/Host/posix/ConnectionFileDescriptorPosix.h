@@ -10,97 +10,114 @@
 #ifndef liblldb_Host_posix_ConnectionFileDescriptorPosix_h_
 #define liblldb_Host_posix_ConnectionFileDescriptorPosix_h_
 
-// C++ Includes
 #include <atomic>
 #include <memory>
+#include <mutex>
 
 #include "lldb/lldb-forward.h"
 
-// Other libraries and framework includes
-// Project includes
-#include "lldb/Core/Connection.h"
-#include "lldb/Host/Mutex.h"
 #include "lldb/Host/Pipe.h"
-#include "lldb/Host/Predicate.h"
-#include "lldb/Host/IOObject.h"
+#include "lldb/Utility/Connection.h"
+#include "lldb/Utility/IOObject.h"
+#include "lldb/Utility/Predicate.h"
 
-namespace lldb_private
-{
+namespace lldb_private {
 
-class Error;
+class Status;
 class Socket;
 class SocketAddress;
 
-class ConnectionFileDescriptor : public Connection
-{
-  public:
-    ConnectionFileDescriptor(bool child_processes_inherit = false);
+class ConnectionFileDescriptor : public Connection {
+public:
+  static const char *LISTEN_SCHEME;
+  static const char *ACCEPT_SCHEME;
+  static const char *UNIX_ACCEPT_SCHEME;
+  static const char *CONNECT_SCHEME;
+  static const char *TCP_CONNECT_SCHEME;
+  static const char *UDP_SCHEME;
+  static const char *UNIX_CONNECT_SCHEME;
+  static const char *UNIX_ABSTRACT_CONNECT_SCHEME;
+  static const char *FD_SCHEME;
+  static const char *FILE_SCHEME;
 
-    ConnectionFileDescriptor(int fd, bool owns_fd);
+  ConnectionFileDescriptor(bool child_processes_inherit = false);
 
-    virtual ~ConnectionFileDescriptor();
+  ConnectionFileDescriptor(int fd, bool owns_fd);
 
-    virtual bool IsConnected() const;
+  ConnectionFileDescriptor(Socket *socket);
 
-    virtual lldb::ConnectionStatus Connect(const char *s, Error *error_ptr);
+  ~ConnectionFileDescriptor() override;
 
-    virtual lldb::ConnectionStatus Disconnect(Error *error_ptr);
+  bool IsConnected() const override;
 
-    virtual size_t Read(void *dst, size_t dst_len, uint32_t timeout_usec, lldb::ConnectionStatus &status, Error *error_ptr);
+  lldb::ConnectionStatus Connect(llvm::StringRef s, Status *error_ptr) override;
 
-    virtual size_t Write(const void *src, size_t src_len, lldb::ConnectionStatus &status, Error *error_ptr);
+  lldb::ConnectionStatus Disconnect(Status *error_ptr) override;
 
-    lldb::ConnectionStatus BytesAvailable(uint32_t timeout_usec, Error *error_ptr);
+  size_t Read(void *dst, size_t dst_len, const Timeout<std::micro> &timeout,
+              lldb::ConnectionStatus &status, Status *error_ptr) override;
 
-    bool InterruptRead();
+  size_t Write(const void *src, size_t src_len, lldb::ConnectionStatus &status,
+               Status *error_ptr) override;
 
-    lldb::IOObjectSP
-    GetReadObject()
-    {
-        return m_read_sp;
-    }
-    const lldb::IOObjectSP
-    GetReadObject() const
-    {
-        return m_read_sp;
-    }
+  std::string GetURI() override;
 
-    uint16_t GetListeningPort(uint32_t timeout_sec);
+  lldb::ConnectionStatus BytesAvailable(const Timeout<std::micro> &timeout,
+                                        Status *error_ptr);
 
-    bool GetChildProcessesInherit() const;
-    void SetChildProcessesInherit(bool child_processes_inherit);
+  bool InterruptRead() override;
 
-  protected:
-    void OpenCommandPipe();
+  lldb::IOObjectSP GetReadObject() override { return m_read_sp; }
 
-    void CloseCommandPipe();
+  uint16_t GetListeningPort(const Timeout<std::micro> &timeout);
 
-    lldb::ConnectionStatus SocketListen(const char *host_and_port, Error *error_ptr);
+  bool GetChildProcessesInherit() const;
+  void SetChildProcessesInherit(bool child_processes_inherit);
 
-    lldb::ConnectionStatus ConnectTCP(const char *host_and_port, Error *error_ptr);
+protected:
+  void OpenCommandPipe();
 
-    lldb::ConnectionStatus ConnectUDP(const char *args, Error *error_ptr);
+  void CloseCommandPipe();
 
-    lldb::ConnectionStatus NamedSocketConnect(const char *socket_name, Error *error_ptr);
+  lldb::ConnectionStatus SocketListenAndAccept(llvm::StringRef host_and_port,
+                                               Status *error_ptr);
 
-    lldb::ConnectionStatus NamedSocketAccept(const char *socket_name, Error *error_ptr);
+  lldb::ConnectionStatus ConnectTCP(llvm::StringRef host_and_port,
+                                    Status *error_ptr);
 
-    lldb::IOObjectSP m_read_sp;
-    lldb::IOObjectSP m_write_sp;
+  lldb::ConnectionStatus ConnectUDP(llvm::StringRef args, Status *error_ptr);
 
-    Predicate<uint16_t> m_port_predicate; // Used when binding to port zero to wait for the thread
-                                          // that creates the socket, binds and listens to resolve
-                                          // the port number.
+  lldb::ConnectionStatus NamedSocketConnect(llvm::StringRef socket_name,
+                                            Status *error_ptr);
 
-    Pipe m_pipe;
-    Mutex m_mutex;
-    std::atomic<bool> m_shutting_down; // This marks that we are shutting down so if we get woken up from
-                                       // BytesAvailable to disconnect, we won't try to read again.
-    bool m_waiting_for_accept;
-    bool m_child_processes_inherit;
+  lldb::ConnectionStatus NamedSocketAccept(llvm::StringRef socket_name,
+                                           Status *error_ptr);
 
-  private:
-    DISALLOW_COPY_AND_ASSIGN(ConnectionFileDescriptor);
+  lldb::ConnectionStatus UnixAbstractSocketConnect(llvm::StringRef socket_name,
+                                                   Status *error_ptr);
+
+  lldb::IOObjectSP m_read_sp;
+  lldb::IOObjectSP m_write_sp;
+
+  Predicate<uint16_t>
+      m_port_predicate; // Used when binding to port zero to wait for the thread
+                        // that creates the socket, binds and listens to
+                        // resolve the port number.
+
+  Pipe m_pipe;
+  std::recursive_mutex m_mutex;
+  std::atomic<bool> m_shutting_down; // This marks that we are shutting down so
+                                     // if we get woken up from
+  // BytesAvailable to disconnect, we won't try to read again.
+  bool m_waiting_for_accept;
+  bool m_child_processes_inherit;
+
+  std::string m_uri;
+
+private:
+  void InitializeSocket(Socket *socket);
+
+  DISALLOW_COPY_AND_ASSIGN(ConnectionFileDescriptor);
 };
 
 } // namespace lldb_private

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2005 Peter Grehan.
  * Copyright 1996-1998 John D. Polstra.
  * All rights reserved.
@@ -32,11 +34,16 @@
 
 #include <err.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <string.h>
 
 #include "ef.h"
 
-#include <stdio.h>
+#ifdef __powerpc64__
+#define PRI_ELF_SIZE PRIu64
+#else
+#define PRI_ELF_SIZE PRIu32
+#endif
 
 /*
  * Apply relocations to the values obtained from the file. `relbase' is the
@@ -47,9 +54,9 @@ int
 ef_reloc(struct elf_file *ef, const void *reldata, int reltype, Elf_Off relbase,
     Elf_Off dataoff, size_t len, void *dest)
 {
-        Elf_Addr *where, addend;
-        Elf_Size rtype, symidx;
-        const Elf_Rela *rela;
+	Elf_Addr *where, addend;
+	Elf_Size rtype;
+	const Elf_Rela *rela;
 
 	if (reltype != EF_RELOC_RELA)
 		return (EINVAL);
@@ -58,17 +65,16 @@ ef_reloc(struct elf_file *ef, const void *reldata, int reltype, Elf_Off relbase,
 	where = (Elf_Addr *) ((Elf_Off)dest - dataoff + rela->r_offset);
 	addend = rela->r_addend;
 	rtype = ELF_R_TYPE(rela->r_info);
-	symidx = ELF_R_SYM(rela->r_info);
 
-	 if ((char *)where < (char *)dest || (char *)where >= (char *)dest + len)
-                return (0);
+	if ((char *)where < (char *)dest || (char *)where >= (char *)dest + len)
+		return (0);
 
-	switch(rtype) {
-	case R_PPC_RELATIVE: /* word32 B + A */
+	switch (rtype) {
+	case R_PPC_RELATIVE: /* word32|doubleword64 B + A */
 		*where = relbase + addend;
 		break;
 	default:
-		warnx("unhandled relocation type %d", rtype);
+		warnx("unhandled relocation type %" PRI_ELF_SIZE, rtype);
 	}
 	return (0);
 }

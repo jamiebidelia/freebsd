@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2005 Peter Grehan
  * Copyright (c) 2009 Nathan Whitehorn
  * All rights reserved.
@@ -39,19 +41,23 @@ __FBSDID("$FreeBSD$");
 #include <sys/lock.h>
 #include <sys/ktr.h>
 #include <sys/mutex.h>
+#include <sys/proc.h>
 #include <sys/systm.h>
 #include <sys/smp.h>
 #include <sys/sysctl.h>
 #include <sys/types.h>
 
 #include <vm/vm.h>
+#include <vm/vm_param.h>
 #include <vm/vm_page.h>
+#include <vm/vm_phys.h>
 
 #include <machine/cpu.h>
 #include <machine/md_var.h>
 #include <machine/platform.h>
 #include <machine/platformvar.h>
 #include <machine/smp.h>
+#include <machine/vmparam.h>
 
 #include "platform_if.h"
 
@@ -64,9 +70,12 @@ static char plat_name[64] = "";
 SYSCTL_STRING(_hw, OID_AUTO, platform, CTLFLAG_RD | CTLFLAG_TUN,
     plat_name, 0, "Platform currently in use");
 
+static struct mem_affinity mem_info[VM_PHYSSEG_MAX + 1];
+static int vm_locality_table[MAXMEMDOM * MAXMEMDOM];
 static struct mem_region pregions[PHYS_AVAIL_SZ];
+static struct numa_mem_region numa_pregions[PHYS_AVAIL_SZ];
 static struct mem_region aregions[PHYS_AVAIL_SZ];
-static int npregions, naregions;
+static int nnumapregions, npregions, naregions;
 
 /*
  * Memory region utilities: determine if two regions overlap,
@@ -86,8 +95,8 @@ static void
 memr_merge(struct mem_region *from, struct mem_region *to)
 {
 	vm_offset_t end;
-	end = ulmax(to->mr_start + to->mr_size, from->mr_start + from->mr_size);
-	to->mr_start = ulmin(from->mr_start, to->mr_start);
+	end = uqmax(to->mr_start + to->mr_size, from->mr_start + from->mr_size);
+	to->mr_start = uqmin(from->mr_start, to->mr_start);
 	to->mr_size = end - to->mr_start;
 }
 
@@ -107,6 +116,54 @@ mr_cmp(const void *a, const void *b)
 		return (1);
 	else
 		return (0);
+}
+
+void
+numa_mem_regions(struct numa_mem_region **phys, int *physsz)
+{
+	struct mem_affinity *mi;
+	int i, j, maxdom, ndomain, offset;
+
+	nnumapregions = 0;
+	PLATFORM_NUMA_MEM_REGIONS(plat_obj, numa_pregions, &nnumapregions);
+
+	if (physsz != NULL)
+		*physsz = nnumapregions;
+	if (phys != NULL)
+		*phys = numa_pregions;
+	if (physsz == NULL || phys == NULL) {
+		printf("unset value\n");
+		return;
+	}
+	maxdom = 0;
+	for (i = 0; i < nnumapregions; i++)
+		if (numa_pregions[i].mr_domain > maxdom)
+			maxdom = numa_pregions[i].mr_domain;
+
+	mi = mem_info;
+	for (i = 0; i < nnumapregions; i++, mi++) {
+		mi->start = numa_pregions[i].mr_start;
+		mi->end = numa_pregions[i].mr_start + numa_pregions[i].mr_size;
+		mi->domain = numa_pregions[i].mr_domain;
+	}
+	offset = 0;
+	vm_locality_table[offset] = 10;
+	ndomain = maxdom + 1;
+	if (ndomain > 1) {
+		for (i = 0; i < ndomain; i++) {
+			for (j = 0; j < ndomain; j++) {
+				/*
+				 * Not sure what these values should actually be
+				 */
+				if (i == j)
+					vm_locality_table[offset] = 10;
+				else
+					vm_locality_table[offset] = 21;
+				offset++;
+			}
+		}
+	}
+	vm_phys_register_domains(ndomain, mem_info, vm_locality_table);
 }
 
 void
@@ -153,10 +210,14 @@ mem_regions(struct mem_region **phys, int *physsz, struct mem_region **avail,
 		}
 	}
 
-	*phys = pregions;
-	*avail = aregions;
-	*physsz = npregions;
-	*availsz = naregions;
+	if (phys != NULL)
+		*phys = pregions;
+	if (avail != NULL)
+		*avail = aregions;
+	if (physsz != NULL)
+		*physsz = npregions;
+	if (availsz != NULL)
+		*availsz = naregions;
 }
 
 int
@@ -235,11 +296,17 @@ platform_smp_ap_init()
 	PLATFORM_SMP_AP_INIT(plat_obj);
 }
 
+void
+platform_smp_probe_threads(void)
+{
+	PLATFORM_SMP_PROBE_THREADS(plat_obj);
+}
+
 #ifdef SMP
 struct cpu_group *
 cpu_topo(void)
 {
-        return (PLATFORM_SMP_TOPO(plat_obj));
+	return (PLATFORM_SMP_TOPO(plat_obj));
 }
 #endif
 
@@ -250,6 +317,12 @@ void
 cpu_reset()
 {
         PLATFORM_RESET(plat_obj);
+}
+
+void platform_smp_timebase_sync(u_long tb, int ap)
+{
+
+	PLATFORM_SMP_TIMEBASE_SYNC(plat_obj, tb, ap);
 }
 
 /*

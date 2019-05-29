@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: ISC
+ *
  * Copyright (c) 2002-2009 Sam Leffler, Errno Consulting
  * Copyright (c) 2002-2006 Atheros Communications, Inc.
  *
@@ -147,6 +149,7 @@ extern	void ar5211Detach(struct ath_hal *);
 
 extern	HAL_BOOL ar5211Reset(struct ath_hal *, HAL_OPMODE,
 		struct ieee80211_channel *, HAL_BOOL bChannelChange,
+		HAL_RESET_TYPE,
 		HAL_STATUS *);
 extern	HAL_BOOL ar5211PhyDisable(struct ath_hal *);
 extern	HAL_BOOL ar5211Disable(struct ath_hal *);
@@ -215,7 +218,7 @@ extern	uint32_t ar5211GetRxDP(struct ath_hal *, HAL_RX_QUEUE);
 extern	void ar5211SetRxDP(struct ath_hal *, uint32_t rxdp, HAL_RX_QUEUE);
 extern	void ar5211EnableReceive(struct ath_hal *);
 extern	HAL_BOOL ar5211StopDmaReceive(struct ath_hal *);
-extern	void ar5211StartPcuReceive(struct ath_hal *);
+extern	void ar5211StartPcuReceive(struct ath_hal *, HAL_BOOL);
 extern	void ar5211StopPcuReceive(struct ath_hal *);
 extern	void ar5211SetMulticastFilter(struct ath_hal *,
 		uint32_t filter0, uint32_t filter1);
@@ -270,6 +273,8 @@ extern	HAL_BOOL ar5211SetSifsTime(struct ath_hal *, u_int);
 extern	u_int ar5211GetSifsTime(struct ath_hal *);
 extern  HAL_BOOL ar5211SetDecompMask(struct ath_hal *, uint16_t, int);
 extern	void ar5211SetCoverageClass(struct ath_hal *, uint8_t, int);
+extern	HAL_STATUS ar5211SetQuiet(struct ath_hal *, uint32_t, uint32_t,
+		uint32_t, HAL_QUIET_FLAG);
 extern	uint32_t ar5211GetCurRssi(struct ath_hal *);
 extern	u_int ar5211GetDefAntenna(struct ath_hal *);
 extern	void ar5211SetDefAntenna(struct ath_hal *ah, u_int antenna);

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2014 The FreeBSD Foundation
  * All rights reserved.
  *
@@ -32,12 +34,11 @@
 __FBSDID("$FreeBSD$");
 
 #include <assert.h>
+#include <stdlib.h>
 #include <string.h>
 #include <netinet/in.h>
 #include <resolv.h>
-#include <openssl/err.h>
-#include <openssl/md5.h>
-#include <openssl/rand.h>
+#include <md5.h>
 
 #include "iscsid.h"
 
@@ -47,17 +48,14 @@ chap_compute_md5(const char id, const char *secret,
     size_t response_len)
 {
 	MD5_CTX ctx;
-	int rv;
 
-	assert(response_len == MD5_DIGEST_LENGTH);
+	assert(response_len == CHAP_DIGEST_LEN);
 
-	MD5_Init(&ctx);
-	MD5_Update(&ctx, &id, sizeof(id));
-	MD5_Update(&ctx, secret, strlen(secret));
-	MD5_Update(&ctx, challenge, challenge_len);
-	rv = MD5_Final(response, &ctx);
-	if (rv != 1)
-		log_errx(1, "MD5_Final");
+	MD5Init(&ctx);
+	MD5Update(&ctx, &id, sizeof(id));
+	MD5Update(&ctx, secret, strlen(secret));
+	MD5Update(&ctx, challenge, challenge_len);
+	MD5Final(response, &ctx);
 }
 
 static int
@@ -235,25 +233,16 @@ struct chap *
 chap_new(void)
 {
 	struct chap *chap;
-	int rv;
 
-	chap = calloc(sizeof(*chap), 1);
+	chap = calloc(1, sizeof(*chap));
 	if (chap == NULL)
 		log_err(1, "calloc");
 
 	/*
 	 * Generate the challenge.
 	 */
-	rv = RAND_bytes(chap->chap_challenge, sizeof(chap->chap_challenge));
-	if (rv != 1) {
-		log_errx(1, "RAND_bytes failed: %s",
-		    ERR_error_string(ERR_get_error(), NULL));
-	}
-	rv = RAND_bytes(&chap->chap_id, sizeof(chap->chap_id));
-	if (rv != 1) {
-		log_errx(1, "RAND_bytes failed: %s",
-		    ERR_error_string(ERR_get_error(), NULL));
-	}
+	arc4random_buf(chap->chap_challenge, sizeof(chap->chap_challenge));
+	arc4random_buf(&chap->chap_id, sizeof(chap->chap_id));
 
 	return (chap);
 }
@@ -320,7 +309,7 @@ chap_receive(struct chap *chap, const char *response)
 int
 chap_authenticate(struct chap *chap, const char *secret)
 {
-	char expected_response[MD5_DIGEST_LENGTH];
+	char expected_response[CHAP_DIGEST_LEN];
 
 	chap_compute_md5(chap->chap_id, secret,
 	    chap->chap_challenge, sizeof(chap->chap_challenge),
@@ -346,7 +335,7 @@ rchap_new(const char *secret)
 {
 	struct rchap *rchap;
 
-	rchap = calloc(sizeof(*rchap), 1);
+	rchap = calloc(1, sizeof(*rchap));
 	if (rchap == NULL)
 		log_err(1, "calloc");
 
@@ -397,7 +386,7 @@ rchap_get_response_bin(struct rchap *rchap,
     void **responsep, size_t *response_lenp)
 {
 	void *response_bin;
-	size_t response_bin_len = MD5_DIGEST_LENGTH;
+	size_t response_bin_len = CHAP_DIGEST_LEN;
 
 	response_bin = calloc(response_bin_len, 1);
 	if (response_bin == NULL)

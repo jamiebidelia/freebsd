@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2010-2012 Semihalf
  * Copyright (c) 2008, 2009 Reinoud Zandijk
  * All rights reserved.
@@ -129,8 +131,8 @@ nandfs_reclaim(struct vop_reclaim_args *ap)
 static int
 nandfs_read(struct vop_read_args *ap)
 {
-	register struct vnode *vp = ap->a_vp;
-	register struct nandfs_node *node = VTON(vp);
+	struct vnode *vp = ap->a_vp;
+	struct nandfs_node *node = VTON(vp);
 	struct nandfs_device *nandfsdev = node->nn_nandfsdev;
 	struct uio *uio = ap->a_uio;
 	struct buf *bp;
@@ -719,11 +721,11 @@ nandfs_chmod(struct vnode *vp, int mode, struct ucred *cred, struct thread *td)
 	 * jail(8).
 	 */
 	if (vp->v_type != VDIR && (mode & S_ISTXT)) {
-		if (priv_check_cred(cred, PRIV_VFS_STICKYFILE, 0))
+		if (priv_check_cred(cred, PRIV_VFS_STICKYFILE))
 			return (EFTYPE);
 	}
 	if (!groupmember(inode->i_gid, cred) && (mode & ISGID)) {
-		error = priv_check_cred(cred, PRIV_VFS_SETGID, 0);
+		error = priv_check_cred(cred, PRIV_VFS_SETGID);
 		if (error)
 			return (error);
 	}
@@ -732,7 +734,7 @@ nandfs_chmod(struct vnode *vp, int mode, struct ucred *cred, struct thread *td)
 	 * Deny setting setuid if we are not the file owner.
 	 */
 	if ((mode & ISUID) && inode->i_uid != cred->cr_uid) {
-		error = priv_check_cred(cred, PRIV_VFS_ADMIN, 0);
+		error = priv_check_cred(cred, PRIV_VFS_ADMIN);
 		if (error)
 			return (error);
 	}
@@ -775,7 +777,7 @@ nandfs_chown(struct vnode *vp, uid_t uid, gid_t gid, struct ucred *cred,
 	 */
 	if (((uid != inode->i_uid && uid != cred->cr_uid) ||
 	    (gid != inode->i_gid && !groupmember(gid, cred))) &&
-	    (error = priv_check_cred(cred, PRIV_VFS_CHOWN, 0)))
+	    (error = priv_check_cred(cred, PRIV_VFS_CHOWN)))
 		return (error);
 	ogid = inode->i_gid;
 	ouid = inode->i_uid;
@@ -786,7 +788,7 @@ nandfs_chown(struct vnode *vp, uid_t uid, gid_t gid, struct ucred *cred,
 	node->nn_flags |= IN_CHANGE;
 	if ((inode->i_mode & (ISUID | ISGID)) &&
 	    (ouid != uid || ogid != gid)) {
-		if (priv_check_cred(cred, PRIV_VFS_RETAINSUGID, 0))
+		if (priv_check_cred(cred, PRIV_VFS_RETAINSUGID))
 			inode->i_mode &= ~(ISUID | ISGID);
 	}
 	DPRINTF(VNCALL, ("%s: vp %p, cred %p, td %p - ret OK\n", __func__, vp,
@@ -832,13 +834,12 @@ nandfs_setattr(struct vop_setattr_args *ap)
 		 * Privileged non-jail processes may not modify system flags
 		 * if securelevel > 0 and any existing system flags are set.
 		 * Privileged jail processes behave like privileged non-jail
-		 * processes if the security.jail.chflags_allowed sysctl is
-		 * is non-zero; otherwise, they behave like unprivileged
-		 * processes.
+		 * processes if the PR_ALLOW_CHFLAGS permission bit is set;
+		 * otherwise, they behave like unprivileged processes.
 		 */
 
 		flags = inode->i_flags;
-		if (!priv_check_cred(cred, PRIV_VFS_SYSFLAGS, 0)) {
+		if (!priv_check_cred(cred, PRIV_VFS_SYSFLAGS)) {
 			if (flags & (SF_NOUNLINK | SF_IMMUTABLE | SF_APPEND)) {
 				error = securelevel_gt(cred, 0);
 				if (error)
@@ -1225,13 +1226,16 @@ nandfs_readdir(struct vop_readdir_args *ap)
 			ndirent = (struct nandfs_dir_entry *)pos;
 
 			name_len = ndirent->name_len;
-			memset(&dirent, 0, sizeof(struct dirent));
+			memset(&dirent, 0, sizeof(dirent));
 			dirent.d_fileno = ndirent->inode;
 			if (dirent.d_fileno) {
 				dirent.d_type = ndirent->file_type;
 				dirent.d_namlen = name_len;
 				strncpy(dirent.d_name, ndirent->name, name_len);
 				dirent.d_reclen = GENERIC_DIRSIZ(&dirent);
+				/* NOTE: d_off is the offset of the *next* entry. */
+				dirent.d_off = diroffset + ndirent->rec_len;
+				dirent_terminate(&dirent);
 				DPRINTF(READDIR, ("copying `%*.*s`\n", name_len,
 				    name_len, dirent.d_name));
 			}
@@ -1245,18 +1249,18 @@ nandfs_readdir(struct vop_readdir_args *ap)
 
 			/* Transfer */
 			if (dirent.d_fileno)
-				uiomove(&dirent, GENERIC_DIRSIZ(&dirent), uio);
+				uiomove(&dirent, dirent.d_reclen, uio);
 
 			/* Advance */
 			diroffset += ndirent->rec_len;
 			blkoff += ndirent->rec_len;
 
-			/* Remember the last entry we transfered */
+			/* Remember the last entry we transferred */
 			transoffset = diroffset;
 		}
 		brelse(bp);
 
-		/* Pass on last transfered offset */
+		/* Pass on last transferred offset */
 		uio->uio_offset = transoffset;
 	}
 
@@ -1352,7 +1356,7 @@ nandfs_link(struct vop_link_args *ap)
 	struct nandfs_inode *inode = &node->nn_inode;
 	int error;
 
-	if (inode->i_links_count >= LINK_MAX)
+	if (inode->i_links_count >= NANDFS_LINK_MAX)
 		return (EMLINK);
 
 	if (inode->i_flags & (IMMUTABLE | APPEND))
@@ -1574,7 +1578,7 @@ abortit:
 	fdnode = VTON(fdvp);
 	fnode = VTON(fvp);
 
-	if (fnode->nn_inode.i_links_count >= LINK_MAX) {
+	if (fnode->nn_inode.i_links_count >= NANDFS_LINK_MAX) {
 		VOP_UNLOCK(fvp, 0);
 		error = EMLINK;
 		goto abortit;
@@ -1837,7 +1841,7 @@ nandfs_mkdir(struct vop_mkdir_args *ap)
 	if (nandfs_fs_full(dir_node->nn_nandfsdev))
 		return (ENOSPC);
 
-	if (dir_inode->i_links_count >= LINK_MAX)
+	if (dir_inode->i_links_count >= NANDFS_LINK_MAX)
 		return (EMLINK);
 
 	error = nandfs_node_create(nmp, &node, mode);
@@ -1938,8 +1942,8 @@ nandfs_symlink(struct vop_symlink_args *ap)
 
 
 	len = strlen(ap->a_target);
-	error = vn_rdwr(UIO_WRITE, *vpp, ap->a_target, len, (off_t)0,
-	    UIO_SYSSPACE, IO_NODELOCKED | IO_NOMACCHECK,
+	error = vn_rdwr(UIO_WRITE, *vpp, __DECONST(void *, ap->a_target),
+	    len, (off_t)0, UIO_SYSSPACE, IO_NODELOCKED | IO_NOMACCHECK,
 	    cnp->cn_cred, NOCRED, NULL, NULL);
 	if (error)
 		vput(*vpp);
@@ -2211,7 +2215,7 @@ nandfs_whiteout(struct vop_whiteout_args *ap)
 		/* Create a new directory whiteout */
 #ifdef INVARIANTS
 		if ((cnp->cn_flags & SAVENAME) == 0)
-			panic("ufs_whiteout: missing name");
+			panic("nandfs_whiteout: missing name");
 #endif
 		error = nandfs_add_dirent(dvp, NANDFS_WHT_INO, cnp->cn_nameptr,
 		    cnp->cn_namelen, DT_WHT);
@@ -2237,25 +2241,22 @@ nandfs_pathconf(struct vop_pathconf_args *ap)
 	error = 0;
 	switch (ap->a_name) {
 	case _PC_LINK_MAX:
-		*ap->a_retval = LINK_MAX;
+		*ap->a_retval = NANDFS_LINK_MAX;
 		break;
 	case _PC_NAME_MAX:
-		*ap->a_retval = NAME_MAX;
-		break;
-	case _PC_PATH_MAX:
-		*ap->a_retval = PATH_MAX;
+		*ap->a_retval = NANDFS_NAME_LEN;
 		break;
 	case _PC_PIPE_BUF:
-		*ap->a_retval = PIPE_BUF;
+		if (ap->a_vp->v_type == VDIR || ap->a_vp->v_type == VFIFO)
+			*ap->a_retval = PIPE_BUF;
+		else
+			error = EINVAL;
 		break;
 	case _PC_CHOWN_RESTRICTED:
 		*ap->a_retval = 1;
 		break;
 	case _PC_NO_TRUNC:
 		*ap->a_retval = 1;
-		break;
-	case _PC_ACL_EXTENDED:
-		*ap->a_retval = 0;
 		break;
 	case _PC_ALLOC_SIZE_MIN:
 		*ap->a_retval = ap->a_vp->v_mount->mnt_stat.f_bsize;
@@ -2273,7 +2274,7 @@ nandfs_pathconf(struct vop_pathconf_args *ap)
 		*ap->a_retval = ap->a_vp->v_mount->mnt_stat.f_iosize;
 		break;
 	default:
-		error = EINVAL;
+		error = vop_stdpathconf(ap);
 		break;
 	}
 	return (error);
@@ -2418,6 +2419,7 @@ struct vop_vector nandfs_fifoops = {
 	.vop_close =		nandfsfifo_close,
 	.vop_getattr =		nandfs_getattr,
 	.vop_inactive =		nandfs_inactive,
+	.vop_pathconf =		nandfs_pathconf,
 	.vop_print =		nandfs_print,
 	.vop_read =		VOP_PANIC,
 	.vop_reclaim =		nandfs_reclaim,

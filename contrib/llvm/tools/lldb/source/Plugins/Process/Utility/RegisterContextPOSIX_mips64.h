@@ -7,132 +7,79 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef liblldb_RegisterContextPOSIX_mips64_H_
-#define liblldb_RegisterContextPOSIX_mips64_H_
+#ifndef liblldb_RegisterContextPOSIX_mips64_h_
+#define liblldb_RegisterContextPOSIX_mips64_h_
 
-#include "lldb/Core/Log.h"
-#include "RegisterContextPOSIX.h"
-#include "RegisterContext_mips64.h"
+#include "RegisterContext_mips.h"
+#include "RegisterInfoInterface.h"
+#include "lldb/Target/RegisterContext.h"
+#include "lldb/Utility/Log.h"
+
+using namespace lldb_private;
 
 class ProcessMonitor;
 
-// ---------------------------------------------------------------------------
-// Internal codes for all mips64 registers.
-// ---------------------------------------------------------------------------
-enum
-{
-    k_first_gpr_mips64,
-    gpr_zero_mips64 = k_first_gpr_mips64,
-    gpr_r1_mips64,
-    gpr_r2_mips64,
-    gpr_r3_mips64,
-    gpr_r4_mips64,
-    gpr_r5_mips64,
-    gpr_r6_mips64,
-    gpr_r7_mips64,
-    gpr_r8_mips64,
-    gpr_r9_mips64,
-    gpr_r10_mips64,
-    gpr_r11_mips64,
-    gpr_r12_mips64,
-    gpr_r13_mips64,
-    gpr_r14_mips64,
-    gpr_r15_mips64,
-    gpr_r16_mips64,
-    gpr_r17_mips64,
-    gpr_r18_mips64,
-    gpr_r19_mips64,
-    gpr_r20_mips64,
-    gpr_r21_mips64,
-    gpr_r22_mips64,
-    gpr_r23_mips64,
-    gpr_r24_mips64,
-    gpr_r25_mips64,
-    gpr_r26_mips64,
-    gpr_r27_mips64,
-    gpr_gp_mips64,
-    gpr_sp_mips64,
-    gpr_r30_mips64,
-    gpr_ra_mips64,
-    gpr_sr_mips64,
-    gpr_mullo_mips64,
-    gpr_mulhi_mips64,
-    gpr_badvaddr_mips64,
-    gpr_cause_mips64,
-    gpr_pc_mips64,
-    gpr_ic_mips64,
-    gpr_dummy_mips64,
-
-    k_num_registers_mips64,
-    k_num_gpr_registers_mips64 = k_num_registers_mips64
-};
-
-class RegisterContextPOSIX_mips64
-  : public lldb_private::RegisterContext
-{
+class RegisterContextPOSIX_mips64 : public lldb_private::RegisterContext {
 public:
-    RegisterContextPOSIX_mips64 (lldb_private::Thread &thread,
-                            uint32_t concrete_frame_idx,
-                            lldb_private::RegisterInfoInterface *register_info);
 
-    ~RegisterContextPOSIX_mips64();
+  enum Register_count{
+      gpr_registers_count = 0,
+      fpr_registers_count,
+      msa_registers_count,
+      register_set_count
+  };
 
-    void
-    Invalidate();
+  RegisterContextPOSIX_mips64(
+      lldb_private::Thread &thread, uint32_t concrete_frame_idx,
+      lldb_private::RegisterInfoInterface *register_info);
 
-    void
-    InvalidateAllRegisters();
+  ~RegisterContextPOSIX_mips64() override;
 
-    size_t
-    GetRegisterCount();
+  void Invalidate();
 
-    virtual size_t
-    GetGPRSize();
+  void InvalidateAllRegisters() override;
 
-    virtual unsigned
-    GetRegisterSize(unsigned reg);
+  size_t GetRegisterCount() override;
 
-    virtual unsigned
-    GetRegisterOffset(unsigned reg);
+  virtual size_t GetGPRSize();
 
-    const lldb_private::RegisterInfo *
-    GetRegisterInfoAtIndex(size_t reg);
+  virtual unsigned GetRegisterSize(unsigned reg);
 
-    size_t
-    GetRegisterSetCount();
+  virtual unsigned GetRegisterOffset(unsigned reg);
 
-    const lldb_private::RegisterSet *
-    GetRegisterSet(size_t set);
+  const lldb_private::RegisterInfo *GetRegisterInfoAtIndex(size_t reg) override;
 
-    const char *
-    GetRegisterName(unsigned reg);
+  size_t GetRegisterSetCount() override;
 
-    uint32_t
-    ConvertRegisterKindToRegisterNumber(lldb::RegisterKind kind, uint32_t num);
+  const lldb_private::RegisterSet *GetRegisterSet(size_t set) override;
+
+  const char *GetRegisterName(unsigned reg);
+
+  uint32_t ConvertRegisterKindToRegisterNumber(lldb::RegisterKind kind,
+                                               uint32_t num) override;
 
 protected:
-    uint64_t m_gpr_mips64[k_num_gpr_registers_mips64];         // general purpose registers.
-    std::unique_ptr<lldb_private::RegisterInfoInterface> m_register_info_ap; // Register Info Interface (FreeBSD or Linux)
+  uint32_t m_num_registers;
+  uint8_t m_registers_count[register_set_count];
+  std::unique_ptr<lldb_private::RegisterInfoInterface>
+      m_register_info_ap; // Register Info Interface (FreeBSD or Linux)
 
-    // Determines if an extended register set is supported on the processor running the inferior process.
-    virtual bool
-    IsRegisterSetAvailable(size_t set_index);
+  // Determines if an extended register set is supported on the processor
+  // running the inferior process.
+  virtual bool IsRegisterSetAvailable(size_t set_index);
 
-    virtual const lldb_private::RegisterInfo *
-    GetRegisterInfo();
+  virtual const lldb_private::RegisterInfo *GetRegisterInfo();
 
-    bool
-    IsGPR(unsigned reg);
+  bool IsGPR(unsigned reg);
 
-    bool
-    IsFPR(unsigned reg);
+  bool IsFPR(unsigned reg);
 
-    lldb::ByteOrder GetByteOrder();
+  lldb::ByteOrder GetByteOrder();
 
-    virtual bool ReadGPR() = 0;
-    virtual bool ReadFPR() = 0;
-    virtual bool WriteGPR() = 0;
-    virtual bool WriteFPR() = 0;
+  virtual bool ReadGPR() = 0;
+  virtual bool ReadFPR() = 0;
+  virtual bool WriteGPR() = 0;
+  virtual bool WriteFPR() = 0;
 };
 
-#endif // #ifndef liblldb_RegisterContextPOSIX_mips64_H_
+#endif // liblldb_RegisterContextPOSIX_mips64_h_

@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1989, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -13,7 +15,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 4. Neither the name of the University nor the names of its contributors
+ * 3. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -75,16 +77,15 @@ __FBSDID("$FreeBSD$");
 #include <netinet/ip_icmp.h>
 #include <netinet/ip_var.h>
 #include <arpa/inet.h>
-#ifdef HAVE_LIBCAPSICUM
-#include <libcapsicum.h>
-#include <libcapsicum_dns.h>
-#include <libcapsicum_service.h>
-#endif
+
+#include <libcasper.h>
+#include <casper/cap_dns.h>
 
 #ifdef IPSEC
 #include <netipsec/ipsec.h>
 #endif /*IPSEC*/
 
+#include <capsicum_helpers.h>
 #include <ctype.h>
 #include <err.h>
 #include <errno.h>
@@ -204,15 +205,11 @@ static double tsumsq = 0.0;	/* sum of all times squared, for std. dev. */
 static volatile sig_atomic_t finish_up;
 static volatile sig_atomic_t siginfo_p;
 
-#ifdef HAVE_LIBCAPSICUM
 static cap_channel_t *capdns;
-#endif
 
 static void fill(char *, char *);
 static u_short in_cksum(u_short *, int);
-#ifdef HAVE_LIBCAPSICUM
 static cap_channel_t *capdns_setup(void);
-#endif
 static void check_status(void);
 static void finish(void) __dead2;
 static void pinger(void);
@@ -246,7 +243,8 @@ main(int argc, char *const *argv)
 #endif
 	struct sockaddr_in *to;
 	double t;
-	u_long alarmtimeout, ultmp;
+	u_long alarmtimeout;
+	long ltmp;
 	int almost_done, ch, df, hold, i, icmp_len, mib[4], preload;
 	int ssend_errno, srecv_errno, tos, ttl;
 	char ctrl[CMSG_SPACE(sizeof(struct timeval))];
@@ -261,7 +259,6 @@ main(int argc, char *const *argv)
 	policy_in = policy_out = NULL;
 #endif
 	cap_rights_t rights;
-	bool cansandbox;
 
 	/*
 	 * Do the stuff that we need root priv's for *first*, and
@@ -285,6 +282,16 @@ main(int argc, char *const *argv)
 		err(EX_NOPERM, "setuid() failed");
 	uid = getuid();
 
+	if (ssend < 0) {
+		errno = ssend_errno;
+		err(EX_OSERR, "ssend socket");
+	}
+
+	if (srecv < 0) {
+		errno = srecv_errno;
+		err(EX_OSERR, "srecv socket");
+	}
+
 	alarmtimeout = df = preload = tos = 0;
 
 	outpack = outpackhdr + sizeof(struct ip);
@@ -305,12 +312,12 @@ main(int argc, char *const *argv)
 			options |= F_AUDIBLE;
 			break;
 		case 'c':
-			ultmp = strtoul(optarg, &ep, 0);
-			if (*ep || ep == optarg || ultmp > LONG_MAX || !ultmp)
+			ltmp = strtol(optarg, &ep, 0);
+			if (*ep || ep == optarg || ltmp <= 0)
 				errx(EX_USAGE,
 				    "invalid count of packets to transmit: `%s'",
 				    optarg);
-			npackets = ultmp;
+			npackets = ltmp;
 			break;
 		case 'D':
 			options |= F_HDRINCL;
@@ -328,46 +335,46 @@ main(int argc, char *const *argv)
 			setbuf(stdout, (char *)NULL);
 			break;
 		case 'G': /* Maximum packet size for ping sweep */
-			ultmp = strtoul(optarg, &ep, 0);
-			if (*ep || ep == optarg)
+			ltmp = strtol(optarg, &ep, 0);
+			if (*ep || ep == optarg || ltmp <= 0)
 				errx(EX_USAGE, "invalid packet size: `%s'",
 				    optarg);
-			if (uid != 0 && ultmp > DEFDATALEN) {
+			if (uid != 0 && ltmp > DEFDATALEN) {
 				errno = EPERM;
 				err(EX_NOPERM,
-				    "packet size too large: %lu > %u",
-				    ultmp, DEFDATALEN);
+				    "packet size too large: %ld > %u",
+				    ltmp, DEFDATALEN);
 			}
 			options |= F_SWEEP;
-			sweepmax = ultmp;
+			sweepmax = ltmp;
 			break;
 		case 'g': /* Minimum packet size for ping sweep */
-			ultmp = strtoul(optarg, &ep, 0);
-			if (*ep || ep == optarg)
+			ltmp = strtol(optarg, &ep, 0);
+			if (*ep || ep == optarg || ltmp <= 0)
 				errx(EX_USAGE, "invalid packet size: `%s'",
 				    optarg);
-			if (uid != 0 && ultmp > DEFDATALEN) {
+			if (uid != 0 && ltmp > DEFDATALEN) {
 				errno = EPERM;
 				err(EX_NOPERM,
-				    "packet size too large: %lu > %u",
-				    ultmp, DEFDATALEN);
+				    "packet size too large: %ld > %u",
+				    ltmp, DEFDATALEN);
 			}
 			options |= F_SWEEP;
-			sweepmin = ultmp;
+			sweepmin = ltmp;
 			break;
 		case 'h': /* Packet size increment for ping sweep */
-			ultmp = strtoul(optarg, &ep, 0);
-			if (*ep || ep == optarg || ultmp < 1)
+			ltmp = strtol(optarg, &ep, 0);
+			if (*ep || ep == optarg || ltmp < 1)
 				errx(EX_USAGE, "invalid increment size: `%s'",
 				    optarg);
-			if (uid != 0 && ultmp > DEFDATALEN) {
+			if (uid != 0 && ltmp > DEFDATALEN) {
 				errno = EPERM;
 				err(EX_NOPERM,
-				    "packet size too large: %lu > %u",
-				    ultmp, DEFDATALEN);
+				    "packet size too large: %ld > %u",
+				    ltmp, DEFDATALEN);
 			}
 			options |= F_SWEEP;
-			sweepincr = ultmp;
+			sweepincr = ltmp;
 			break;
 		case 'I':		/* multicast interface */
 			if (inet_aton(optarg, &ifaddr) == 0)
@@ -393,15 +400,15 @@ main(int argc, char *const *argv)
 			loop = 0;
 			break;
 		case 'l':
-			ultmp = strtoul(optarg, &ep, 0);
-			if (*ep || ep == optarg || ultmp > INT_MAX)
+			ltmp = strtol(optarg, &ep, 0);
+			if (*ep || ep == optarg || ltmp > INT_MAX || ltmp < 0)
 				errx(EX_USAGE,
 				    "invalid preload value: `%s'", optarg);
 			if (uid) {
 				errno = EPERM;
 				err(EX_NOPERM, "-l flag");
 			}
-			preload = ultmp;
+			preload = ltmp;
 			break;
 		case 'M':
 			switch(optarg[0]) {
@@ -419,10 +426,10 @@ main(int argc, char *const *argv)
 			}
 			break;
 		case 'm':		/* TTL */
-			ultmp = strtoul(optarg, &ep, 0);
-			if (*ep || ep == optarg || ultmp > MAXTTL)
+			ltmp = strtol(optarg, &ep, 0);
+			if (*ep || ep == optarg || ltmp > MAXTTL || ltmp < 0)
 				errx(EX_USAGE, "invalid TTL: `%s'", optarg);
-			ttl = ultmp;
+			ttl = ltmp;
 			options |= F_TTL;
 			break;
 		case 'n':
@@ -464,24 +471,24 @@ main(int argc, char *const *argv)
 			source = optarg;
 			break;
 		case 's':		/* size of packet to send */
-			ultmp = strtoul(optarg, &ep, 0);
-			if (*ep || ep == optarg)
+			ltmp = strtol(optarg, &ep, 0);
+			if (*ep || ep == optarg || ltmp < 0)
 				errx(EX_USAGE, "invalid packet size: `%s'",
 				    optarg);
-			if (uid != 0 && ultmp > DEFDATALEN) {
+			if (uid != 0 && ltmp > DEFDATALEN) {
 				errno = EPERM;
 				err(EX_NOPERM,
-				    "packet size too large: %lu > %u",
-				    ultmp, DEFDATALEN);
+				    "packet size too large: %ld > %u",
+				    ltmp, DEFDATALEN);
 			}
-			datalen = ultmp;
+			datalen = ltmp;
 			break;
 		case 'T':		/* multicast TTL */
-			ultmp = strtoul(optarg, &ep, 0);
-			if (*ep || ep == optarg || ultmp > MAXTTL)
+			ltmp = strtol(optarg, &ep, 0);
+			if (*ep || ep == optarg || ltmp > MAXTTL || ltmp < 0)
 				errx(EX_USAGE, "invalid multicast TTL: `%s'",
 				    optarg);
-			mttl = ultmp;
+			mttl = ltmp;
 			options |= F_MTTL;
 			break;
 		case 't':
@@ -507,10 +514,10 @@ main(int argc, char *const *argv)
 			break;
 		case 'z':
 			options |= F_HDRINCL;
-			ultmp = strtoul(optarg, &ep, 0);
-			if (*ep || ep == optarg || ultmp > MAXTOS)
+			ltmp = strtol(optarg, &ep, 0);
+			if (*ep || ep == optarg || ltmp > MAXTOS || ltmp < 0)
 				errx(EX_USAGE, "invalid TOS: `%s'", optarg);
-			tos = ultmp;
+			tos = ltmp;
 			break;
 		default:
 			usage();
@@ -553,22 +560,14 @@ main(int argc, char *const *argv)
 	if (options & F_PINGFILLED) {
 		fill((char *)datap, payload);
 	}
-#ifdef HAVE_LIBCAPSICUM
 	capdns = capdns_setup();
-#endif
 	if (source) {
 		bzero((char *)&sock_in, sizeof(sock_in));
 		sock_in.sin_family = AF_INET;
 		if (inet_aton(source, &sock_in.sin_addr) != 0) {
 			shostname = source;
 		} else {
-#ifdef HAVE_LIBCAPSICUM
-			if (capdns != NULL)
-				hp = cap_gethostbyname2(capdns, source,
-				    AF_INET);
-			else
-#endif
-				hp = gethostbyname2(source, AF_INET);
+			hp = cap_gethostbyname2(capdns, source, AF_INET);
 			if (!hp)
 				errx(EX_NOHOST, "cannot resolve %s: %s",
 				    source, hstrerror(h_errno));
@@ -596,12 +595,7 @@ main(int argc, char *const *argv)
 	if (inet_aton(target, &to->sin_addr) != 0) {
 		hostname = target;
 	} else {
-#ifdef HAVE_LIBCAPSICUM
-		if (capdns != NULL)
-			hp = cap_gethostbyname2(capdns, target, AF_INET);
-		else
-#endif
-			hp = gethostbyname2(target, AF_INET);
+		hp = cap_gethostbyname2(capdns, target, AF_INET);
 		if (!hp)
 			errx(EX_NOHOST, "cannot resolve %s: %s",
 			    target, hstrerror(h_errno));
@@ -614,25 +608,13 @@ main(int argc, char *const *argv)
 		hostname = hnamebuf;
 	}
 
-#ifdef HAVE_LIBCAPSICUM
 	/* From now on we will use only reverse DNS lookups. */
 	if (capdns != NULL) {
 		const char *types[1];
 
-		types[0] = "ADDR";
+		types[0] = "ADDR2NAME";
 		if (cap_dns_type_limit(capdns, types, 1) < 0)
 			err(1, "unable to limit access to system.dns service");
-	}
-#endif
-
-	if (ssend < 0) {
-		errno = ssend_errno;
-		err(EX_OSERR, "ssend socket");
-	}
-
-	if (srecv < 0) {
-		errno = srecv_errno;
-		err(EX_OSERR, "srecv socket");
 	}
 
 	if (connect(ssend, (struct sockaddr *)&whereto, sizeof(whereto)) != 0)
@@ -720,29 +702,20 @@ main(int argc, char *const *argv)
 		ip->ip_dst = to->sin_addr;
         }
 
-	if (options & F_NUMERIC)
-		cansandbox = true;
-#ifdef HAVE_LIBCAPSICUM
-	else if (capdns != NULL)
-		cansandbox = true;
-#endif
-	else
-		cansandbox = false;
-
 	/*
 	 * Here we enter capability mode. Further down access to global
 	 * namespaces (e.g filesystem) is restricted (see capsicum(4)).
 	 * We must connect(2) our socket before this point.
 	 */
-	if (cansandbox && cap_enter() < 0 && errno != ENOSYS)
+	caph_cache_catpages();
+	if (caph_enter_casper() < 0)
 		err(1, "cap_enter");
 
 	cap_rights_init(&rights, CAP_RECV, CAP_EVENT, CAP_SETSOCKOPT);
-	if (cap_rights_limit(srecv, &rights) < 0 && errno != ENOSYS)
+	if (caph_rights_limit(srecv, &rights) < 0)
 		err(1, "cap_rights_limit srecv");
-
 	cap_rights_init(&rights, CAP_SEND, CAP_SETSOCKOPT);
-	if (cap_rights_limit(ssend, &rights) < 0 && errno != ENOSYS)
+	if (caph_rights_limit(ssend, &rights) < 0)
 		err(1, "cap_rights_limit ssend");
 
 	/* record route option */
@@ -793,8 +766,8 @@ main(int argc, char *const *argv)
 	}
 #endif
 	if (sweepmax) {
-		if (sweepmin >= sweepmax)
-			errx(EX_USAGE, "Maximum packet size must be greater than the minimum packet size");
+		if (sweepmin > sweepmax)
+			errx(EX_USAGE, "Maximum packet size must be no less than the minimum packet size");
 
 		if (datalen != DEFDATALEN)
 			errx(EX_USAGE, "Packet size and ping sweep are mutually exclusive");
@@ -807,7 +780,7 @@ main(int argc, char *const *argv)
 		datalen = sweepmin;
 		send_len = icmp_len + sweepmin;
 	}
-	if (options & F_SWEEP && !sweepmax) 
+	if (options & F_SWEEP && !sweepmax)
 		errx(EX_USAGE, "Maximum sweep size must be specified");
 
 	/*
@@ -827,14 +800,14 @@ main(int argc, char *const *argv)
 	    sizeof(hold));
 	/* CAP_SETSOCKOPT removed */
 	cap_rights_init(&rights, CAP_RECV, CAP_EVENT);
-	if (cap_rights_limit(srecv, &rights) < 0 && errno != ENOSYS)
+	if (caph_rights_limit(srecv, &rights) < 0)
 		err(1, "cap_rights_limit srecv setsockopt");
 	if (uid == 0)
 		(void)setsockopt(ssend, SOL_SOCKET, SO_SNDBUF, (char *)&hold,
 		    sizeof(hold));
 	/* CAP_SETSOCKOPT removed */
 	cap_rights_init(&rights, CAP_SEND);
-	if (cap_rights_limit(ssend, &rights) < 0 && errno != ENOSYS)
+	if (caph_rights_limit(ssend, &rights) < 0)
 		err(1, "cap_rights_limit ssend setsockopt");
 
 	if (to->sin_family == AF_INET) {
@@ -845,9 +818,9 @@ main(int argc, char *const *argv)
 		if (sweepmax)
 			(void)printf(": (%d ... %d) data bytes\n",
 			    sweepmin, sweepmax);
-		else 
+		else
 			(void)printf(": %d data bytes\n", datalen);
-		
+
 	} else {
 		if (sweepmax)
 			(void)printf("PING %s: (%d ... %d) data bytes\n",
@@ -969,14 +942,14 @@ main(int argc, char *const *argv)
 		}
 		if (n == 0 || options & F_FLOOD) {
 			if (sweepmax && sntransmitted == snpackets) {
-				for (i = 0; i < sweepincr ; ++i) 
+				for (i = 0; i < sweepincr ; ++i)
 					*datap++ = i;
 				datalen += sweepincr;
 				if (datalen > sweepmax)
 					break;
 				send_len = icmp_len + datalen;
 				sntransmitted = 0;
-			} 
+			}
 			if (!npackets || ntransmitted < npackets)
 				pinger();
 			else {
@@ -1179,7 +1152,7 @@ pr_pack(char *buf, int cc, struct sockaddr_in *from, struct timeval *tv)
 
 		if (options & F_QUIET)
 			return;
-	
+
 		if (options & F_WAITTIME && triptime > waittime) {
 			++nrcvtimeout;
 			return;
@@ -1201,7 +1174,7 @@ pr_pack(char *buf, int cc, struct sockaddr_in *from, struct timeval *tv)
 			if (options & F_MASK) {
 				/* Just prentend this cast isn't ugly */
 				(void)printf(" mask=%s",
-					pr_addr(*(struct in_addr *)&(icp->icmp_mask)));
+					inet_ntoa(*(struct in_addr *)&(icp->icmp_mask)));
 			}
 			if (options & F_TIME) {
 				(void)printf(" tso=%s", pr_ntime(icp->icmp_otime));
@@ -1666,6 +1639,7 @@ pr_icmph(struct icmp *icp)
 static void
 pr_iph(struct ip *ip)
 {
+	struct in_addr ina;
 	u_char *cp;
 	int hlen;
 
@@ -1681,8 +1655,10 @@ pr_iph(struct ip *ip)
 	    (u_long) ntohl(ip->ip_off) & 0x1fff);
 	(void)printf("  %02x  %02x %04x", ip->ip_ttl, ip->ip_p,
 							    ntohs(ip->ip_sum));
-	(void)printf(" %s ", inet_ntoa(*(struct in_addr *)&ip->ip_src.s_addr));
-	(void)printf(" %s ", inet_ntoa(*(struct in_addr *)&ip->ip_dst.s_addr));
+	memcpy(&ina, &ip->ip_src.s_addr, sizeof ina);
+	(void)printf(" %s ", inet_ntoa(ina));
+	memcpy(&ina, &ip->ip_dst.s_addr, sizeof ina);
+	(void)printf(" %s ", inet_ntoa(ina));
 	/* dump any option bytes */
 	while (hlen-- > 20) {
 		(void)printf("%02x", *cp++);
@@ -1704,12 +1680,7 @@ pr_addr(struct in_addr ina)
 	if (options & F_NUMERIC)
 		return inet_ntoa(ina);
 
-#ifdef HAVE_LIBCAPSICUM
-	if (capdns != NULL)
-		hp = cap_gethostbyaddr(capdns, (char *)&ina, 4, AF_INET);
-	else
-#endif
-		hp = gethostbyaddr((char *)&ina, 4, AF_INET);
+	hp = cap_gethostbyaddr(capdns, (char *)&ina, 4, AF_INET);
 
 	if (hp == NULL)
 		return inet_ntoa(ina);
@@ -1788,7 +1759,6 @@ fill(char *bp, char *patp)
 	}
 }
 
-#ifdef HAVE_LIBCAPSICUM
 static cap_channel_t *
 capdns_setup(void)
 {
@@ -1797,17 +1767,15 @@ capdns_setup(void)
 	int families[1];
 
 	capcas = cap_init();
-	if (capcas == NULL) {
-		warn("unable to contact casperd");
-		return (NULL);
-	}
+	if (capcas == NULL)
+		err(1, "unable to create casper process");
 	capdnsloc = cap_service_open(capcas, "system.dns");
 	/* Casper capability no longer needed. */
 	cap_close(capcas);
 	if (capdnsloc == NULL)
 		err(1, "unable to open system.dns service");
-	types[0] = "NAME";
-	types[1] = "ADDR";
+	types[0] = "NAME2ADDR";
+	types[1] = "ADDR2NAME";
 	if (cap_dns_type_limit(capdnsloc, types, 2) < 0)
 		err(1, "unable to limit access to system.dns service");
 	families[0] = AF_INET;
@@ -1816,7 +1784,6 @@ capdns_setup(void)
 
 	return (capdnsloc);
 }
-#endif /* HAVE_LIBCAPSICUM */
 
 #if defined(IPSEC) && defined(IPSEC_POLICY_IPSEC)
 #define	SECOPT		" [-P policy]"

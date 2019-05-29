@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2000 Marcel Moolenaar
  * All rights reserved.
  *
@@ -6,68 +8,67 @@
  * modification, are permitted provided that the following conditions
  * are met:
  * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer
- *    in this position and unchanged.
+ *    notice, this list of conditions and the following disclaimer.
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 3. The name of the author may not be used to endorse or promote products
- *    derived from this software without specific prior written permission.
  *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
- * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
  */
 
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
-#include <sys/systm.h>
 #include <sys/capsicum.h>
-#include <sys/file.h>
 #include <sys/fcntl.h>
+#include <sys/file.h>
 #include <sys/imgact.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/mman.h>
 #include <sys/mutex.h>
-#include <sys/sx.h>
 #include <sys/priv.h>
 #include <sys/proc.h>
 #include <sys/queue.h>
 #include <sys/resource.h>
 #include <sys/resourcevar.h>
+#include <sys/sched.h>
 #include <sys/signalvar.h>
 #include <sys/syscallsubr.h>
 #include <sys/sysproto.h>
+#include <sys/systm.h>
+#include <sys/sx.h>
 #include <sys/unistd.h>
 #include <sys/wait.h>
-#include <sys/sched.h>
 
 #include <machine/frame.h>
 #include <machine/psl.h>
 #include <machine/segments.h>
 #include <machine/sysarch.h>
 
-#include <vm/vm.h>
 #include <vm/pmap.h>
+#include <vm/vm.h>
 #include <vm/vm_map.h>
 
 #include <i386/linux/linux.h>
 #include <i386/linux/linux_proto.h>
+#include <compat/linux/linux_emul.h>
 #include <compat/linux/linux_ipc.h>
 #include <compat/linux/linux_misc.h>
+#include <compat/linux/linux_mmap.h>
 #include <compat/linux/linux_signal.h>
 #include <compat/linux/linux_util.h>
-#include <compat/linux/linux_emul.h>
 
 #include <i386/include/pcb.h>			/* needed for pcb definition in linux_set_thread_area */
 
@@ -95,10 +96,6 @@ struct l_old_select_argv {
 	struct l_timeval	*timeout;
 };
 
-static int	linux_mmap_common(struct thread *td, l_uintptr_t addr,
-		    l_size_t len, l_int prot, l_int flags, l_int fd,
-		    l_loff_t pos);
-
 
 int
 linux_execve(struct thread *td, struct linux_execve_args *args)
@@ -108,11 +105,6 @@ linux_execve(struct thread *td, struct linux_execve_args *args)
 	int error;
 
 	LCONVPATHEXIST(td, args->path, &newpath);
-
-#ifdef DEBUG
-	if (ldebug(execve))
-		printf(ARGS(execve, "%s"), newpath);
-#endif
 
 	error = exec_copyin_args(&eargs, newpath, UIO_SYSSPACE,
 	    args->argp, args->envp);
@@ -136,7 +128,7 @@ linux_ipc(struct thread *td, struct linux_ipc_args *args)
 		struct linux_semop_args a;
 
 		a.semid = args->arg1;
-		a.tsops = args->ptr;
+		a.tsops = PTRIN(args->ptr);
 		a.nsops = args->arg2;
 		return (linux_semop(td, &a));
 	}
@@ -155,7 +147,7 @@ linux_ipc(struct thread *td, struct linux_ipc_args *args)
 		a.semid = args->arg1;
 		a.semnum = args->arg2;
 		a.cmd = args->arg3;
-		error = copyin(args->ptr, &a.arg, sizeof(a.arg));
+		error = copyin(PTRIN(args->ptr), &a.arg, sizeof(a.arg));
 		if (error)
 			return (error);
 		return (linux_semctl(td, &a));
@@ -164,7 +156,7 @@ linux_ipc(struct thread *td, struct linux_ipc_args *args)
 		struct linux_msgsnd_args a;
 
 		a.msqid = args->arg1;
-		a.msgp = args->ptr;
+		a.msgp = PTRIN(args->ptr);
 		a.msgsz = args->arg2;
 		a.msgflg = args->arg3;
 		return (linux_msgsnd(td, &a));
@@ -179,15 +171,15 @@ linux_ipc(struct thread *td, struct linux_ipc_args *args)
 			struct l_ipc_kludge tmp;
 			int error;
 
-			if (args->ptr == NULL)
+			if (args->ptr == 0)
 				return (EINVAL);
-			error = copyin(args->ptr, &tmp, sizeof(tmp));
+			error = copyin(PTRIN(args->ptr), &tmp, sizeof(tmp));
 			if (error)
 				return (error);
-			a.msgp = tmp.msgp;
+			a.msgp = PTRIN(tmp.msgp);
 			a.msgtyp = tmp.msgtyp;
 		} else {
-			a.msgp = args->ptr;
+			a.msgp = PTRIN(args->ptr);
 			a.msgtyp = args->arg5;
 		}
 		return (linux_msgrcv(td, &a));
@@ -204,22 +196,29 @@ linux_ipc(struct thread *td, struct linux_ipc_args *args)
 
 		a.msqid = args->arg1;
 		a.cmd = args->arg2;
-		a.buf = args->ptr;
+		a.buf = PTRIN(args->ptr);
 		return (linux_msgctl(td, &a));
 	}
 	case LINUX_SHMAT: {
 		struct linux_shmat_args a;
+		l_uintptr_t addr;
+		int error;
 
 		a.shmid = args->arg1;
-		a.shmaddr = args->ptr;
+		a.shmaddr = PTRIN(args->ptr);
 		a.shmflg = args->arg2;
-		a.raddr = (l_ulong *)args->arg3;
-		return (linux_shmat(td, &a));
+		error = linux_shmat(td, &a);
+		if (error != 0)
+			return (error);
+		addr = td->td_retval[0];
+		error = copyout(&addr, PTRIN(args->arg3), sizeof(addr));
+		td->td_retval[0] = 0;
+		return (error);
 	}
 	case LINUX_SHMDT: {
 		struct linux_shmdt_args a;
 
-		a.shmaddr = args->ptr;
+		a.shmaddr = PTRIN(args->ptr);
 		return (linux_shmdt(td, &a));
 	}
 	case LINUX_SHMGET: {
@@ -235,7 +234,7 @@ linux_ipc(struct thread *td, struct linux_ipc_args *args)
 
 		a.shmid = args->arg1;
 		a.cmd = args->arg2;
-		a.buf = args->ptr;
+		a.buf = PTRIN(args->ptr);
 		return (linux_shmctl(td, &a));
 	}
 	default:
@@ -251,11 +250,6 @@ linux_old_select(struct thread *td, struct linux_old_select_args *args)
 	struct l_old_select_argv linux_args;
 	struct linux_select_args newsel;
 	int error;
-
-#ifdef DEBUG
-	if (ldebug(old_select))
-		printf(ARGS(old_select, "%p"), args->ptr);
-#endif
 
 	error = copyin(args->ptr, &linux_args, sizeof(linux_args));
 	if (error)
@@ -279,44 +273,32 @@ linux_set_cloned_tls(struct thread *td, void *desc)
 
 	error = copyin(desc, &info, sizeof(struct l_user_desc));
 	if (error) {
-		printf(LMSG("copyin failed!"));
+		linux_msg(td, "set_cloned_tls copyin failed!");
 	} else {
 		idx = info.entry_number;
 
-		/* 
+		/*
 		 * looks like we're getting the idx we returned
 		 * in the set_thread_area() syscall
 		 */
 		if (idx != 6 && idx != 3) {
-			printf(LMSG("resetting idx!"));
+			linux_msg(td, "set_cloned_tls resetting idx!");
 			idx = 3;
 		}
 
 		/* this doesnt happen in practice */
 		if (idx == 6) {
-	   		/* we might copy out the entry_number as 3 */
-		   	info.entry_number = 3;
+			/* we might copy out the entry_number as 3 */
+			info.entry_number = 3;
 			error = copyout(&info, desc, sizeof(struct l_user_desc));
 			if (error)
-				printf(LMSG("copyout failed!"));
+				linux_msg(td, "set_cloned_tls copyout failed!");
 		}
 
 		a[0] = LINUX_LDT_entry_a(&info);
 		a[1] = LINUX_LDT_entry_b(&info);
 
 		memcpy(&sd, &a, sizeof(a));
-#ifdef DEBUG
-		if (ldebug(clone))
-			printf("Segment created in clone with "
-			"CLONE_SETTLS: lobase: %x, hibase: %x, "
-			"lolimit: %x, hilimit: %x, type: %i, "
-			"dpl: %i, p: %i, xx: %i, def32: %i, "
-			"gran: %i\n", sd.sd_lobase, sd.sd_hibase,
-			sd.sd_lolimit, sd.sd_hilimit, sd.sd_type,
-			sd.sd_dpl, sd.sd_p, sd.sd_xx,
-			sd.sd_def32, sd.sd_gran);
-#endif
-
 		/* set %gs */
 		td->td_pcb->pcb_gsd = sd;
 		td->td_pcb->pcb_gs = GSEL(GUGS_SEL, SEL_UPL);
@@ -340,19 +322,9 @@ linux_set_upcall_kse(struct thread *td, register_t stack)
 	return (0);
 }
 
-#define STACK_SIZE  (2 * 1024 * 1024)
-#define GUARD_SIZE  (4 * PAGE_SIZE)
-
 int
 linux_mmap2(struct thread *td, struct linux_mmap2_args *args)
 {
-
-#ifdef DEBUG
-	if (ldebug(mmap2))
-		printf(ARGS(mmap2, "%p, %d, %d, 0x%08x, %d, %d"),
-		    (void *)args->addr, args->len, args->prot,
-		    args->flags, args->fd, args->pgoff);
-#endif
 
 	return (linux_mmap_common(td, args->addr, args->len, args->prot,
 		args->flags, args->fd, (uint64_t)(uint32_t)args->pgoff *
@@ -369,199 +341,16 @@ linux_mmap(struct thread *td, struct linux_mmap_args *args)
 	if (error)
 		return (error);
 
-#ifdef DEBUG
-	if (ldebug(mmap))
-		printf(ARGS(mmap, "%p, %d, %d, 0x%08x, %d, %d"),
-		    (void *)linux_args.addr, linux_args.len, linux_args.prot,
-		    linux_args.flags, linux_args.fd, linux_args.pgoff);
-#endif
-
 	return (linux_mmap_common(td, linux_args.addr, linux_args.len,
 	    linux_args.prot, linux_args.flags, linux_args.fd,
 	    (uint32_t)linux_args.pgoff));
 }
 
-static int
-linux_mmap_common(struct thread *td, l_uintptr_t addr, l_size_t len, l_int prot,
-    l_int flags, l_int fd, l_loff_t pos)
-{
-	struct proc *p = td->td_proc;
-	struct mmap_args /* {
-		caddr_t addr;
-		size_t len;
-		int prot;
-		int flags;
-		int fd;
-		long pad;
-		off_t pos;
-	} */ bsd_args;
-	int error;
-	struct file *fp;
-	cap_rights_t rights;
-
-	error = 0;
-	bsd_args.flags = 0;
-	fp = NULL;
-
-	/*
-	 * Linux mmap(2):
-	 * You must specify exactly one of MAP_SHARED and MAP_PRIVATE
-	 */
-	if (!((flags & LINUX_MAP_SHARED) ^ (flags & LINUX_MAP_PRIVATE)))
-		return (EINVAL);
-
-	if (flags & LINUX_MAP_SHARED)
-		bsd_args.flags |= MAP_SHARED;
-	if (flags & LINUX_MAP_PRIVATE)
-		bsd_args.flags |= MAP_PRIVATE;
-	if (flags & LINUX_MAP_FIXED)
-		bsd_args.flags |= MAP_FIXED;
-	if (flags & LINUX_MAP_ANON) {
-		/* Enforce pos to be on page boundary, then ignore. */
-		if ((pos & PAGE_MASK) != 0)
-			return (EINVAL);
-		pos = 0;
-		bsd_args.flags |= MAP_ANON;
-	} else
-		bsd_args.flags |= MAP_NOSYNC;
-	if (flags & LINUX_MAP_GROWSDOWN)
-		bsd_args.flags |= MAP_STACK;
-
-	/*
-	 * PROT_READ, PROT_WRITE, or PROT_EXEC implies PROT_READ and PROT_EXEC
-	 * on Linux/i386. We do this to ensure maximum compatibility.
-	 * Linux/ia64 does the same in i386 emulation mode.
-	 */
-	bsd_args.prot = prot;
-	if (bsd_args.prot & (PROT_READ | PROT_WRITE | PROT_EXEC))
-		bsd_args.prot |= PROT_READ | PROT_EXEC;
-
-	/* Linux does not check file descriptor when MAP_ANONYMOUS is set. */
-	bsd_args.fd = (bsd_args.flags & MAP_ANON) ? -1 : fd;
-	if (bsd_args.fd != -1) {
-		/*
-		 * Linux follows Solaris mmap(2) description:
-		 * The file descriptor fildes is opened with
-		 * read permission, regardless of the
-		 * protection options specified.
-		 *
-		 * Checking just CAP_MMAP is fine here, since the real work
-		 * is done in the FreeBSD mmap().
-		 */
-
-		error = fget(td, bsd_args.fd,
-		    cap_rights_init(&rights, CAP_MMAP), &fp);
-		if (error != 0)
-			return (error);
-		if (fp->f_type != DTYPE_VNODE) {
-			fdrop(fp, td);
-			return (EINVAL);
-		}
-
-		/* Linux mmap() just fails for O_WRONLY files */
-		if (!(fp->f_flag & FREAD)) {
-			fdrop(fp, td);
-			return (EACCES);
-		}
-
-		fdrop(fp, td);
-	}
-
-	if (flags & LINUX_MAP_GROWSDOWN) {
-		/* 
-		 * The Linux MAP_GROWSDOWN option does not limit auto
-		 * growth of the region.  Linux mmap with this option
-		 * takes as addr the inital BOS, and as len, the initial
-		 * region size.  It can then grow down from addr without
-		 * limit.  However, linux threads has an implicit internal
-		 * limit to stack size of STACK_SIZE.  Its just not
-		 * enforced explicitly in linux.  But, here we impose
-		 * a limit of (STACK_SIZE - GUARD_SIZE) on the stack
-		 * region, since we can do this with our mmap.
-		 *
-		 * Our mmap with MAP_STACK takes addr as the maximum
-		 * downsize limit on BOS, and as len the max size of
-		 * the region.  It them maps the top SGROWSIZ bytes,
-		 * and auto grows the region down, up to the limit
-		 * in addr.
-		 *
-		 * If we don't use the MAP_STACK option, the effect
-		 * of this code is to allocate a stack region of a
-		 * fixed size of (STACK_SIZE - GUARD_SIZE).
-		 */
-
-		if ((caddr_t)PTRIN(addr) + len > p->p_vmspace->vm_maxsaddr) {
-			/* 
-			 * Some linux apps will attempt to mmap
-			 * thread stacks near the top of their
-			 * address space.  If their TOS is greater
-			 * than vm_maxsaddr, vm_map_growstack()
-			 * will confuse the thread stack with the
-			 * process stack and deliver a SEGV if they
-			 * attempt to grow the thread stack past their
-			 * current stacksize rlimit.  To avoid this,
-			 * adjust vm_maxsaddr upwards to reflect
-			 * the current stacksize rlimit rather
-			 * than the maximum possible stacksize.
-			 * It would be better to adjust the
-			 * mmap'ed region, but some apps do not check
-			 * mmap's return value.
-			 */
-			PROC_LOCK(p);
-			p->p_vmspace->vm_maxsaddr = (char *)USRSTACK -
-			    lim_cur(p, RLIMIT_STACK);
-			PROC_UNLOCK(p);
-		}
-
-		/*
-		 * This gives us our maximum stack size and a new BOS.
-		 * If we're using VM_STACK, then mmap will just map
-		 * the top SGROWSIZ bytes, and let the stack grow down
-		 * to the limit at BOS.  If we're not using VM_STACK
-		 * we map the full stack, since we don't have a way
-		 * to autogrow it.
-		 */
-		if (len > STACK_SIZE - GUARD_SIZE) {
-			bsd_args.addr = (caddr_t)PTRIN(addr);
-			bsd_args.len = len;
-		} else {
-			bsd_args.addr = (caddr_t)PTRIN(addr) -
-			    (STACK_SIZE - GUARD_SIZE - len);
-			bsd_args.len = STACK_SIZE - GUARD_SIZE;
-		}
-	} else {
-		bsd_args.addr = (caddr_t)PTRIN(addr);
-		bsd_args.len  = len;
-	}
-	bsd_args.pos = pos;
-
-#ifdef DEBUG
-	if (ldebug(mmap))
-		printf("-> %s(%p, %d, %d, 0x%08x, %d, 0x%x)\n",
-		    __func__,
-		    (void *)bsd_args.addr, bsd_args.len, bsd_args.prot,
-		    bsd_args.flags, bsd_args.fd, (int)bsd_args.pos);
-#endif
-	error = sys_mmap(td, &bsd_args);
-#ifdef DEBUG
-	if (ldebug(mmap))
-		printf("-> %s() return: 0x%x (0x%08x)\n",
-			__func__, error, (u_int)td->td_retval[0]);
-#endif
-	return (error);
-}
-
 int
 linux_mprotect(struct thread *td, struct linux_mprotect_args *uap)
 {
-	struct mprotect_args bsd_args;
 
-	bsd_args.addr = uap->addr;
-	bsd_args.len = uap->len;
-	bsd_args.prot = uap->prot;
-	if (bsd_args.prot & (PROT_READ | PROT_WRITE | PROT_EXEC))
-		bsd_args.prot |= PROT_READ | PROT_EXEC;
-	return (sys_mprotect(td, &bsd_args));
+	return (linux_mprotect_common(td, PTROUT(uap->addr), uap->len, uap->prot));
 }
 
 int
@@ -649,7 +438,7 @@ linux_modify_ldt(struct thread *td, struct linux_modify_ldt_args *uap)
 	}
 
 	if (error == EOPNOTSUPP) {
-		printf("linux: modify_ldt needs kernel option USER_LDT\n");
+		linux_msg(td, "modify_ldt needs kernel option USER_LDT");
 		error = ENOSYS;
 	}
 
@@ -662,12 +451,6 @@ linux_sigaction(struct thread *td, struct linux_sigaction_args *args)
 	l_osigaction_t osa;
 	l_sigaction_t act, oact;
 	int error;
-
-#ifdef DEBUG
-	if (ldebug(sigaction))
-		printf(ARGS(sigaction, "%d, %p, %p"),
-		    args->sig, (void *)args->nsa, (void *)args->osa);
-#endif
 
 	if (args->nsa != NULL) {
 		error = copyin(args->nsa, &osa, sizeof(l_osigaction_t));
@@ -705,11 +488,6 @@ linux_sigsuspend(struct thread *td, struct linux_sigsuspend_args *args)
 	sigset_t sigmask;
 	l_sigset_t mask;
 
-#ifdef DEBUG
-	if (ldebug(sigsuspend))
-		printf(ARGS(sigsuspend, "%08lx"), (unsigned long)args->mask);
-#endif
-
 	LINUX_SIGEMPTYSET(mask);
 	mask.__mask = args->mask;
 	linux_to_bsd_sigset(&mask, &sigmask);
@@ -722,12 +500,6 @@ linux_rt_sigsuspend(struct thread *td, struct linux_rt_sigsuspend_args *uap)
 	l_sigset_t lmask;
 	sigset_t sigmask;
 	int error;
-
-#ifdef DEBUG
-	if (ldebug(rt_sigsuspend))
-		printf(ARGS(rt_sigsuspend, "%p, %d"),
-		    (void *)uap->newset, uap->sigsetsize);
-#endif
 
 	if (uap->sigsetsize != sizeof(l_sigset_t))
 		return (EINVAL);
@@ -746,11 +518,6 @@ linux_pause(struct thread *td, struct linux_pause_args *args)
 	struct proc *p = td->td_proc;
 	sigset_t sigmask;
 
-#ifdef DEBUG
-	if (ldebug(pause))
-		printf(ARGS(pause, ""));
-#endif
-
 	PROC_LOCK(p);
 	sigmask = td->td_sigmask;
 	PROC_UNLOCK(p);
@@ -763,11 +530,6 @@ linux_sigaltstack(struct thread *td, struct linux_sigaltstack_args *uap)
 	stack_t ss, oss;
 	l_stack_t lss;
 	int error;
-
-#ifdef DEBUG
-	if (ldebug(sigaltstack))
-		printf(ARGS(sigaltstack, "%p, %p"), uap->uss, uap->uoss);
-#endif
 
 	if (uap->uss != NULL) {
 		error = copyin(uap->uss, &lss, sizeof(l_stack_t));
@@ -793,17 +555,8 @@ linux_sigaltstack(struct thread *td, struct linux_sigaltstack_args *uap)
 int
 linux_ftruncate64(struct thread *td, struct linux_ftruncate64_args *args)
 {
-	struct ftruncate_args sa;
 
-#ifdef DEBUG
-	if (ldebug(ftruncate64))
-		printf(ARGS(ftruncate64, "%u, %jd"), args->fd,
-		    (intmax_t)args->length);
-#endif
-
-	sa.fd = args->fd;
-	sa.length = args->length;
-	return sys_ftruncate(td, &sa);
+	return (kern_ftruncate(td, args->fd, args->length));
 }
 
 int
@@ -819,53 +572,39 @@ linux_set_thread_area(struct thread *td, struct linux_set_thread_area_args *args
 	if (error)
 		return (error);
 
-#ifdef DEBUG
-	if (ldebug(set_thread_area))
-	   	printf(ARGS(set_thread_area, "%i, %x, %x, %i, %i, %i, %i, %i, %i\n"),
-		      info.entry_number,
-      		      info.base_addr,
-      		      info.limit,
-      		      info.seg_32bit,
-		      info.contents,
-      		      info.read_exec_only,
-      		      info.limit_in_pages,
-      		      info.seg_not_present,
-      		      info.useable);
-#endif
-
 	idx = info.entry_number;
-	/* 
-	 * Semantics of linux version: every thread in the system has array of
-	 * 3 tls descriptors. 1st is GLIBC TLS, 2nd is WINE, 3rd unknown. This 
+	/*
+	 * Semantics of Linux version: every thread in the system has array of
+	 * 3 tls descriptors. 1st is GLIBC TLS, 2nd is WINE, 3rd unknown. This
 	 * syscall loads one of the selected tls decriptors with a value and
 	 * also loads GDT descriptors 6, 7 and 8 with the content of the
 	 * per-thread descriptors.
 	 *
-	 * Semantics of fbsd version: I think we can ignore that linux has 3 
+	 * Semantics of FreeBSD version: I think we can ignore that Linux has 3
 	 * per-thread descriptors and use just the 1st one. The tls_array[]
 	 * is used only in set/get-thread_area() syscalls and for loading the
-	 * GDT descriptors. In fbsd we use just one GDT descriptor for TLS so
-	 * we will load just one. 
+	 * GDT descriptors. In FreeBSD we use just one GDT descriptor for TLS
+	 * so we will load just one.
 	 *
 	 * XXX: this doesn't work when a user space process tries to use more
-	 * than 1 TLS segment. Comment in the linux sources says wine might do
+	 * than 1 TLS segment. Comment in the Linux sources says wine might do
 	 * this.
 	 */
 
-	/* 
-	 * we support just GLIBC TLS now 
+	/*
+	 * we support just GLIBC TLS now
 	 * we should let 3 proceed as well because we use this segment so
 	 * if code does two subsequent calls it should succeed
 	 */
 	if (idx != 6 && idx != -1 && idx != 3)
 		return (EINVAL);
 
-	/* 
+	/*
 	 * we have to copy out the GDT entry we use
 	 * FreeBSD uses GDT entry #3 for storing %gs so load that
 	 *
 	 * XXX: what if a user space program doesn't check this value and tries
-	 * to use 6, 7 or 8? 
+	 * to use 6, 7 or 8?
 	 */
 	idx = info.entry_number = 3;
 	error = copyout(&info, args->desc, sizeof(struct l_user_desc));
@@ -881,20 +620,6 @@ linux_set_thread_area(struct thread *td, struct linux_set_thread_area_args *args
 	}
 
 	memcpy(&sd, &a, sizeof(a));
-#ifdef DEBUG
-	if (ldebug(set_thread_area))
-	   	printf("Segment created in set_thread_area: lobase: %x, hibase: %x, lolimit: %x, hilimit: %x, type: %i, dpl: %i, p: %i, xx: %i, def32: %i, gran: %i\n", sd.sd_lobase,
-			sd.sd_hibase,
-			sd.sd_lolimit,
-			sd.sd_hilimit,
-			sd.sd_type,
-			sd.sd_dpl,
-			sd.sd_p,
-			sd.sd_xx,
-			sd.sd_def32,
-			sd.sd_gran);
-#endif
-
 	/* this is taken from i386 version of cpu_set_user_tls() */
 	critical_enter();
 	/* set %gs */
@@ -902,24 +627,19 @@ linux_set_thread_area(struct thread *td, struct linux_set_thread_area_args *args
 	PCPU_GET(fsgs_gdt)[1] = sd;
 	load_gs(GSEL(GUGS_SEL, SEL_UPL));
 	critical_exit();
-   
+
 	return (0);
 }
 
 int
 linux_get_thread_area(struct thread *td, struct linux_get_thread_area_args *args)
 {
-   	
+
 	struct l_user_desc info;
 	int error;
 	int idx;
 	struct l_desc_struct desc;
 	struct segment_descriptor sd;
-
-#ifdef DEBUG
-	if (ldebug(get_thread_area))
-		printf(ARGS(get_thread_area, "%p"), args->desc);
-#endif
 
 	error = copyin(args->desc, &info, sizeof(struct l_user_desc));
 	if (error)
@@ -950,7 +670,7 @@ linux_get_thread_area(struct thread *td, struct linux_get_thread_area_args *args
 
 	error = copyout(&info, args->desc, sizeof(struct l_user_desc));
 	if (error)
-	   	return (EFAULT);
+		return (EFAULT);
 
 	return (0);
 }
@@ -960,7 +680,7 @@ int
 linux_mq_open(struct thread *td, struct linux_mq_open_args *args)
 {
 #ifdef P1003_1B_MQUEUE
-   	return sys_kmq_open(td, (struct kmq_open_args *) args);
+	return (sys_kmq_open(td, (struct kmq_open_args *)args));
 #else
 	return (ENOSYS);
 #endif
@@ -970,7 +690,7 @@ int
 linux_mq_unlink(struct thread *td, struct linux_mq_unlink_args *args)
 {
 #ifdef P1003_1B_MQUEUE
-   	return sys_kmq_unlink(td, (struct kmq_unlink_args *) args);
+	return (sys_kmq_unlink(td, (struct kmq_unlink_args *)args));
 #else
 	return (ENOSYS);
 #endif
@@ -980,7 +700,7 @@ int
 linux_mq_timedsend(struct thread *td, struct linux_mq_timedsend_args *args)
 {
 #ifdef P1003_1B_MQUEUE
-   	return sys_kmq_timedsend(td, (struct kmq_timedsend_args *) args);
+	return (sys_kmq_timedsend(td, (struct kmq_timedsend_args *)args));
 #else
 	return (ENOSYS);
 #endif
@@ -990,7 +710,7 @@ int
 linux_mq_timedreceive(struct thread *td, struct linux_mq_timedreceive_args *args)
 {
 #ifdef P1003_1B_MQUEUE
-   	return sys_kmq_timedreceive(td, (struct kmq_timedreceive_args *) args);
+	return (sys_kmq_timedreceive(td, (struct kmq_timedreceive_args *)args));
 #else
 	return (ENOSYS);
 #endif
@@ -1000,7 +720,7 @@ int
 linux_mq_notify(struct thread *td, struct linux_mq_notify_args *args)
 {
 #ifdef P1003_1B_MQUEUE
-	return sys_kmq_notify(td, (struct kmq_notify_args *) args);
+	return (sys_kmq_notify(td, (struct kmq_notify_args *)args));
 #else
 	return (ENOSYS);
 #endif
@@ -1010,7 +730,7 @@ int
 linux_mq_getsetattr(struct thread *td, struct linux_mq_getsetattr_args *args)
 {
 #ifdef P1003_1B_MQUEUE
-   	return sys_kmq_setattr(td, (struct kmq_setattr_args *) args);
+	return (sys_kmq_setattr(td, (struct kmq_setattr_args *)args));
 #else
 	return (ENOSYS);
 #endif

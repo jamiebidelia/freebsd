@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2001 by Thomas Moestl <tmm@FreeBSD.org>.
  * All rights reserved.
  *
@@ -37,7 +39,6 @@
 
 typedef	uint32_t	cell_t;
 
-int  OF_decode_addr(phandle_t, int, bus_space_tag_t *, bus_space_handle_t *);
 void OF_getetheraddr(device_t dev, u_char *addr);
 
 void OF_initial_setup(void *fdt_ptr, void *junk, int (*openfirm)(void *));
@@ -46,7 +47,11 @@ boolean_t OF_bootstrap(void);
 void OF_reboot(void);
 
 void ofw_mem_regions(struct mem_region *, int *, struct mem_region *, int *);
+void ofw_numa_mem_regions(struct numa_mem_region *, int *);
 void ofw_quiesce(void); /* Must be called before VM is up! */
 void ofw_save_trap_vec(char *);
+int ofw_pcibus_get_domain(device_t dev, device_t child, int *domain);
+int ofw_pcibus_get_cpus(device_t dev, device_t child, enum cpu_sets op,
+		size_t setsize, cpuset_t *cpuset);
 
 #endif /* _MACHINE_OFW_MACHDEP_H_ */

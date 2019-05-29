@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2010 Alexander Motin <mav@FreeBSD.org>
  * Copyright (c) 2000 - 2008 Søren Schmidt <sos@FreeBSD.org>
  * All rights reserved.
@@ -39,6 +41,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/mutex.h>
 #include <sys/systm.h>
 #include <sys/taskqueue.h>
+#include <sys/disk.h>
 #include <geom/geom.h>
 #include "geom/raid/g_raid.h"
 #include "g_raid_md_if.h"
@@ -773,7 +776,7 @@ intel_meta_write(struct g_consumer *cp, struct intel_raid_conf *meta)
 	meta->checksum = checksum;
 
 	/* Create and fill buffer. */
-	sectors = (meta->config_size + pp->sectorsize - 1) / pp->sectorsize;
+	sectors = howmany(meta->config_size, pp->sectorsize);
 	buf = malloc(sectors * pp->sectorsize, M_MD_INTEL, M_WAITOK | M_ZERO);
 	if (sectors > 1) {
 		memcpy(buf, ((char *)meta) + pp->sectorsize,
@@ -923,7 +926,7 @@ g_raid_md_intel_start_disk(struct g_raid_disk *disk)
 	pd = (struct g_raid_md_intel_perdisk *)disk->d_md_data;
 	olddisk = NULL;
 
-	/* Find disk position in metadata by it's serial. */
+	/* Find disk position in metadata by its serial. */
 	disk_pos = intel_meta_find_disk(meta, pd->pd_disk_meta.serial);
 	if (disk_pos < 0) {
 		G_RAID_DEBUG1(1, sc, "Unknown, probably new or stale disk");
@@ -991,7 +994,7 @@ nofit:
 		if (olddisk == NULL)
 			panic("No disk at position %d!", disk_pos);
 		if (olddisk->d_state != G_RAID_DISK_S_OFFLINE) {
-			G_RAID_DEBUG1(1, sc, "More then one disk for pos %d",
+			G_RAID_DEBUG1(1, sc, "More than one disk for pos %d",
 			    disk_pos);
 			g_raid_change_disk_state(disk, G_RAID_DISK_S_STALE);
 			return (0);
@@ -1448,7 +1451,7 @@ g_raid_md_create_intel(struct g_raid_md_object *md, struct g_class *mp,
 static int
 g_raid_md_get_label(struct g_consumer *cp, char *serial, int serlen)
 {
-	char serial_buffer[24];
+	char serial_buffer[DISK_IDENT_SIZE];
 	int len, error;
 	
 	len = sizeof(serial_buffer);

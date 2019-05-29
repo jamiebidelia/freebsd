@@ -75,7 +75,7 @@ public:
         return true;
 
       if (pointee.getObjCLifetime() > Qualifiers::OCL_ExplicitNone)
-        Pass.TA.report(parm->getLocStart(),
+        Pass.TA.report(parm->getBeginLoc(),
                        diag::err_arcmt_nsinvocation_ownership,
                        parm->getSourceRange())
             << selName;
@@ -95,7 +95,7 @@ public:
       Pass.TA.clearDiagnostic(diag::err_unavailable,
                               diag::err_unavailable_message,
                               E->getSelectorLoc(0));
-      Pass.TA.replace(E->getSourceRange(), getNilString(Pass.Ctx));
+      Pass.TA.replace(E->getSourceRange(), getNilString(Pass));
     }
     return true;
   }

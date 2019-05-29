@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2012 Chelsio Communications, Inc.
  * All rights reserved.
  *
@@ -33,9 +35,12 @@
 #error "no user-serviceable parts inside"
 #endif
 
+#include <sys/_eventhandler.h>
+
 struct tcpopt;
 struct tcphdr;
 struct in_conninfo;
+struct tcp_info;
 
 struct toedev {
 	TAILQ_ENTRY(toedev) link;	/* glue for toedev_list */
@@ -99,9 +104,12 @@ struct toedev {
 
 	/* TCP socket option */
 	void (*tod_ctloutput)(struct toedev *, struct tcpcb *, int, int);
+
+	/* Update software state */
+	void (*tod_tcp_info)(struct toedev *, struct tcpcb *,
+	    struct tcp_info *);
 };
 
-#include <sys/eventhandler.h>
 typedef	void (*tcp_offload_listen_start_fn)(void *, struct tcpcb *);
 typedef	void (*tcp_offload_listen_stop_fn)(void *, struct tcpcb *);
 EVENTHANDLER_DECLARE(tcp_offload_listen_start, tcp_offload_listen_start_fn);

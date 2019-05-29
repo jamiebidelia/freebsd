@@ -1,11 +1,29 @@
 # $FreeBSD$
 
-.include <bsd.own.mk>
+.include <src.opts.mk>
 
-TESTSDIR=	${TESTSBASE}/lib/libc/stdlib
+ATF_TESTS_C+=		dynthr_test
+ATF_TESTS_C+=		heapsort_test
+ATF_TESTS_C+=		mergesort_test
+ATF_TESTS_C+=		qsort_test
+ATF_TESTS_C+=		set_constraint_handler_s_test
+ATF_TESTS_C+=		strfmon_test
+ATF_TESTS_C+=		tsearch_test
+.if ${COMPILER_FEATURES:Mc++11}
+ATF_TESTS_CXX+=		cxa_thread_atexit_test
+ATF_TESTS_CXX+=		cxa_thread_atexit_nothr_test
+.endif
 
-# TODO: t_getenv_thread, t_mi_vector_hash
-NETBSD_ATF_TESTS_C=	abs_test
+# Not sure why this isn't defined for all architectures, since most
+# have long double.
+.if ${MACHINE_CPUARCH} == "aarch64" || \
+    ${MACHINE_CPUARCH} == "amd64" || \
+    ${MACHINE_CPUARCH} == "i386"
+CFLAGS+=	-D__HAVE_LONG_DOUBLE
+.endif
+
+# TODO: t_getenv_thread, t_mi_vector_hash, t_strtoi
+NETBSD_ATF_TESTS_C+=	abs_test
 NETBSD_ATF_TESTS_C+=	atoi_test
 NETBSD_ATF_TESTS_C+=	div_test
 NETBSD_ATF_TESTS_C+=	getenv_test
@@ -30,15 +48,21 @@ BINDIR=		${TESTSDIR}
 #PROGS+=		h_atexit
 PROGS+=		h_getopt h_getopt_long
 
+CFLAGS+=	-I${.CURDIR}
+
+CXXSTD.cxa_thread_atexit_test=	c++11
+CXXSTD.cxa_thread_atexit_nothr_test=	c++11
+LIBADD.cxa_thread_atexit_test+=		pthread
+
 .for t in h_getopt h_getopt_long
 CFLAGS.$t+=	-I${LIBNETBSD_SRCDIR} -I${SRCTOP}/contrib/netbsd-tests
 LDFLAGS.$t+=	-L${LIBNETBSD_OBJDIR}
 
-DPADD.$t+=	${LIBNETBSD} ${LIBUTIL}
-LDADD.$t+=	-lnetbsd -lutil
+LIBADD.${t}+=	netbsd util
 .endfor
 
-DPADD.strtod_test+=		${LIBM}
-LDADD.strtod_test+=		-lm
+LIBADD.strtod_test+=		m
+
+SUBDIR+=	dynthr_mod
 
 .include <bsd.test.mk>

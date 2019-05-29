@@ -73,14 +73,25 @@ struct bcm_vchiq_softc {
 	void*			intr_hl;
 	bus_space_tag_t		bst;
 	bus_space_handle_t	bsh;
+	int			regs_offset;
 };
 
 static struct bcm_vchiq_softc *bcm_vchiq_sc = NULL;
 
+#define	BSD_DTB			1
+#define	UPSTREAM_DTB		2
+static struct ofw_compat_data compat_data[] = {
+	{"broadcom,bcm2835-vchiq",	BSD_DTB},
+	{"brcm,bcm2835-vchiq",		UPSTREAM_DTB},
+	{NULL,				0}
+};
+
 #define	vchiq_read_4(reg)		\
-    bus_space_read_4(bcm_vchiq_sc->bst, bcm_vchiq_sc->bsh, reg)
+    bus_space_read_4(bcm_vchiq_sc->bst, bcm_vchiq_sc->bsh, (reg) + \
+    bcm_vchiq_sc->regs_offset)
 #define	vchiq_write_4(reg, val)		\
-    bus_space_write_4(bcm_vchiq_sc->bst, bcm_vchiq_sc->bsh, reg, val)
+    bus_space_write_4(bcm_vchiq_sc->bst, bcm_vchiq_sc->bsh, (reg) + \
+    bcm_vchiq_sc->regs_offset, val)
 
 /* 
  * Extern functions */
@@ -88,6 +99,7 @@ void vchiq_exit(void);
 int vchiq_init(void);
 
 extern VCHIQ_STATE_T g_state;
+extern int g_cache_line_size;
 
 static void
 bcm_vchiq_intr(void *arg)
@@ -121,18 +133,19 @@ static int
 bcm_vchiq_probe(device_t dev)
 {
 
-	if (ofw_bus_is_compatible(dev, "broadcom,bcm2835-vchiq")) {
-		device_set_desc(dev, "BCM2835 VCHIQ");
-		return(BUS_PROBE_DEFAULT);
-	}
+	if (ofw_bus_search_compatible(dev, compat_data)->ocd_data == 0)
+		return (ENXIO);
 
-	return (ENXIO);
+	device_set_desc(dev, "BCM2835 VCHIQ");
+	return (BUS_PROBE_DEFAULT);
 }
 
 static int
 bcm_vchiq_attach(device_t dev)
 {
 	struct bcm_vchiq_softc *sc = device_get_softc(dev);
+	phandle_t node;
+	pcell_t cell;
 	int rid = 0;
 
 	if (bcm_vchiq_sc != NULL)
@@ -154,10 +167,17 @@ bcm_vchiq_attach(device_t dev)
 		return (ENXIO);
 	}
 
+	if (ofw_bus_search_compatible(dev, compat_data)->ocd_data == UPSTREAM_DTB)
+		sc->regs_offset = -0x40;
+
+	node = ofw_bus_get_node(dev);
+	if ((OF_getencprop(node, "cache-line-size", &cell, sizeof(cell))) > 0)
+		g_cache_line_size = cell;
+
 	vchiq_core_initialize();
 
 	/* Setup and enable the timer */
-	if (bus_setup_intr(dev, sc->irq_res, INTR_TYPE_MISC,
+	if (bus_setup_intr(dev, sc->irq_res, INTR_TYPE_MISC | INTR_MPSAFE,
 			NULL, bcm_vchiq_intr, sc,
 			&sc->intr_hl) != 0) {
 		bus_release_resource(dev, SYS_RES_IRQ, rid,
@@ -166,7 +186,7 @@ bcm_vchiq_attach(device_t dev)
 		return (ENXIO);
 	}
 
-	mtx_init(&sc->lock, "vchiq", MTX_DEF, 0);
+	mtx_init(&sc->lock, "vchiq", 0, MTX_DEF);
 	bcm_vchiq_sc = sc;
 
 	vchiq_init();

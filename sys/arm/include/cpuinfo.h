@@ -32,6 +32,33 @@
 
 #include <sys/types.h>
 
+#define CPU_IMPLEMENTER_ARM		0x41
+#define CPU_IMPLEMENTER_QCOM		0x51
+#define CPU_IMPLEMENTER_MRVL		0x56
+
+/* ARM */
+#define CPU_ARCH_ARM1176		0xB76
+#define CPU_ARCH_CORTEX_A5		0xC05
+#define CPU_ARCH_CORTEX_A7		0xC07
+#define CPU_ARCH_CORTEX_A8		0xC08
+#define CPU_ARCH_CORTEX_A9		0xC09
+#define CPU_ARCH_CORTEX_A12		0xC0D
+#define CPU_ARCH_CORTEX_A15		0xC0F
+#define CPU_ARCH_CORTEX_A17		0xC11
+#define CPU_ARCH_CORTEX_A53		0xD03
+#define CPU_ARCH_CORTEX_A57		0xD07
+#define CPU_ARCH_CORTEX_A72		0xD08
+#define CPU_ARCH_CORTEX_A73		0xD09
+#define CPU_ARCH_CORTEX_A75		0xD0A
+
+
+/* QCOM */
+#define CPU_ARCH_KRAIT_300		0x06F
+
+/* MRVL */
+#define CPU_ARCH_SHEEVA_581		0x581	/* PJ4/PJ4B */
+#define CPU_ARCH_SHEEVA_584		0x584 	/* PJ4B-MP/PJ4C */
+
 struct cpuinfo {
 	/* raw id registers */
 	uint32_t midr;
@@ -55,8 +82,10 @@ struct cpuinfo {
 	uint32_t id_isar4;
 	uint32_t id_isar5;
 	uint32_t cbar;
+	uint32_t ccsidr;
+	uint32_t clidr;
 
-        /* Parsed bits of above registers... */
+	/* Parsed bits of above registers... */
 
 	/* midr */
 	int implementer;
@@ -88,10 +117,16 @@ struct cpuinfo {
 	int dcache_line_mask;
 	int icache_line_size;
 	int icache_line_mask;
+
+	/* mpidr */
+	int mp_ext;
 };
 
 extern struct cpuinfo cpuinfo;
 
 void cpuinfo_init(void);
-
+#if __ARM_ARCH >= 6
+void cpuinfo_init_bp_hardening(void);
+void cpuinfo_reinit_mmu(uint32_t ttb);
+#endif
 #endif	/* _MACHINE_CPUINFO_H_ */

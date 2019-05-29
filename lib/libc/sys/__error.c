@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1997 John Birrell <jb@cimlogic.com.au>.
  * All rights reserved.
  *
@@ -29,6 +31,8 @@
 
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
+
+#include "libc_private.h"
 
 extern int errno;
 

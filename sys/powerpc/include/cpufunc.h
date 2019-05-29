@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 1998 Doug Rabson
  * All rights reserved.
  *
@@ -82,7 +84,7 @@ static __inline void
 mtsrin(vm_offset_t va, register_t value)
 {
 
-	__asm __volatile ("mtsrin %0,%1" :: "r"(value), "r"(va));
+	__asm __volatile ("mtsrin %0,%1; isync" :: "r"(value), "r"(va));
 }
 
 static __inline register_t
@@ -201,13 +203,50 @@ intr_restore(register_t msr)
 }
 
 static __inline struct pcpu *
-powerpc_get_pcpup(void)
+get_pcpu(void)
 {
 	struct pcpu *ret;
 
 	__asm __volatile("mfsprg %0, 0" : "=r"(ret));
 
 	return (ret);
+}
+
+/* "NOP" operations to signify priorities to the kernel. */
+static __inline void
+nop_prio_vlow(void)
+{
+	__asm __volatile("or 31,31,31");
+}
+
+static __inline void
+nop_prio_low(void)
+{
+	__asm __volatile("or 1,1,1");
+}
+
+static __inline void
+nop_prio_mlow(void)
+{
+	__asm __volatile("or 6,6,6");
+}
+
+static __inline void
+nop_prio_medium(void)
+{
+	__asm __volatile("or 2,2,2");
+}
+
+static __inline void
+nop_prio_mhigh(void)
+{
+	__asm __volatile("or 5,5,5");
+}
+
+static __inline void
+nop_prio_high(void)
+{
+	__asm __volatile("or 3,3,3");
 }
 
 #endif /* _KERNEL */

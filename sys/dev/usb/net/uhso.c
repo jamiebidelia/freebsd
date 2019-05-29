@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2010 Fredrik Lindberg <fli@shapeshifter.se>
  * All rights reserved.
  *
@@ -27,7 +29,7 @@
 __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
-#include <sys/types.h>
+#include <sys/eventhandler.h>
 #include <sys/sockio.h>
 #include <sys/mbuf.h>
 #include <sys/malloc.h>
@@ -96,7 +98,7 @@ struct uhso_softc {
 	struct ifnet		*sc_ifp;
 	struct mbuf		*sc_mwait;	/* Partial packet */
 	size_t			sc_waitlen;	/* No. of outstanding bytes */
-	struct ifqueue		sc_rxq;
+	struct mbufq		sc_rxq;
 	struct callout		sc_c;
 
 	/* TTY related structures */
@@ -497,6 +499,7 @@ DRIVER_MODULE(uhso, uhub, uhso_driver, uhso_devclass, uhso_driver_loaded, 0);
 MODULE_DEPEND(uhso, ucom, 1, 1, 1);
 MODULE_DEPEND(uhso, usb, 1, 1, 1);
 MODULE_VERSION(uhso, 1);
+USB_PNP_HOST_INFO(uhso_devs);
 
 static struct ucom_callback uhso_ucom_callback = {
 	.ucom_cfg_get_status = &uhso_ucom_cfg_get_status,
@@ -557,6 +560,7 @@ uhso_attach(device_t self)
 	sc->sc_dev = self;
 	sc->sc_udev = uaa->device;
 	mtx_init(&sc->sc_mtx, "uhso", NULL, MTX_DEF);
+	mbufq_init(&sc->sc_rxq, INT_MAX);	/* XXXGL: sane maximum */
 	ucom_ref(&sc->sc_super_ucom);
 
 	sc->sc_radio = 1;
@@ -1224,6 +1228,7 @@ uhso_mux_write_callback(struct usb_xfer *xfer, usb_error_t error)
 		    ht->ht_muxport);
 		/* FALLTHROUGH */
 	case USB_ST_SETUP:
+tr_setup:
 		pc = usbd_xfer_get_frame(xfer, 1);
 		if (ucom_get_data(&sc->sc_ucom[ht->ht_muxport], pc,
 		    0, 32, &actlen)) {
@@ -1254,7 +1259,8 @@ uhso_mux_write_callback(struct usb_xfer *xfer, usb_error_t error)
 		UHSO_DPRINTF(0, "error: %s\n", usbd_errstr(error));
 		if (error == USB_ERR_CANCELLED)
 			break;
-		break;
+		usbd_xfer_set_stall(xfer);
+		goto tr_setup;
 	}
 }
 
@@ -1621,11 +1627,13 @@ uhso_ifnet_read_callback(struct usb_xfer *xfer, usb_error_t error)
 	case USB_ST_TRANSFERRED:
 		if (actlen > 0 && (sc->sc_ifp->if_drv_flags & IFF_DRV_RUNNING)) {
 			pc = usbd_xfer_get_frame(xfer, 0);
+			if (mbufq_full(&sc->sc_rxq))
+				break;
 			m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
 			usbd_copy_out(pc, 0, mtod(m, uint8_t *), actlen);
 			m->m_pkthdr.len = m->m_len = actlen;
 			/* Enqueue frame for further processing */
-			_IF_ENQUEUE(&sc->sc_rxq, m);
+			mbufq_enqueue(&sc->sc_rxq, m);
 			if (!callout_pending(&sc->sc_c) ||
 			    !callout_active(&sc->sc_c)) {
 				callout_schedule(&sc->sc_c, 1);
@@ -1665,14 +1673,13 @@ uhso_if_rxflush(void *arg)
 	struct ip6_hdr *ip6;
 #endif
 	uint16_t iplen;
-	int len, isr;
+	int isr;
 
 	m = NULL;
 	mwait = sc->sc_mwait;
 	for (;;) {
 		if (m == NULL) {
-			_IF_DEQUEUE(&sc->sc_rxq, m);
-			if (m == NULL)
+			if ((m = mbufq_dequeue(&sc->sc_rxq)) == NULL)
 				break;
 			UHSO_DPRINTF(3, "dequeue m=%p, len=%d\n", m, m->m_len);
 		}
@@ -1685,13 +1692,8 @@ uhso_if_rxflush(void *arg)
 
 			UHSO_DPRINTF(3, "partial m0=%p(%d), concat w/ m=%p(%d)\n",
 			    m0, m0->m_len, m, m->m_len);
-			len = m->m_len + m0->m_len;
 
-			/* Concat mbufs and fix headers */
-			m_cat(m0, m);
-			m0->m_pkthdr.len = len;
-			m->m_flags &= ~M_PKTHDR;
-
+			m_catpkt(m0, m);
 			m = m_pullup(m0, sizeof(struct ip));
 			if (m == NULL) {
 				if_inc_counter(ifp, IFCOUNTER_IERRORS, 1);
@@ -1754,7 +1756,7 @@ uhso_if_rxflush(void *arg)
 			 * Allocate a new mbuf for this IP packet and
 			 * copy the IP-packet into it.
 			 */
-			m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
+			m = m_getcl(M_WAITOK, MT_DATA, M_PKTHDR);
 			memcpy(mtod(m, uint8_t *), mtod(m0, uint8_t *), iplen);
 			m->m_pkthdr.len = m->m_len = iplen;
 

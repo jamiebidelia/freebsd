@@ -5,7 +5,7 @@
  *
  * Author: Harti Brandt <harti@freebsd.org>
  *	   Kendy Kutzner
- * 
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
  * are met:
@@ -14,7 +14,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 
+ *
  * THIS SOFTWARE IS PROVIDED BY AUTHOR AND CONTRIBUTORS ``AS IS'' AND
  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
@@ -49,6 +49,7 @@
 #define	SNMP_TRANS_UDP		0
 #define	SNMP_TRANS_LOC_DGRAM	1
 #define	SNMP_TRANS_LOC_STREAM	2
+#define	SNMP_TRANS_UDP6		3
 
 /* type of callback function for responses
  * this callback function is responsible for free() any memory associated with
@@ -59,7 +60,7 @@ typedef void (*snmp_send_cb_f)(struct snmp_pdu *, struct snmp_pdu *, void *);
 typedef void (*snmp_timeout_cb_f)(void * );
 
 /* timeout start function */
-typedef void *(*snmp_timeout_start_f)(struct timeval *timeout,  
+typedef void *(*snmp_timeout_start_f)(struct timeval *timeout,
     snmp_timeout_cb_f callback, void *);
 
 /* timeout stop function */

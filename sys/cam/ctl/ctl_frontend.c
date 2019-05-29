@@ -1,5 +1,8 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2003 Silicon Graphics International Corp.
+ * Copyright (c) 2014-2017 Alexander Motin <mav@FreeBSD.org>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -49,13 +52,14 @@ __FBSDID("$FreeBSD$");
 #include <sys/endian.h>
 #include <sys/queue.h>
 #include <sys/sysctl.h>
+#include <sys/nv.h>
+#include <sys/dnv.h>
 
 #include <cam/scsi/scsi_all.h>
 #include <cam/scsi/scsi_da.h>
 #include <cam/ctl/ctl_io.h>
 #include <cam/ctl/ctl.h>
 #include <cam/ctl/ctl_frontend.h>
-#include <cam/ctl/ctl_frontend_internal.h>
 #include <cam/ctl/ctl_backend.h>
 /* XXX KDM move defines from ctl_ioctl.h to somewhere else */
 #include <cam/ctl/ctl_ioctl.h>
@@ -70,12 +74,11 @@ ctl_frontend_register(struct ctl_frontend *fe)
 {
 	struct ctl_softc *softc = control_softc;
 	struct ctl_frontend *fe_tmp;
+	int error;
 
 	KASSERT(softc != NULL, ("CTL is not initialized"));
 
-	/*
-	 * Sanity check, make sure this isn't a duplicate registration.
-	 */
+	/* Sanity check, make sure this isn't a duplicate registration. */
 	mtx_lock(&softc->ctl_lock);
 	STAILQ_FOREACH(fe_tmp, &softc->fe_list, links) {
 		if (strcmp(fe_tmp->name, fe->name) == 0) {
@@ -86,11 +89,14 @@ ctl_frontend_register(struct ctl_frontend *fe)
 	mtx_unlock(&softc->ctl_lock);
 	STAILQ_INIT(&fe->port_list);
 
-	/*
-	 * Call the frontend's initialization routine.
-	 */
-	if (fe->init != NULL)
-		fe->init();
+	/* Call the frontend's initialization routine. */
+	if (fe->init != NULL) {
+		if ((error = fe->init()) != 0) {
+			printf("%s frontend init error: %d\n",
+			    fe->name, error);
+			return (error);
+		}
+	}
 
 	mtx_lock(&softc->ctl_lock);
 	softc->num_frontends++;
@@ -103,20 +109,21 @@ int
 ctl_frontend_deregister(struct ctl_frontend *fe)
 {
 	struct ctl_softc *softc = control_softc;
+	int error;
 
-	if (!STAILQ_EMPTY(&fe->port_list))
-		return (-1);
+	/* Call the frontend's shutdown routine.*/
+	if (fe->shutdown != NULL) {
+		if ((error = fe->shutdown()) != 0) {
+			printf("%s frontend shutdown error: %d\n",
+			    fe->name, error);
+			return (error);
+		}
+	}
 
 	mtx_lock(&softc->ctl_lock);
 	STAILQ_REMOVE(&softc->fe_list, fe, ctl_frontend, links);
 	softc->num_frontends--;
 	mtx_unlock(&softc->ctl_lock);
-
-	/*
-	 * Call the frontend's shutdown routine.
-	 */
-	if (fe->shutdown != NULL)
-		fe->shutdown();
 	return (0);
 }
 
@@ -141,19 +148,22 @@ int
 ctl_port_register(struct ctl_port *port)
 {
 	struct ctl_softc *softc = control_softc;
+	struct ctl_port *tport, *nport;
 	void *pool;
 	int port_num;
 	int retval;
 
-	retval = 0;
-
 	KASSERT(softc != NULL, ("CTL is not initialized"));
+	port->ctl_softc = softc;
 
 	mtx_lock(&softc->ctl_lock);
-	port_num = ctl_ffz(softc->ctl_port_mask, CTL_MAX_PORTS);
-	if ((port_num == -1)
-	 || (ctl_set_mask(softc->ctl_port_mask, port_num) == -1)) {
-		port->targ_port = -1;
+	if (port->targ_port >= 0)
+		port_num = port->targ_port;
+	else
+		port_num = ctl_ffz(softc->ctl_port_mask,
+		    softc->port_min, softc->port_max);
+	if ((port_num < 0) ||
+	    (ctl_set_mask(softc->ctl_port_mask, port_num) < 0)) {
 		mtx_unlock(&softc->ctl_lock);
 		return (1);
 	}
@@ -190,16 +200,24 @@ error:
 		mtx_unlock(&softc->ctl_lock);
 		return (retval);
 	}
+	port->targ_port = port_num;
 	port->ctl_pool_ref = pool;
-
-	if (port->options.stqh_first == NULL)
-		STAILQ_INIT(&port->options);
+	if (port->options == NULL)
+		port->options = nvlist_create(0);
+	port->stats.item = port_num;
+	mtx_init(&port->port_lock, "CTL port", NULL, MTX_DEF);
 
 	mtx_lock(&softc->ctl_lock);
-	port->targ_port = port_num + softc->port_offset;
 	STAILQ_INSERT_TAIL(&port->frontend->port_list, port, fe_links);
-	STAILQ_INSERT_TAIL(&softc->port_list, port, links);
-	softc->ctl_ports[port_num] = port;
+	for (tport = NULL, nport = STAILQ_FIRST(&softc->port_list);
+	    nport != NULL && nport->targ_port < port_num;
+	    tport = nport, nport = STAILQ_NEXT(tport, links)) {
+	}
+	if (tport)
+		STAILQ_INSERT_AFTER(&softc->port_list, tport, port, links);
+	else
+		STAILQ_INSERT_HEAD(&softc->port_list, port, links);
+	softc->ctl_ports[port->targ_port] = port;
 	mtx_unlock(&softc->ctl_lock);
 
 	return (retval);
@@ -208,31 +226,23 @@ error:
 int
 ctl_port_deregister(struct ctl_port *port)
 {
-	struct ctl_softc *softc = control_softc;
-	struct ctl_io_pool *pool;
-	int port_num, retval, i;
+	struct ctl_softc *softc = port->ctl_softc;
+	struct ctl_io_pool *pool = (struct ctl_io_pool *)port->ctl_pool_ref;
+	int i;
 
-	retval = 0;
-
-	pool = (struct ctl_io_pool *)port->ctl_pool_ref;
-
-	if (port->targ_port == -1) {
-		retval = 1;
-		goto bailout;
-	}
+	if (port->targ_port == -1)
+		return (1);
 
 	mtx_lock(&softc->ctl_lock);
 	STAILQ_REMOVE(&softc->port_list, port, ctl_port, links);
 	STAILQ_REMOVE(&port->frontend->port_list, port, ctl_port, fe_links);
 	softc->num_ports--;
-	port_num = (port->targ_port < CTL_MAX_PORTS) ? port->targ_port :
-	    port->targ_port - CTL_MAX_PORTS;
-	ctl_clear_mask(softc->ctl_port_mask, port_num);
-	softc->ctl_ports[port_num] = NULL;
+	ctl_clear_mask(softc->ctl_port_mask, port->targ_port);
+	softc->ctl_ports[port->targ_port] = NULL;
 	mtx_unlock(&softc->ctl_lock);
 
 	ctl_pool_free(pool);
-	ctl_free_opts(&port->options);
+	nvlist_destroy(port->options);
 
 	ctl_lun_map_deinit(port);
 	free(port->port_devid, M_CTL);
@@ -244,9 +254,9 @@ ctl_port_deregister(struct ctl_port *port)
 	for (i = 0; i < port->max_initiators; i++)
 		free(port->wwpn_iid[i].name, M_CTL);
 	free(port->wwpn_iid, M_CTL);
+	mtx_destroy(&port->port_lock);
 
-bailout:
-	return (retval);
+	return (0);
 }
 
 void
@@ -258,6 +268,8 @@ ctl_port_set_wwns(struct ctl_port *port, int wwnn_valid, uint64_t wwnn,
 
 	if (port->port_type == CTL_PORT_FC)
 		proto = SCSI_PROTO_FC << 4;
+	else if (port->port_type == CTL_PORT_SAS)
+		proto = SCSI_PROTO_SAS << 4;
 	else if (port->port_type == CTL_PORT_ISCSI)
 		proto = SCSI_PROTO_ISCSI << 4;
 	else
@@ -301,17 +313,79 @@ ctl_port_set_wwns(struct ctl_port *port, int wwnn_valid, uint64_t wwnn,
 void
 ctl_port_online(struct ctl_port *port)
 {
-	port->port_online(port->onoff_arg);
-	/* XXX KDM need a lock here? */
+	struct ctl_softc *softc = port->ctl_softc;
+	struct ctl_lun *lun;
+	const char *value;
+	uint32_t l;
+
+	if (port->lun_enable != NULL) {
+		if (port->lun_map) {
+			for (l = 0; l < port->lun_map_size; l++) {
+				if (ctl_lun_map_from_port(port, l) ==
+				    UINT32_MAX)
+					continue;
+				port->lun_enable(port->targ_lun_arg, l);
+			}
+		} else {
+			STAILQ_FOREACH(lun, &softc->lun_list, links)
+				port->lun_enable(port->targ_lun_arg, lun->lun);
+		}
+	}
+	if (port->port_online != NULL)
+		port->port_online(port->onoff_arg);
+	mtx_lock(&softc->ctl_lock);
+	if (softc->is_single == 0) {
+		value = dnvlist_get_string(port->options, "ha_shared", NULL);
+		if (value != NULL && strcmp(value, "on") == 0)
+			port->status |= CTL_PORT_STATUS_HA_SHARED;
+		else
+			port->status &= ~CTL_PORT_STATUS_HA_SHARED;
+	}
 	port->status |= CTL_PORT_STATUS_ONLINE;
+	STAILQ_FOREACH(lun, &softc->lun_list, links) {
+		if (ctl_lun_map_to_port(port, lun->lun) == UINT32_MAX)
+			continue;
+		mtx_lock(&lun->lun_lock);
+		ctl_est_ua_all(lun, -1, CTL_UA_INQ_CHANGE);
+		mtx_unlock(&lun->lun_lock);
+	}
+	mtx_unlock(&softc->ctl_lock);
+	ctl_isc_announce_port(port);
 }
 
 void
 ctl_port_offline(struct ctl_port *port)
 {
-	port->port_offline(port->onoff_arg);
-	/* XXX KDM need a lock here? */
+	struct ctl_softc *softc = port->ctl_softc;
+	struct ctl_lun *lun;
+	uint32_t l;
+
+	if (port->port_offline != NULL)
+		port->port_offline(port->onoff_arg);
+	if (port->lun_disable != NULL) {
+		if (port->lun_map) {
+			for (l = 0; l < port->lun_map_size; l++) {
+				if (ctl_lun_map_from_port(port, l) ==
+				    UINT32_MAX)
+					continue;
+				port->lun_disable(port->targ_lun_arg, l);
+			}
+		} else {
+			STAILQ_FOREACH(lun, &softc->lun_list, links)
+				port->lun_disable(port->targ_lun_arg, lun->lun);
+		}
+	}
+	mtx_lock(&softc->ctl_lock);
 	port->status &= ~CTL_PORT_STATUS_ONLINE;
+	STAILQ_FOREACH(lun, &softc->lun_list, links) {
+		if (ctl_lun_map_to_port(port, lun->lun) == UINT32_MAX)
+			continue;
+		mtx_lock(&lun->lun_lock);
+		ctl_est_ua_all(lun, -1, CTL_UA_INQ_CHANGE);
+		mtx_unlock(&lun->lun_lock);
+	}
+	mtx_unlock(&softc->ctl_lock);
+	ctl_isc_announce_port(port);
 }
 
 /*

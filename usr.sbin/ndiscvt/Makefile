@@ -1,6 +1,6 @@
 # $FreeBSD$
 
-.PATH:	${.CURDIR}/../../sys/compat/ndis
+.PATH:	${SRCTOP}/sys/compat/ndis
 
 PROG=	ndiscvt
 SRCS=	ndiscvt.c
@@ -17,13 +17,12 @@ LIBADD=	l
 
 YFLAGS+=-v
 
-CFLAGS+=-I. -I${.CURDIR} -I${.CURDIR}/../../sys
+CFLAGS+=-I. -I${.CURDIR} -I${SRCTOP}/sys
 
 CLEANFILES= y.output
 
 FILES= windrv_stub.c
-FILESNAME= windrv_stub.c
-FILESDIR= /usr/share/misc
+FILESDIR= ${SHAREDIR}/misc
 
 SCRIPTS= ndisgen.sh
 

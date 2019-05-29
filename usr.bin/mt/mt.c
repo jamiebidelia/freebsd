@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 1980, 1993
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  *	The Regents of the University of California.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -10,7 +11,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 4. Neither the name of the University nor the names of its contributors
+ * 3. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -1342,7 +1343,7 @@ mt_param(int argc, char **argv, int mtfd, char *xml_str,
 			break;
 		case 'p':
 			if (param_name != NULL) {
-				warnx("Only one paramter name may be "
+				warnx("Only one parameter name may be "
 				    "specified");
 				retval = 1;
 				goto bailout;
@@ -1354,7 +1355,7 @@ mt_param(int argc, char **argv, int mtfd, char *xml_str,
 			break;
 		case 's':
 			if (param_value != NULL) {
-				warnx("Only one paramter value may be "
+				warnx("Only one parameter value may be "
 				    "specified");
 				retval = 1;
 				goto bailout;

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2002-2008 Sam Leffler, Errno Consulting
  * All rights reserved.
  *
@@ -35,6 +37,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/systm.h> 
 #include <sys/proc.h>
 #include <sys/kernel.h>
+#include <sys/malloc.h>
 #include <sys/condvar.h>
  
 #include <sys/socket.h>
@@ -67,19 +70,19 @@ __FBSDID("$FreeBSD$");
 #define	ROAM_RATE_HALF_DEFAULT		2*6	/* half-width 11a/g bss */
 #define	ROAM_RATE_QUARTER_DEFAULT	2*3	/* quarter-width 11a/g bss */
 #define	ROAM_MCS_11N_DEFAULT		(1 | IEEE80211_RATE_MCS) /* 11n bss */
+#define	ROAM_MCS_11AC_DEFAULT		(1 | IEEE80211_RATE_MCS) /* 11ac bss; XXX not used yet */
 
 void
 ieee80211_scan_attach(struct ieee80211com *ic)
 {
-
 	/*
-	 * For now, the swscan module does both the
-	 * allocation (so it can pad it) and sets up the net80211
-	 * bits.
-	 *
-	 * I'll split this stuff later.
+	 * If there's no scan method pointer, attach the
+	 * swscan set as a default.
 	 */
-	ieee80211_swscan_attach(ic);
+	if (ic->ic_scan_methods == NULL)
+		ieee80211_swscan_attach(ic);
+	else
+		ic->ic_scan_methods->sc_attach(ic);
 }
 
 void
@@ -88,12 +91,11 @@ ieee80211_scan_detach(struct ieee80211com *ic)
 
 	/*
 	 * Ideally we'd do the ss_ops detach call here;
-	 * but then ieee80211_swscan_detach would need
-	 * to be split in two.
+	 * but then sc_detach() would need to be split in two.
 	 *
 	 * I'll do that later.
 	 */
-	ieee80211_swscan_detach(ic);
+	ic->ic_scan_methods->sc_detach(ic);
 }
 
 static const struct ieee80211_roamparam defroam[IEEE80211_MODE_MAX] = {
@@ -117,19 +119,34 @@ static const struct ieee80211_roamparam defroam[IEEE80211_MODE_MAX] = {
 				    .rate = ROAM_MCS_11N_DEFAULT },
 	[IEEE80211_MODE_11NG]	= { .rssi = ROAM_RSSI_11B_DEFAULT,
 				    .rate = ROAM_MCS_11N_DEFAULT },
+	[IEEE80211_MODE_VHT_2GHZ]	= { .rssi = ROAM_RSSI_11B_DEFAULT,
+				    .rate = ROAM_MCS_11AC_DEFAULT },
+	[IEEE80211_MODE_VHT_5GHZ]	= { .rssi = ROAM_RSSI_11A_DEFAULT,
+				    .rate = ROAM_MCS_11AC_DEFAULT },
+
 };
 
 void
 ieee80211_scan_vattach(struct ieee80211vap *vap)
 {
+	struct ieee80211com *ic = vap->iv_ic;
+	int m;
+
 	vap->iv_bgscanidle = (IEEE80211_BGSCAN_IDLE_DEFAULT*1000)/hz;
 	vap->iv_bgscanintvl = IEEE80211_BGSCAN_INTVAL_DEFAULT*hz;
 	vap->iv_scanvalid = IEEE80211_SCAN_VALID_DEFAULT*hz;
 
 	vap->iv_roaming = IEEE80211_ROAMING_AUTO;
-	memcpy(vap->iv_roamparms, defroam, sizeof(defroam));
 
-	ieee80211_swscan_vattach(vap);
+	memset(vap->iv_roamparms, 0, sizeof(vap->iv_roamparms));
+	for (m = IEEE80211_MODE_AUTO + 1; m < IEEE80211_MODE_MAX; m++) {
+		if (isclr(ic->ic_modecaps, m))
+			continue;
+
+		memcpy(&vap->iv_roamparms[m], &defroam[m], sizeof(defroam[m]));
+	}
+
+	ic->ic_scan_methods->sc_vattach(vap);
 }
 
 void
@@ -141,7 +158,7 @@ ieee80211_scan_vdetach(struct ieee80211vap *vap)
 	IEEE80211_LOCK(ic);
 	ss = ic->ic_scan;
 
-	ieee80211_swscan_vdetach(vap);
+	ic->ic_scan_methods->sc_vdetach(vap);
 
 	if (ss != NULL && ss->ss_vap == vap) {
 		if (ss->ss_ops != NULL) {
@@ -285,7 +302,7 @@ ieee80211_scan_dump(struct ieee80211_scan_state *ss)
 
 	if_printf(vap->iv_ifp, "scan set ");
 	ieee80211_scan_dump_channels(ss);
-	printf(" dwell min %lums max %lums\n",
+	printf(" dwell min %ums max %ums\n",
 	    ticks_to_msecs(ss->ss_mindwell), ticks_to_msecs(ss->ss_maxdwell));
 }
 #endif /* IEEE80211_DEBUG */
@@ -314,6 +331,7 @@ ieee80211_start_scan(struct ieee80211vap *vap, int flags,
 	u_int nssid, const struct ieee80211_scan_ssid ssids[])
 {
 	const struct ieee80211_scanner *scan;
+	struct ieee80211com *ic = vap->iv_ic;
 
 	scan = ieee80211_scanner_get(vap->iv_opmode);
 	if (scan == NULL) {
@@ -324,8 +342,7 @@ ieee80211_start_scan(struct ieee80211vap *vap, int flags,
 		return 0;
 	}
 
-	/* XXX ops */
-	return ieee80211_swscan_start_scan(scan, vap, flags, duration,
+	return ic->ic_scan_methods->sc_start_scan(scan, vap, flags, duration,
 	    mindwell, maxdwell, nssid, ssids);
 }
 
@@ -376,11 +393,10 @@ ieee80211_check_scan(struct ieee80211vap *vap, int flags,
 
 	/*
 	 * XXX TODO: separate things out a bit better.
-	 * XXX TODO: ops
 	 */
 	ieee80211_scan_update_locked(vap, scan);
 
-	result = ieee80211_swscan_check_scan(scan, vap, flags, duration,
+	result = ic->ic_scan_methods->sc_check_scan(scan, vap, flags, duration,
 	    mindwell, maxdwell, nssid, ssids);
 
 	IEEE80211_UNLOCK(ic);
@@ -408,6 +424,7 @@ ieee80211_check_scan_current(struct ieee80211vap *vap)
 int
 ieee80211_bg_scan(struct ieee80211vap *vap, int flags)
 {
+	struct ieee80211com *ic = vap->iv_ic;
 	const struct ieee80211_scanner *scan;
 
 	// IEEE80211_UNLOCK_ASSERT(sc);
@@ -425,10 +442,8 @@ ieee80211_bg_scan(struct ieee80211vap *vap, int flags)
 	 * XXX TODO: pull apart the bgscan logic into whatever
 	 * belongs here and whatever belongs in the software
 	 * scanner.
-	 *
-	 * XXX TODO: ops
 	 */
-	return (ieee80211_swscan_bg_scan(scan, vap, flags));
+	return (ic->ic_scan_methods->sc_bg_scan(scan, vap, flags));
 }
 
 /*
@@ -437,37 +452,42 @@ ieee80211_bg_scan(struct ieee80211vap *vap, int flags)
 void
 ieee80211_cancel_scan(struct ieee80211vap *vap)
 {
+	struct ieee80211com *ic = vap->iv_ic;
 
-	/* XXX TODO: ops */
-	ieee80211_swscan_cancel_scan(vap);
+	ic->ic_scan_methods->sc_cancel_scan(vap);
 }
 
 /*
  * Cancel any scan currently going on.
+ *
+ * This is called during normal 802.11 data path to cancel
+ * a scan so a newly arrived normal data packet can be sent.
  */
 void
 ieee80211_cancel_anyscan(struct ieee80211vap *vap)
 {
+	struct ieee80211com *ic = vap->iv_ic;
 
-	/* XXX TODO: ops */
-	ieee80211_swscan_cancel_anyscan(vap);
+	ic->ic_scan_methods->sc_cancel_anyscan(vap);
 }
 
 /*
- * Public access to scan_next for drivers that manage
- * scanning themselves (e.g. for firmware-based devices).
+ * Manually switch to the next channel in the channel list.
+ * Provided for drivers that manage scanning themselves
+ * (e.g. for firmware-based devices).
  */
 void
 ieee80211_scan_next(struct ieee80211vap *vap)
 {
+	struct ieee80211com *ic = vap->iv_ic;
 
-	/* XXX TODO: ops */
-	ieee80211_swscan_scan_next(vap);
+	ic->ic_scan_methods->sc_scan_next(vap);
 }
 
 /*
- * Public access to scan_next for drivers that are not able to scan single
- * channels (e.g. for firmware-based devices).
+ * Manually stop a scan that is currently running.
+ * Provided for drivers that are not able to scan single channels
+ * (e.g. for firmware-based devices).
  */
 void
 ieee80211_scan_done(struct ieee80211vap *vap)
@@ -481,14 +501,13 @@ ieee80211_scan_done(struct ieee80211vap *vap)
 	ss = ic->ic_scan;
 	ss->ss_next = ss->ss_last; /* all channels are complete */
 
-	/* XXX TODO: ops */
-	ieee80211_swscan_scan_done(vap);
+	ic->ic_scan_methods->sc_scan_done(vap);
 
 	IEEE80211_UNLOCK(ic);
 }
 
 /*
- * Probe the curent channel, if allowed, while scanning.
+ * Probe the current channel, if allowed, while scanning.
  * If the channel is not marked passive-only then send
  * a probe request immediately.  Otherwise mark state and
  * listen for beacons on the channel; if we receive something
@@ -504,8 +523,7 @@ ieee80211_probe_curchan(struct ieee80211vap *vap, int force)
 		return;
 	}
 
-	/* XXX TODO: ops */
-	ieee80211_swscan_probe_curchan(vap, force);
+	ic->ic_scan_methods->sc_scan_probe_curchan(vap, force);
 }
 
 #ifdef IEEE80211_DEBUG
@@ -542,8 +560,7 @@ ieee80211_scan_dump_probe_beacon(uint8_t subtype, int isnew,
 
 	printf("[%s] %s%s on chan %u (bss chan %u) ",
 	    ether_sprintf(mac), isnew ? "new " : "",
-	    ieee80211_mgt_subtype_name[subtype >> IEEE80211_FC0_SUBTYPE_SHIFT],
-	    sp->chan, sp->bchan);
+	    ieee80211_mgt_subtype_name(subtype), sp->chan, sp->bchan);
 	ieee80211_print_essid(sp->ssid + 2, sp->ssid[1]);
 	printf(" rssi %d\n", rssi);
 
@@ -567,8 +584,9 @@ ieee80211_add_scan(struct ieee80211vap *vap,
 	const struct ieee80211_frame *wh,
 	int subtype, int rssi, int noise)
 {
+	struct ieee80211com *ic = vap->iv_ic;
 
-	return (ieee80211_swscan_add_scan(vap, curchan, sp, wh, subtype,
+	return (ic->ic_scan_methods->sc_add_scan(vap, curchan, sp, wh, subtype,
 	    rssi, noise));
 }
 

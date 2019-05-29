@@ -24,7 +24,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd April 2, 2015
+.Dd September 8, 2016
 .Dt GGATEC 8
 .Os
 .Sh NAME
@@ -71,8 +71,8 @@ utility is a network client for the GEOM Gate class.
 It is responsible for the creation of
 .Nm ggate
 devices and forwarding I/O requests between the
-.Nm geom_gate.ko
-kernel module and the
+.Nm GEOM Gate
+kernel subsystem and the
 .Xr ggated 8
 network daemon.
 Available commands:
@@ -111,7 +111,7 @@ Do not use
 .Dv TCP_NODELAY
 option on TCP sockets.
 .It Fl o Cm ro | wo | rw
-Specify permission to use when opening the file or device: read-only
+Specify permissions to use when opening the file or device: read-only
 .Pq Cm ro ,
 write-only
 .Pq Cm wo ,
@@ -136,7 +136,7 @@ Default is 131072 (128kB).
 Sector size for
 .Nm ggate
 provider.
-If not specified, it is taken from device, or set to 512 bytes for files.
+If not specified, it is taken from the device, or set to 512 bytes for files.
 .It Fl t Ar timeout
 Number of seconds to wait before an I/O request will be canceled.
 Default is 0, which means no timeout.
@@ -161,10 +161,10 @@ option.
 Use a CD-ROM device on a remote host.
 .Bd -literal -offset indent
 server# cat /etc/gg.exports
-client RO /dev/acd0
+client RO /dev/cd0
 server# ggated
 
-client# ggatec create -o ro server /dev/acd0
+client# ggatec create -o ro server /dev/cd0
 ggate0
 client# mount_cd9660 /dev/ggate0 /cdrom
 .Ed
@@ -173,6 +173,11 @@ client# mount_cd9660 /dev/ggate0 /cdrom
 .Xr ggated 8 ,
 .Xr ggatel 8 ,
 .Xr mount_cd9660 8
+.Sh HISTORY
+The
+.Nm
+utility appeared in
+.Fx 5.3 .
 .Sh AUTHORS
 The
 .Nm

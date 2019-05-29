@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2003 - 2008 Søren Schmidt <sos@FreeBSD.org>
  * All rights reserved.
  *
@@ -193,12 +195,12 @@ struct ata_pci_controller {
 #define ATA_I82801JI_S1         0x3a208086
 #define ATA_I82801JI_S2         0x3a268086
 
-#define ATA_5Series_S1          0x3b208086
-#define ATA_5Series_S2          0x3b218086
-#define ATA_5Series_S3          0x3b268086
-#define ATA_5Series_S4          0x3b288086
-#define ATA_5Series_S5          0x3b2d8086
-#define ATA_5Series_S6          0x3b2e8086
+#define ATA_IBP_S1              0x3b208086
+#define ATA_IBP_S2              0x3b218086
+#define ATA_IBP_S3              0x3b268086
+#define ATA_IBP_S4              0x3b288086
+#define ATA_IBP_S5              0x3b2d8086
+#define ATA_IBP_S6              0x3b2e8086
 
 #define ATA_CPT_S1              0x1c008086
 #define ATA_CPT_S2              0x1c018086
@@ -535,7 +537,7 @@ void ata_pci_write_config(device_t dev, device_t child, int reg,
 int ata_pci_print_child(device_t dev, device_t child);
 int ata_pci_child_location_str(device_t dev, device_t child, char *buf,
     size_t buflen);
-struct resource * ata_pci_alloc_resource(device_t dev, device_t child, int type, int *rid, u_long start, u_long end, u_long count, u_int flags);
+struct resource * ata_pci_alloc_resource(device_t dev, device_t child, int type, int *rid, rman_res_t start, rman_res_t end, rman_res_t count, u_int flags);
 int ata_pci_release_resource(device_t dev, device_t child, int type, int rid, struct resource *r);
 int ata_pci_setup_intr(device_t dev, device_t child, struct resource *irq, int flags, driver_filter_t *filter, driver_intr_t *function, void *argument, void **cookiep);
  int ata_pci_teardown_intr(device_t dev, device_t child, struct resource *irq, void *cookie);

@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2013 EMC Corp.
  * Copyright (c) 2011 Jeffrey Roberson <jeff@freebsd.org>
  * Copyright (c) 2008 Mayur Shardul <mayur.shardul@gmail.com>
@@ -58,20 +60,8 @@ __FBSDID("$FreeBSD$");
 #include <ddb/ddb.h>
 #endif
 
-/*
- * These widths should allow the pointers to a node's children to fit within
- * a single cache line.  The extra levels from a narrow width should not be
- * a problem thanks to path compression.
- */
-#ifdef __LP64__
-#define	PCTRIE_WIDTH	4
-#else
-#define	PCTRIE_WIDTH	3
-#endif
-
-#define	PCTRIE_COUNT	(1 << PCTRIE_WIDTH)
 #define	PCTRIE_MASK	(PCTRIE_COUNT - 1)
-#define	PCTRIE_LIMIT	(howmany((sizeof(uint64_t) * NBBY), PCTRIE_WIDTH) - 1)
+#define	PCTRIE_LIMIT	(howmany(sizeof(uint64_t) * NBBY, PCTRIE_WIDTH) - 1)
 
 /* Flag bits stored in node pointers. */
 #define	PCTRIE_ISLEAF	0x1
@@ -176,7 +166,7 @@ pctrie_setroot(struct pctrie *ptree, struct pctrie_node *node)
 /*
  * Returns TRUE if the specified node is a leaf and FALSE otherwise.
  */
-static __inline boolean_t
+static __inline bool
 pctrie_isleaf(struct pctrie_node *node)
 {
 
@@ -228,7 +218,7 @@ pctrie_keydiff(uint64_t index1, uint64_t index2)
  * Returns TRUE if it can be determined that key does not belong to the
  * specified node.  Otherwise, returns FALSE.
  */
-static __inline boolean_t
+static __inline bool
 pctrie_keybarr(struct pctrie_node *node, uint64_t idx)
 {
 
@@ -236,7 +226,7 @@ pctrie_keybarr(struct pctrie_node *node, uint64_t idx)
 		idx = pctrie_trimkey(idx, node->pn_clev + 1);
 		return (idx != node->pn_owner);
 	}
-	return (FALSE);
+	return (false);
 }
 
 /*
@@ -395,7 +385,8 @@ pctrie_lookup_ge(struct pctrie *ptree, uint64_t index)
 #ifdef INVARIANTS
 	int loops = 0;
 #endif
-	int slot, tos;
+	unsigned tos;
+	int slot;
 
 	node = pctrie_getroot(ptree);
 	if (node == NULL)
@@ -506,7 +497,8 @@ pctrie_lookup_le(struct pctrie *ptree, uint64_t index)
 #ifdef INVARIANTS
 	int loops = 0;
 #endif
-	int slot, tos;
+	unsigned tos;
+	int slot;
 
 	node = pctrie_getroot(ptree);
 	if (node == NULL)

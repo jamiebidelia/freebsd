@@ -691,7 +691,7 @@ ar9300_Stub_StopDmaReceive(struct ath_hal *ah)
 }
 
 void
-ar9300_Stub_StartPcuReceive(struct ath_hal *ah)
+ar9300_Stub_StartPcuReceive(struct ath_hal *ah, HAL_BOOL is_scanning)
 {
 
 	ath_hal_printf(ah, "%s: called\n", __func__);
@@ -765,6 +765,7 @@ ar9300_Stub_ProcRxDesc(struct ath_hal *ah, struct ath_desc *desc0,
 HAL_BOOL
 ar9300_Stub_Reset(struct ath_hal *ah, HAL_OPMODE opmode,
 		struct ieee80211_channel *chan, HAL_BOOL bChannelChange,
+		HAL_RESET_TYPE resetType,
 		HAL_STATUS *status)
 {
 

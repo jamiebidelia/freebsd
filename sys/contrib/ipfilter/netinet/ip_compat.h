@@ -32,10 +32,16 @@
 # define 	__KERNEL__
 #endif
 
-#define	SOLARIS	(defined(sun) && (defined(__svr4__) || defined(__SVR4)))
+#ifndef	SOLARIS
+# if defined(sun) && defined(__SVR4)
+#  define	SOLARIS		1
+# else
+#  define	SOLARIS		0
+# endif
+#endif
 
 
-#if defined(__SVR4) || defined(__svr4__) || defined(__sgi)
+#if defined(__SVR4)
 # define index   strchr
 # if !defined(_KERNEL)
 #  define	bzero(a,b)	memset(a,0,b)
@@ -56,11 +62,6 @@
 # endif
 #endif
 
-#if defined(__sgi) || defined(bsdi) || defined(__hpux) || defined(hpux)
-struct  ether_addr {
-        u_char  ether_addr_octet[6];
-};
-#endif
 
 # ifdef __STDC__
 #  define IPL_EXTERN(ep) ipl##ep
@@ -94,15 +95,6 @@ struct  ether_addr {
 				 (__FreeBSD_version > (x)))
 #define	FREEBSD_LT_REV(x)	(defined(__FreeBSD_version) && \
 				 (__FreeBSD_version < (x)))
-#define	BSDOS_GE_REV(x)		(defined(_BSDI_VERSION) && \
-				 (_BSDI_VERSION >= (x)))
-#define	BSDOS_GT_REV(x)		(defined(_BSDI_VERSION) && \
-				 (_BSDI_VERSION > (x)))
-#define	BSDOS_LT_REV(x)		(defined(_BSDI_VERSION) && \
-				 (_BSDI_VERSION < (x)))
-#define	OPENBSD_GE_REV(x)	(defined(OpenBSD) && (OpenBSD >= (x)))
-#define	OPENBSD_GT_REV(x)	(defined(OpenBSD) && (OpenBSD > (x)))
-#define	OPENBSD_LT_REV(x)	(defined(OpenBSD) && (OpenBSD < (x)))
 #define	BSD_GE_YEAR(x)		(defined(BSD) && (BSD >= (x)))
 #define	BSD_GT_YEAR(x)		(defined(BSD) && (BSD > (x)))
 #define	BSD_LT_YEAR(x)		(defined(BSD) && (BSD < (x)))
@@ -140,13 +132,13 @@ struct  ether_addr {
 #  define	COPYIN(a,b,c)	copyin((caddr_t)(a), (caddr_t)(b), (c))
 #  define	COPYOUT(a,b,c)	copyout((caddr_t)(a), (caddr_t)(b), (c))
 
-#   define NETBSD_PF
 # else
 #  include <inttypes.h>
 # endif /* _KERNEL */
 
 #  include <sys/selinfo.h>
 #  include <sys/lock.h>
+#  include <sys/malloc.h>
 #  include <sys/mutex.h>
 #    define	KRWLOCK_FILL_SZ		56
 #    define	KMUTEX_FILL_SZ		56
@@ -158,6 +150,7 @@ struct  ether_addr {
 #    define	READ_ENTER(x)		rw_rlock(&(x)->ipf_lk)
 #    define	WRITE_ENTER(x)		rw_wlock(&(x)->ipf_lk)
 #    define	MUTEX_DOWNGRADE(x)	rw_downgrade(&(x)->ipf_lk)
+#    define	MUTEX_TRY_UPGRADE(x)	rw_try_upgrade(&(x)->ipf_lk)
 #    define	RWLOCK_INIT(x,y)	rw_init(&(x)->ipf_lk, (y))
 #    define	RW_DESTROY(x)		rw_destroy(&(x)->ipf_lk)
 #    define	RWLOCK_EXIT(x)		do { \
@@ -168,6 +161,7 @@ struct  ether_addr {
 					} while (0)
 #  include <net/if_var.h>
 #  define	GETKTIME(x)	microtime((struct timeval *)x)
+#  define	if_addrlist	if_addrhead
 
 #   include <netinet/in_systm.h>
 #   include <netinet/ip.h>
@@ -204,7 +198,7 @@ struct  ether_addr {
 #  define	MSGDSIZE(m)	mbufchainlen(m)
 #  define	M_LEN(m)	(m)->m_len
 #  define	M_ADJ(m,x)	m_adj(m, x)
-#  define	M_COPY(x)	m_copy((x), 0, M_COPYALL)
+#  define	M_COPY(x)	m_copym((x), 0, M_COPYALL, M_NOWAIT)
 #  define	M_DUP(m)	m_dup(m, M_NOWAIT)
 #  define	IPF_PANIC(x,y)	if (x) { printf y; panic("ipf_panic"); }
 typedef struct mbuf mb_t;
@@ -218,7 +212,7 @@ struct route;
 struct mbuf;
 struct ifnet {
 	char			if_xname[IFNAMSIZ];
-	TAILQ_HEAD(, ifaddr)	if_addrlist;
+	STAILQ_HEAD(, ifaddr)	if_addrlist;
 	int	(*if_output)(struct ifnet *, struct mbuf *,
 	    const struct sockaddr *, struct route *);
 };
@@ -313,8 +307,7 @@ typedef union {
 #define	ipf_isw		ipf_lkun_s.ipf_sw
 #define	ipf_magic	ipf_lkun_s.ipf_magic
 
-#if !defined(__GNUC__) || \
-    (defined(__FreeBSD_version) && (__FreeBSD_version >= 503000))
+#if !defined(__GNUC__) || defined(__FreeBSD_version)
 # ifndef	INLINE
 #  define	INLINE
 # endif
@@ -413,6 +406,8 @@ extern	void	freembt __P((mb_t *));
 
 # define	MUTEX_DOWNGRADE(x)	eMrwlock_downgrade(&(x)->ipf_emu, \
 							   __FILE__, __LINE__)
+# define	MUTEX_TRY_UPGRADE(x)	eMrwlock_try_upgrade(&(x)->ipf_emu, \
+							   __FILE__, __LINE__)
 # define	READ_ENTER(x)		eMrwlock_read_enter(&(x)->ipf_emu, \
 							    __FILE__, __LINE__)
 # define	RWLOCK_INIT(x, y)	eMrwlock_init(&(x)->ipf_emu, y)
@@ -463,11 +458,10 @@ extern	mb_t	*allocmbt(size_t);
 
 
 #ifdef	USE_INET6
-# if defined(__NetBSD__) || defined(__OpenBSD__) || defined(__FreeBSD__) || \
-     defined(__osf__) || defined(linux)
+# if defined(__NetBSD__) || defined(__FreeBSD__)
 #  include <netinet/ip6.h>
 #  include <netinet/icmp6.h>
-#   if defined(_KERNEL) && !defined(__osf__)
+#   if defined(_KERNEL)
 #    include <netinet6/ip6_var.h>
 #   endif
 typedef	struct ip6_hdr	ip6_t;
@@ -487,21 +481,16 @@ typedef	struct ip6_hdr	ip6_t;
 #  define	COPYBACK	m_copyback
 # endif
 #  if (defined(__NetBSD_Version__) && (__NetBSD_Version__ < 105180000)) || \
-       defined(__FreeBSD__) || (defined(OpenBSD) && (OpenBSD < 200206)) || \
-       defined(_BSDI_VERSION)
+       defined(__FreeBSD__)
 #   include <vm/vm.h>
 #  endif
-#  if !defined(__FreeBSD__) || FREEBSD_GE_REV(300000)
-#   if NETBSD_GE_REV(105180000) || OPENBSD_GE_REV(200111)
+#   if NETBSD_GE_REV(105180000)
 #    include <uvm/uvm_extern.h>
 #   else
 #    include <vm/vm_extern.h>
 extern  vm_map_t        kmem_map;
 #   endif
 #   include <sys/proc.h>
-#  else /* !__FreeBSD__ || (__FreeBSD__ && __FreeBSD_version >= 300000) */
-#   include <vm/vm_kern.h>
-#  endif /* !__FreeBSD__ || (__FreeBSD__ && __FreeBSD_version >= 300000) */
 
 #  ifdef IPFILTER_M_IPFILTER
 #    include <sys/malloc.h>
@@ -519,16 +508,16 @@ MALLOC_DECLARE(M_IPFILTER);
 #   endif /* M_PFIL */
 #  endif /* IPFILTER_M_IPFILTER */
 #  if !defined(KMALLOC)
-#   define	KMALLOC(a, b)	MALLOC((a), b, sizeof(*(a)), _M_IPF, M_NOWAIT)
+#   define	KMALLOC(a, b)		(a) = (b)malloc(sizeof(*(a)), _M_IPF, M_NOWAIT)
 #  endif
 #  if !defined(KMALLOCS)
-#   define	KMALLOCS(a, b, c)	MALLOC((a), b, (c), _M_IPF, M_NOWAIT)
+#   define	KMALLOCS(a, b, c)	(a) = (b)malloc((c), _M_IPF, M_NOWAIT)
 #  endif
 #  if !defined(KFREE)
-#   define	KFREE(x)	FREE((x), _M_IPF)
+#   define	KFREE(x)	free((x), _M_IPF)
 #  endif
 #   if !defined(KFREES)
-#  define	KFREES(x,s)	FREE((x), _M_IPF)
+#  define	KFREES(x,s)	free((x), _M_IPF)
 #  endif
 #  define	UIOMOVE(a,b,c,d)	uiomove((caddr_t)a,b,d)
 #  define	SLEEP(id, n)	tsleep((id), PPAUSE|PCATCH, n, 0)
@@ -601,7 +590,7 @@ MALLOC_DECLARE(M_IPFILTER);
 #  define	COPYOUT(a,b,c)	(bcopy((caddr_t)(a), (caddr_t)(b), (c)), 0)
 # endif
 
-# ifndef KMALLOC
+# if SOLARIS && !defined(KMALLOC)
 #  define	KMALLOC(a,b)	(a) = (b)new_kmem_alloc(sizeof(*(a)), \
 							KMEM_NOSLEEP)
 #  define	KMALLOCS(a,b,c)	(a) = (b)new_kmem_alloc((c), KMEM_NOSLEEP)
@@ -663,6 +652,7 @@ extern	char	*ipf_getifname __P((struct ifnet *, char *));
 # define	READ_ENTER(x)		;
 # define	WRITE_ENTER(x)		;
 # define	MUTEX_DOWNGRADE(x)	;
+# define	MUTEX_TRY_UPGRADE(x)	;
 # define	RWLOCK_INIT(x, y)	;
 # define	RWLOCK_EXIT(x)		;
 # define	RW_DESTROY(x)		;
@@ -745,16 +735,6 @@ typedef	struct	tcpiphdr	tcpiphdr_t;
 # define	TCP_OFF_A(x,y)	(x)->th_off = (y)
 #endif
 #define	IPMINLEN(i, h)	((i)->ip_len >= (IP_HL(i) * 4 + sizeof(struct h)))
-
-
-/*
- * XXX - This is one of those *awful* hacks which nobody likes
- */
-#ifdef	ultrix
-#define	A_A
-#else
-#define	A_A	&
-#endif
 
 #define	TCPF_ALL	(TH_FIN|TH_SYN|TH_RST|TH_PUSH|TH_ACK|TH_URG|\
 			 TH_ECN|TH_CWR)
@@ -1399,10 +1379,6 @@ typedef	struct	tcpiphdr	tcpiphdr_t;
 #undef	ICMP_MAXTYPE
 #define	ICMP_MAXTYPE		18
 
-#ifndef	IFNAMSIZ
-#define	IFNAMSIZ		16
-#endif
-
 #ifndef	LOG_FTP
 # define	LOG_FTP		(11<<3)
 #endif
@@ -1449,10 +1425,6 @@ typedef	struct	tcpiphdr	tcpiphdr_t;
 # define	DPRINT(x)	printf x
 #else
 # define	DPRINT(x)
-#endif
-
-#ifndef	AF_INET6
-# define	AF_INET6	26
 #endif
 
 #ifdef DTRACE_PROBE

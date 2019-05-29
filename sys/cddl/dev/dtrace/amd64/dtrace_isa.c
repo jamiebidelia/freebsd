@@ -37,6 +37,7 @@
 #include <machine/md_var.h>
 #include <machine/reg.h>
 #include <machine/stack.h>
+#include <x86/ifunc.h>
 
 #include <vm/vm.h>
 #include <vm/vm_param.h>
@@ -89,8 +90,8 @@ dtrace_getpcstack(pc_t *pcstack, int pcstack_limit, int aframes,
 		}
 
 		if (frame->f_frame <= frame ||
-		    (vm_offset_t)frame->f_frame >=
-		    (vm_offset_t)rbp + KSTACK_PAGES * PAGE_SIZE)
+		    (vm_offset_t)frame->f_frame >= curthread->td_kstack +
+		    curthread->td_kstack_pages * PAGE_SIZE)
 			break;
 		frame = frame->f_frame;
 	}
@@ -382,11 +383,10 @@ dtrace_getarg(int arg, int aframes)
 			 * we'll pull the true stack pointer out of the saved
 			 * registers and decrement our argument by the number
 			 * of arguments passed in registers; if the argument
-			 * we're seeking is passed in regsiters, we can just
+			 * we're seeking is passed in registers, we can just
 			 * load it directly.
 			 */
-			struct trapframe *tf =
-			    (struct trapframe *)((uintptr_t)&fp[1]);
+			struct trapframe *tf = (struct trapframe *)&fp[1];
 
 			if (arg <= inreg) {
 				switch (arg) {
@@ -440,7 +440,7 @@ dtrace_getarg(int arg, int aframes)
 	}
 
 	arg -= (inreg + 1);
-	stack = (uintptr_t *)fp + 2;
+	stack = (uintptr_t *)&fp[1];
 
 load:
 	DTRACE_CPUFLAG_SET(CPU_DTRACE_NOFAULT);
@@ -448,7 +448,6 @@ load:
 	DTRACE_CPUFLAG_CLEAR(CPU_DTRACE_NOFAULT);
 
 	return (val);
-	return (0);
 }
 
 int
@@ -469,8 +468,8 @@ dtrace_getstackdepth(int aframes)
 			break;
 		depth++;
 		if (frame->f_frame <= frame ||
-		    (vm_offset_t)frame->f_frame >=
-		    (vm_offset_t)rbp + KSTACK_PAGES * PAGE_SIZE)
+		    (vm_offset_t)frame->f_frame >= curthread->td_kstack +
+		    curthread->td_kstack_pages * PAGE_SIZE)
 			break;
 		frame = frame->f_frame;
 	}
@@ -665,4 +664,71 @@ dtrace_fuword64(void *uaddr)
 		return (0);
 	}
 	return (dtrace_fuword64_nocheck(uaddr));
+}
+
+/*
+ * ifunc resolvers for SMAP support
+ */
+void dtrace_copy_nosmap(uintptr_t, uintptr_t, size_t);
+void dtrace_copy_smap(uintptr_t, uintptr_t, size_t);
+DEFINE_IFUNC(, void, dtrace_copy, (uintptr_t, uintptr_t, size_t))
+{
+
+	return ((cpu_stdext_feature & CPUID_STDEXT_SMAP) != 0 ?
+	    dtrace_copy_smap : dtrace_copy_nosmap);
+}
+
+void dtrace_copystr_nosmap(uintptr_t, uintptr_t, size_t, volatile uint16_t *);
+void dtrace_copystr_smap(uintptr_t, uintptr_t, size_t, volatile uint16_t *);
+DEFINE_IFUNC(, void, dtrace_copystr, (uintptr_t, uintptr_t, size_t,
+    volatile uint16_t *))
+{
+
+	return ((cpu_stdext_feature & CPUID_STDEXT_SMAP) != 0 ?
+	    dtrace_copystr_smap : dtrace_copystr_nosmap);
+}
+
+uintptr_t dtrace_fulword_nosmap(void *);
+uintptr_t dtrace_fulword_smap(void *);
+DEFINE_IFUNC(, uintptr_t, dtrace_fulword, (void *))
+{
+
+	return ((cpu_stdext_feature & CPUID_STDEXT_SMAP) != 0 ?
+	    dtrace_fulword_smap : dtrace_fulword_nosmap);
+}
+
+uint8_t dtrace_fuword8_nocheck_nosmap(void *);
+uint8_t dtrace_fuword8_nocheck_smap(void *);
+DEFINE_IFUNC(, uint8_t, dtrace_fuword8_nocheck, (void *))
+{
+
+	return ((cpu_stdext_feature & CPUID_STDEXT_SMAP) != 0 ?
+	    dtrace_fuword8_nocheck_smap : dtrace_fuword8_nocheck_nosmap);
+}
+
+uint16_t dtrace_fuword16_nocheck_nosmap(void *);
+uint16_t dtrace_fuword16_nocheck_smap(void *);
+DEFINE_IFUNC(, uint16_t, dtrace_fuword16_nocheck, (void *))
+{
+
+	return ((cpu_stdext_feature & CPUID_STDEXT_SMAP) != 0 ?
+	    dtrace_fuword16_nocheck_smap : dtrace_fuword16_nocheck_nosmap);
+}
+
+uint32_t dtrace_fuword32_nocheck_nosmap(void *);
+uint32_t dtrace_fuword32_nocheck_smap(void *);
+DEFINE_IFUNC(, uint32_t, dtrace_fuword32_nocheck, (void *))
+{
+
+	return ((cpu_stdext_feature & CPUID_STDEXT_SMAP) != 0 ?
+	    dtrace_fuword32_nocheck_smap : dtrace_fuword32_nocheck_nosmap);
+}
+
+uint64_t dtrace_fuword64_nocheck_nosmap(void *);
+uint64_t dtrace_fuword64_nocheck_smap(void *);
+DEFINE_IFUNC(, uint64_t, dtrace_fuword64_nocheck, (void *))
+{
+
+	return ((cpu_stdext_feature & CPUID_STDEXT_SMAP) != 0 ?
+	    dtrace_fuword64_nocheck_smap : dtrace_fuword64_nocheck_nosmap);
 }

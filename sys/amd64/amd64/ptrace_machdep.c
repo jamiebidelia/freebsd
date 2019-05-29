@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2011 Konstantin Belousov <kib@FreeBSD.org>
  * All rights reserved.
  *
@@ -28,21 +30,33 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
-#include "opt_compat.h"
-
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/malloc.h>
 #include <sys/proc.h>
 #include <sys/ptrace.h>
 #include <sys/sysent.h>
+#include <vm/vm.h>
+#include <vm/pmap.h>
 #include <machine/md_var.h>
 #include <machine/pcb.h>
+#include <machine/frame.h>
+#include <machine/vmparam.h>
+
+#ifdef COMPAT_FREEBSD32
+struct ptrace_xstate_info32 {
+	uint32_t	xsave_mask1, xsave_mask2;
+	uint32_t	xsave_len;
+};
+#endif
 
 static int
 cpu_ptrace_xstate(struct thread *td, int req, void *addr, int data)
 {
 	struct ptrace_xstate_info info;
+#ifdef COMPAT_FREEBSD32
+	struct ptrace_xstate_info32 info32;
+#endif
 	char *savefpu;
 	int error;
 
@@ -72,13 +86,28 @@ cpu_ptrace_xstate(struct thread *td, int req, void *addr, int data)
 		break;
 
 	case PT_GETXSTATE_INFO:
-		if (data != sizeof(info)) {
-			error  = EINVAL;
-			break;
+#ifdef COMPAT_FREEBSD32
+		if (SV_CURPROC_FLAG(SV_ILP32)) {
+			if (data != sizeof(info32)) {
+				error = EINVAL;
+			} else {
+				info32.xsave_len = cpu_max_ext_state_size;
+				info32.xsave_mask1 = xsave_mask;
+				info32.xsave_mask2 = xsave_mask >> 32;
+				error = copyout(&info32, addr, data);
+			}
+		} else
+#endif
+		{
+			if (data != sizeof(info)) {
+				error  = EINVAL;
+			} else {
+				bzero(&info, sizeof(info));
+				info.xsave_len = cpu_max_ext_state_size;
+				info.xsave_mask = xsave_mask;
+				error = copyout(&info, addr, data);
+			}
 		}
-		info.xsave_len = cpu_max_ext_state_size;
-		info.xsave_mask = xsave_mask;
-		error = copyout(&info, addr, data);
 		break;
 
 	case PT_GETXSTATE:
@@ -110,6 +139,22 @@ cpu_ptrace_xstate(struct thread *td, int req, void *addr, int data)
 	return (error);
 }
 
+static void
+cpu_ptrace_setbase(struct thread *td, int req, register_t r)
+{
+	struct pcb *pcb;
+
+	pcb = td->td_pcb;
+	set_pcb_flags(pcb, PCB_FULL_IRET);
+	if (req == PT_SETFSBASE) {
+		pcb->pcb_fsbase = r;
+		td->td_frame->tf_fs = _ufssel;
+	} else {
+		pcb->pcb_gsbase = r;
+		td->td_frame->tf_gs = _ugssel;
+	}
+}
+
 #ifdef COMPAT_FREEBSD32
 #define PT_I386_GETXMMREGS	(PT_FIRSTMACH + 0)
 #define PT_I386_SETXMMREGS	(PT_FIRSTMACH + 1)
@@ -118,6 +163,8 @@ static int
 cpu32_ptrace(struct thread *td, int req, void *addr, int data)
 {
 	struct savefpu *fpstate;
+	struct pcb *pcb;
+	uint32_t r;
 	int error;
 
 	switch (req) {
@@ -142,6 +189,31 @@ cpu32_ptrace(struct thread *td, int req, void *addr, int data)
 		error = cpu_ptrace_xstate(td, req, addr, data);
 		break;
 
+	case PT_GETFSBASE:
+	case PT_GETGSBASE:
+		if (!SV_PROC_FLAG(td->td_proc, SV_ILP32)) {
+			error = EINVAL;
+			break;
+		}
+		pcb = td->td_pcb;
+		if (td == curthread)
+			update_pcb_bases(pcb);
+		r = req == PT_GETFSBASE ? pcb->pcb_fsbase : pcb->pcb_gsbase;
+		error = copyout(&r, addr, sizeof(r));
+		break;
+
+	case PT_SETFSBASE:
+	case PT_SETGSBASE:
+		if (!SV_PROC_FLAG(td->td_proc, SV_ILP32)) {
+			error = EINVAL;
+			break;
+		}
+		error = copyin(addr, &r, sizeof(r));
+		if (error != 0)
+			break;
+		cpu_ptrace_setbase(td, req, r);
+		break;
+
 	default:
 		error = EINVAL;
 		break;
@@ -154,6 +226,8 @@ cpu32_ptrace(struct thread *td, int req, void *addr, int data)
 int
 cpu_ptrace(struct thread *td, int req, void *addr, int data)
 {
+	register_t *r, rv;
+	struct pcb *pcb;
 	int error;
 
 #ifdef COMPAT_FREEBSD32
@@ -174,6 +248,27 @@ cpu_ptrace(struct thread *td, int req, void *addr, int data)
 	case PT_GETXSTATE:
 	case PT_SETXSTATE:
 		error = cpu_ptrace_xstate(td, req, addr, data);
+		break;
+
+	case PT_GETFSBASE:
+	case PT_GETGSBASE:
+		pcb = td->td_pcb;
+		if (td == curthread)
+			update_pcb_bases(pcb);
+		r = req == PT_GETFSBASE ? &pcb->pcb_fsbase : &pcb->pcb_gsbase;
+		error = copyout(r, addr, sizeof(*r));
+		break;
+
+	case PT_SETFSBASE:
+	case PT_SETGSBASE:
+		error = copyin(addr, &rv, sizeof(rv));
+		if (error != 0)
+			break;
+		if (rv >= td->td_proc->p_sysent->sv_maxuser) {
+			error = EINVAL;
+			break;
+		}
+		cpu_ptrace_setbase(td, req, rv);
 		break;
 
 	default:

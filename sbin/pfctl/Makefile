@@ -3,8 +3,10 @@
 .include <src.opts.mk>
 
 # pf_ruleset.c is shared between kernel and pfctl
-.PATH: ${.CURDIR}/../../sys/netpfil/pf
+.PATH: ${SRCTOP}/sys/netpfil/pf
 
+PACKAGE=pf
+CONFS=	pf.os
 PROG=	pfctl
 MAN=	pfctl.8
 
@@ -29,5 +31,8 @@ CFLAGS+= -DWITH_INET
 YFLAGS=
 
 LIBADD=	m md
+
+HAS_TESTS=
+SUBDIR.${MK_TESTS}+= tests
 
 .include <bsd.prog.mk>

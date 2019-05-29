@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2013 Anish Gupta (akgupt3@gmail.com)
  * All rights reserved.
  *
@@ -29,6 +31,7 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
 #include <sys/assym.h>
+#include <x86/specialreg.h>
 
 #include "svm.h"
 
@@ -46,3 +49,4 @@ ASSYM(SCTX_R12, offsetof(struct svm_regctx, sctx_r12));
 ASSYM(SCTX_R13, offsetof(struct svm_regctx, sctx_r13));
 ASSYM(SCTX_R14, offsetof(struct svm_regctx, sctx_r14));
 ASSYM(SCTX_R15, offsetof(struct svm_regctx, sctx_r15));
+ASSYM(MSR_GSBASE, MSR_GSBASE);

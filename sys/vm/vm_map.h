@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: (BSD-3-Clause AND MIT-CMU)
+ *
  * Copyright (c) 1991, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -13,7 +15,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 4. Neither the name of the University nor the names of its contributors
+ * 3. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -103,8 +105,7 @@ struct vm_map_entry {
 	struct vm_map_entry *right;	/* right child in binary search tree */
 	vm_offset_t start;		/* start address */
 	vm_offset_t end;		/* end address */
-	vm_offset_t avail_ssize;	/* amt can grow if this is a stack */
-	vm_size_t adj_free;		/* amount of adjacent free space */
+	vm_offset_t next_read;		/* vaddr of the next sequential read */
 	vm_size_t max_free;		/* max free space in subtree */
 	union vm_map_object object;	/* object I point to */
 	vm_ooffset_t offset;		/* offset into object */
@@ -114,7 +115,6 @@ struct vm_map_entry {
 	vm_inherit_t inheritance;	/* inheritance */
 	uint8_t read_ahead;		/* pages in the read-ahead window */
 	int wired_count;		/* can be paged if = 0 */
-	vm_pindex_t next_read;		/* index of the next sequential read */
 	struct ucred *cred;		/* tmp storage for creator ref */
 	struct thread *wiring_thread;
 };
@@ -136,12 +136,16 @@ struct vm_map_entry {
 #define MAP_ENTRY_IN_TRANSITION		0x0100	/* entry being changed */
 #define MAP_ENTRY_NEEDS_WAKEUP		0x0200	/* waiters in transition */
 #define MAP_ENTRY_NOCOREDUMP		0x0400	/* don't include in a core */
-
+#define	MAP_ENTRY_VN_EXEC		0x0800	/* text vnode mapping */
 #define	MAP_ENTRY_GROWS_DOWN		0x1000	/* Top-down stacks */
 #define	MAP_ENTRY_GROWS_UP		0x2000	/* Bottom-up stacks */
 
 #define	MAP_ENTRY_WIRE_SKIPPED		0x4000
 #define	MAP_ENTRY_VN_WRITECNT		0x8000	/* writeable vnode mapping */
+#define	MAP_ENTRY_GUARD			0x10000
+#define	MAP_ENTRY_STACK_GAP_DN		0x20000
+#define	MAP_ENTRY_STACK_GAP_UP		0x40000
+#define	MAP_ENTRY_HEADER		0x80000
 
 #ifdef	_KERNEL
 static __inline u_char
@@ -169,11 +173,20 @@ vm_map_entry_system_wired_count(vm_map_entry_t entry)
  *	A map is a set of map entries.  These map entries are
  *	organized both as a binary search tree and as a doubly-linked
  *	list.  Both structures are ordered based upon the start and
- *	end addresses contained within each map entry.  Sleator and
- *	Tarjan's top-down splay algorithm is employed to control
- *	height imbalance in the binary search tree.
+ *	end addresses contained within each map entry.
  *
- * List of locks
+ *	Sleator and Tarjan's top-down splay algorithm is employed to
+ *	control height imbalance in the binary search tree.
+ *
+ *	The map's min offset value is stored in map->header.end, and
+ *	its max offset value is stored in map->header.start.  These
+ *	values act as sentinels for any forward or backward address
+ *	scan of the list.  The map header has a special value for the
+ *	eflags field, MAP_ENTRY_HEADER, that is set initially, is
+ *	never changed, and prevents an eflags match of the header
+ *	with any other map entry.
+ *
+ *	List of locks
  *	(c)	const until freed
  */
 struct vm_map {
@@ -188,8 +201,7 @@ struct vm_map {
 	vm_flags_t flags;		/* flags for this vm_map */
 	vm_map_entry_t root;		/* Root of a binary search tree */
 	pmap_t pmap;			/* (c) Physical map */
-#define	min_offset	header.start	/* (c) */
-#define	max_offset	header.end	/* (c) */
+	vm_offset_t anon_loc;
 	int busy;
 };
 
@@ -198,18 +210,28 @@ struct vm_map {
  */
 #define MAP_WIREFUTURE		0x01	/* wire all future pages */
 #define	MAP_BUSY_WAKEUP		0x02
+#define	MAP_IS_SUB_MAP		0x04	/* has parent */
+#define	MAP_ASLR		0x08	/* enabled ASLR */
+#define	MAP_ASLR_IGNSTART	0x10
 
 #ifdef	_KERNEL
+#if defined(KLD_MODULE) && !defined(KLD_TIED)
+#define	vm_map_max(map)		vm_map_max_KBI((map))
+#define	vm_map_min(map)		vm_map_min_KBI((map))
+#define	vm_map_pmap(map)	vm_map_pmap_KBI((map))
+#else
 static __inline vm_offset_t
 vm_map_max(const struct vm_map *map)
 {
-	return (map->max_offset);
+
+	return (map->header.start);
 }
 
 static __inline vm_offset_t
 vm_map_min(const struct vm_map *map)
 {
-	return (map->min_offset);
+
+	return (map->header.end);
 }
 
 static __inline pmap_t
@@ -223,6 +245,7 @@ vm_map_modflags(vm_map_t map, vm_flags_t set, vm_flags_t clear)
 {
 	map->flags = (map->flags | set) & ~clear;
 }
+#endif	/* KLD_MODULE */
 #endif	/* _KERNEL */
 
 /*
@@ -283,6 +306,9 @@ void vm_map_wakeup(vm_map_t map);
 void vm_map_busy(vm_map_t map);
 void vm_map_unbusy(vm_map_t map);
 void vm_map_wait_busy(vm_map_t map);
+vm_offset_t vm_map_max_KBI(const struct vm_map *map);
+vm_offset_t vm_map_min_KBI(const struct vm_map *map);
+pmap_t vm_map_pmap_KBI(vm_map_t map);
 
 #define	vm_map_lock(map)	_vm_map_lock(map, LOCK_FILE, LOCK_LINE)
 #define	vm_map_unlock(map)	_vm_map_unlock(map, LOCK_FILE, LOCK_LINE)
@@ -315,20 +341,25 @@ long vmspace_resident_count(struct vmspace *vmspace);
 #define MAP_PREFAULT_PARTIAL	0x0010
 #define MAP_DISABLE_SYNCER	0x0020
 #define	MAP_CHECK_EXCL		0x0040
+#define	MAP_CREATE_GUARD	0x0080
 #define MAP_DISABLE_COREDUMP	0x0100
 #define MAP_PREFAULT_MADVISE	0x0200	/* from (user) madvise request */
 #define	MAP_VN_WRITECOUNT	0x0400
+#define	MAP_REMAP		0x0800
 #define	MAP_STACK_GROWS_DOWN	0x1000
 #define	MAP_STACK_GROWS_UP	0x2000
 #define	MAP_ACC_CHARGED		0x4000
 #define	MAP_ACC_NO_CHARGE	0x8000
+#define	MAP_CREATE_STACK_GAP_UP	0x10000
+#define	MAP_CREATE_STACK_GAP_DN	0x20000
+#define	MAP_VN_EXEC		0x40000
 
 /*
  * vm_fault option flags
  */
-#define VM_FAULT_NORMAL 0		/* Nothing special */
-#define VM_FAULT_CHANGE_WIRING 1	/* Change the wiring as appropriate */
-#define	VM_FAULT_DIRTY 2		/* Dirty the page; use w/VM_PROT_COPY */
+#define	VM_FAULT_NORMAL	0		/* Nothing special */
+#define	VM_FAULT_WIRE	1		/* Wire the mapped page */
+#define	VM_FAULT_DIRTY	2		/* Dirty the page; use w/VM_PROT_COPY */
 
 /*
  * Initially, mappings are slightly sequential.  The maximum window size must
@@ -367,9 +398,11 @@ vm_map_t vm_map_create(pmap_t, vm_offset_t, vm_offset_t);
 int vm_map_delete(vm_map_t, vm_offset_t, vm_offset_t);
 int vm_map_find(vm_map_t, vm_object_t, vm_ooffset_t, vm_offset_t *, vm_size_t,
     vm_offset_t, int, vm_prot_t, vm_prot_t, int);
+int vm_map_find_min(vm_map_t, vm_object_t, vm_ooffset_t, vm_offset_t *,
+    vm_size_t, vm_offset_t, vm_offset_t, int, vm_prot_t, vm_prot_t, int);
 int vm_map_fixed(vm_map_t, vm_object_t, vm_ooffset_t, vm_offset_t, vm_size_t,
     vm_prot_t, vm_prot_t, int);
-int vm_map_findspace (vm_map_t, vm_offset_t, vm_size_t, vm_offset_t *);
+vm_offset_t vm_map_findspace(vm_map_t, vm_offset_t, vm_size_t);
 int vm_map_inherit (vm_map_t, vm_offset_t, vm_offset_t, vm_inherit_t);
 void vm_map_init(vm_map_t, pmap_t, vm_offset_t, vm_offset_t);
 int vm_map_insert (vm_map_t, vm_object_t, vm_ooffset_t, vm_offset_t, vm_offset_t, vm_prot_t, vm_prot_t, int);
@@ -387,11 +420,12 @@ int vm_map_submap (vm_map_t, vm_offset_t, vm_offset_t, vm_map_t);
 int vm_map_sync(vm_map_t, vm_offset_t, vm_offset_t, boolean_t, boolean_t);
 int vm_map_madvise (vm_map_t, vm_offset_t, vm_offset_t, int);
 int vm_map_stack (vm_map_t, vm_offset_t, vm_size_t, vm_prot_t, vm_prot_t, int);
-int vm_map_growstack (struct proc *p, vm_offset_t addr);
 int vm_map_unwire(vm_map_t map, vm_offset_t start, vm_offset_t end,
     int flags);
-int vm_map_wire(vm_map_t map, vm_offset_t start, vm_offset_t end,
+int vm_map_wire(vm_map_t map, vm_offset_t start, vm_offset_t end, int flags);
+int vm_map_wire_locked(vm_map_t map, vm_offset_t start, vm_offset_t end,
     int flags);
 long vmspace_swap_count(struct vmspace *vmspace);
+void vm_map_entry_set_vnode_text(vm_map_entry_t entry, bool add);
 #endif				/* _KERNEL */
 #endif				/* _VM_MAP_ */

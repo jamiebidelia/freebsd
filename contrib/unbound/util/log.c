@@ -40,7 +40,7 @@
 #include "config.h"
 #include "util/log.h"
 #include "util/locks.h"
-#include "ldns/sbuffer.h"
+#include "sldns/sbuffer.h"
 #include <stdarg.h>
 #ifdef HAVE_TIME_H
 #include <time.h>
@@ -67,10 +67,10 @@ static FILE* logfile = 0;
 /** if key has been created */
 static int key_created = 0;
 /** pthread key for thread ids in logfile */
-static ub_thread_key_t logkey;
+static ub_thread_key_type logkey;
 #ifndef THREADS_DISABLED
 /** pthread mutex to protect FILE* */
-static lock_quick_t log_lock;
+static lock_quick_type log_lock;
 #endif
 /** the identity of this executable/process */
 static const char* ident="unbound";
@@ -103,8 +103,12 @@ log_init(const char* filename, int use_syslog, const char* chrootdir)
 			use_syslog?"syslog":(filename&&filename[0]?filename:"stderr"));
 		lock_quick_lock(&log_lock);
 	}
-	if(logfile && logfile != stderr)
-		fclose(logfile);
+	if(logfile && logfile != stderr) {
+		FILE* cl = logfile;
+		logfile = NULL; /* set to NULL before it is closed, so that
+			other threads have a valid logfile or NULL */
+		fclose(cl);
+	}
 #ifdef HAVE_SYSLOG_H
 	if(logging_to_syslog) {
 		closelog();
@@ -164,6 +168,14 @@ void log_thread_set(int* num)
 	ub_thread_key_set(logkey, num);
 }
 
+int log_thread_get(void)
+{
+	unsigned int* tid;
+	if(!key_created) return 0;
+	tid = (unsigned int*)ub_thread_key_get(logkey);
+	return (int)(tid?*tid:0);
+}
+
 void log_ident_set(const char* id)
 {
 	ident = id;
@@ -177,6 +189,17 @@ void log_set_time(time_t* t)
 void log_set_time_asc(int use_asc)
 {
 	log_time_asc = use_asc;
+}
+
+void* log_get_lock(void)
+{
+	if(!key_created)
+		return NULL;
+#ifndef THREADS_DISABLED
+	return (void*)&log_lock;
+#else
+	return NULL;
+#endif
 }
 
 void

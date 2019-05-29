@@ -23,12 +23,12 @@
 
 /*
  * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
- * Copyright (c) 2012 by Delphix. All rights reserved.
  * Use is subject to license terms.
  */
 
 /*
- * Copyright (c) 2011, Joyent, Inc. All rights reserved.
+ * Copyright 2016 Joyent, Inc.
+ * Copyright (c) 2012 by Delphix. All rights reserved.
  */
 
 #ifndef _SYS_DTRACE_IMPL_H
@@ -50,6 +50,7 @@ extern "C" {
  */
 
 #include <sys/dtrace.h>
+
 #ifndef illumos
 #ifdef __sparcv9
 typedef uint32_t		pc_t;
@@ -64,6 +65,10 @@ typedef	u_long			greg_t;
  */
 #define	DTRACE_MAXPROPLEN		128
 #define	DTRACE_DYNVAR_CHUNKSIZE		256
+
+#ifdef __FreeBSD__
+#define	NCPU		MAXCPU
+#endif /* __FreeBSD__ */
 
 struct dtrace_probe;
 struct dtrace_ecb;
@@ -932,6 +937,7 @@ typedef struct dtrace_mstate {
 	int dtms_ipl;				/* cached interrupt pri lev */
 	int dtms_fltoffs;			/* faulting DIFO offset */
 	uintptr_t dtms_strtok;			/* saved strtok() pointer */
+	uintptr_t dtms_strtok_limit;		/* upper bound of strtok ptr */
 	uint32_t dtms_access;			/* memory access rights */
 	dtrace_difo_t *dtms_difo;		/* current dif object */
 	file_t *dtms_getf;			/* cached rval of getf() */
@@ -1168,6 +1174,7 @@ struct dtrace_state {
 	dtrace_cred_t dts_cred;			/* credentials */
 	size_t dts_nretained;			/* number of retained enabs */
 	int dts_getf;				/* number of getf() calls */
+	uint64_t dts_rstate[NCPU][2];		/* per-CPU random state */
 };
 
 struct dtrace_provider {
@@ -1317,16 +1324,19 @@ extern void dtrace_copystr(uintptr_t, uintptr_t, size_t, volatile uint16_t *);
 /*
  * DTrace Assertions
  *
- * DTrace calls ASSERT from probe context.  To assure that a failed ASSERT
- * does not induce a markedly more catastrophic failure (e.g., one from which
- * a dump cannot be gleaned), DTrace must define its own ASSERT to be one that
- * may safely be called from probe context.  This header file must thus be
- * included by any DTrace component that calls ASSERT from probe context, and
- * _only_ by those components.  (The only exception to this is kernel
- * debugging infrastructure at user-level that doesn't depend on calling
- * ASSERT.)
+ * DTrace calls ASSERT and VERIFY from probe context.  To assure that a failed
+ * ASSERT or VERIFY does not induce a markedly more catastrophic failure (e.g.,
+ * one from which a dump cannot be gleaned), DTrace must define its own ASSERT
+ * and VERIFY macros to be ones that may safely be called from probe context.
+ * This header file must thus be included by any DTrace component that calls
+ * ASSERT and/or VERIFY from probe context, and _only_ by those components.
+ * (The only exception to this is kernel debugging infrastructure at user-level
+ * that doesn't depend on calling ASSERT.)
  */
 #undef ASSERT
+#undef VERIFY
+#define	VERIFY(EX)	((void)((EX) || \
+			dtrace_assfail(#EX, __FILE__, __LINE__)))
 #ifdef DEBUG
 #define	ASSERT(EX)	((void)((EX) || \
 			dtrace_assfail(#EX, __FILE__, __LINE__)))

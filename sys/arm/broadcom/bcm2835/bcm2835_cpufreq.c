@@ -44,6 +44,9 @@ __FBSDID("$FreeBSD$");
 #include <machine/cpu.h>
 #include <machine/intr.h>
 
+#include <dev/ofw/ofw_bus.h>
+#include <dev/ofw/ofw_bus_subr.h>
+
 #include <arm/broadcom/bcm2835/bcm2835_mbox.h>
 #include <arm/broadcom/bcm2835/bcm2835_mbox_prop.h>
 #include <arm/broadcom/bcm2835/bcm2835_vcbus.h>
@@ -63,16 +66,16 @@ __FBSDID("$FreeBSD$");
 #define	HZ2MHZ(freq) ((freq) / (1000 * 1000))
 #define	MHZ2HZ(freq) ((freq) * (1000 * 1000))
 
-#ifdef SOC_BCM2836
-#define	OFFSET2MVOLT(val) (((val) / 1000))
-#define	MVOLT2OFFSET(val) (((val) * 1000))
-#define	DEFAULT_ARM_FREQUENCY	 600
-#define	DEFAULT_LOWEST_FREQ	 600
-#else
+#ifdef SOC_BCM2835
 #define	OFFSET2MVOLT(val) (1200 + ((val) * 25))
 #define	MVOLT2OFFSET(val) (((val) - 1200) / 25)
 #define	DEFAULT_ARM_FREQUENCY	 700
 #define	DEFAULT_LOWEST_FREQ	 300
+#else
+#define	OFFSET2MVOLT(val) (((val) / 1000))
+#define	MVOLT2OFFSET(val) (((val) * 1000))
+#define	DEFAULT_ARM_FREQUENCY	 600
+#define	DEFAULT_LOWEST_FREQ	 600
 #endif
 #define	DEFAULT_CORE_FREQUENCY	 250
 #define	DEFAULT_SDRAM_FREQUENCY	 400
@@ -82,7 +85,7 @@ __FBSDID("$FreeBSD$");
 #define	MSG_ERROR	  -999999999
 #define	MHZSTEP			 100
 #define	HZSTEP	   (MHZ2HZ(MHZSTEP))
-#define	TZ_ZEROC		2732
+#define	TZ_ZEROC		2731
 
 #define VC_LOCK(sc) do {			\
 		sema_wait(&vc_sema);		\
@@ -115,15 +118,18 @@ struct bcm2835_cpufreq_softc {
 	int		voltage_sdram_p;
 	int		turbo_mode;
 
-	/* mbox buffer (physical address) */
-	bus_dma_tag_t	dma_tag;
-	bus_dmamap_t	dma_map;
-	bus_size_t	dma_size;
-	void		*dma_buf;
-	bus_addr_t	dma_phys;
-
 	/* initial hook for waiting mbox intr */
 	struct intr_config_hook	init_hook;
+};
+
+static struct ofw_compat_data compat_data[] = {
+	{ "broadcom,bcm2835-vc",	1 },
+	{ "broadcom,bcm2708-vc",	1 },
+	{ "brcm,bcm2709",	1 },
+	{ "brcm,bcm2835",	1 },
+	{ "brcm,bcm2836",	1 },
+	{ "brcm,bcm2837",	1 },
+	{ NULL, 0 }
 };
 
 static int cpufreq_verbose = 0;
@@ -151,84 +157,10 @@ bcm2835_dump(const void *data, int len)
 #endif
 
 static int
-bcm2835_mbox_call_prop(struct bcm2835_cpufreq_softc *sc)
-{
-	struct bcm2835_mbox_hdr *msg = (struct bcm2835_mbox_hdr *)sc->dma_buf;
-	struct bcm2835_mbox_tag_hdr *tag, *last;
-	uint8_t *up;
-	device_t mbox;
-	size_t hdr_size;
-	int idx;
-	int err;
-
-	/*
-	 * For multiple calls, locking is not here. The caller must have
-	 * VC semaphore.
-	 */
-
-	/* get mbox device */
-	mbox = devclass_get_device(devclass_find("mbox"), 0);
-	if (mbox == NULL) {
-		device_printf(sc->dev, "can't find mbox\n");
-		return (-1);
-	}
-
-	/* go mailbox property */
-#ifdef PROP_DEBUG
-	bcm2835_dump(msg, 64);
-#endif
-	bus_dmamap_sync(sc->dma_tag, sc->dma_map,
-	    BUS_DMASYNC_PREWRITE | BUS_DMASYNC_PREREAD);
-	MBOX_WRITE(mbox, BCM2835_MBOX_CHAN_PROP, (uint32_t)sc->dma_phys);
-	MBOX_READ(mbox, BCM2835_MBOX_CHAN_PROP, &err);
-	bus_dmamap_sync(sc->dma_tag, sc->dma_map, BUS_DMASYNC_POSTREAD);
-#ifdef PROP_DEBUG
-	bcm2835_dump(msg, 64);
-#endif
-
-	/* check response code */
-	if (msg->code != BCM2835_MBOX_CODE_RESP_SUCCESS) {
-		device_printf(sc->dev, "mbox response error\n");
-		return (-1);
-	}
-
-	/* tag = first tag */
-	up = (uint8_t *)msg;
-	hdr_size = sizeof(struct bcm2835_mbox_hdr);
-	tag = (struct bcm2835_mbox_tag_hdr *)(up + hdr_size);
-	/* last = end of buffer specified by header */
-	last = (struct bcm2835_mbox_tag_hdr *)(up + msg->buf_size);
-
-	/* loop unitl end tag (=0x0) */
-	hdr_size = sizeof(struct bcm2835_mbox_tag_hdr);
-	for (idx = 0; tag->tag != 0; idx++) {
-		if ((tag->val_len & BCM2835_MBOX_TAG_VAL_LEN_RESPONSE) == 0) {
-			device_printf(sc->dev, "tag%d response error\n", idx);
-			return (-1);
-		}
-		/* clear response bit */
-		tag->val_len &= ~BCM2835_MBOX_TAG_VAL_LEN_RESPONSE;
-
-		/* get next tag */
-		up = (uint8_t *)tag;
-		tag = (struct bcm2835_mbox_tag_hdr *)(up + hdr_size +
-		    tag->val_buf_size);
-
-		/* check buffer size of header */
-		if (tag > last) {
-			device_printf(sc->dev, "mbox buffer size error\n");
-			return (-1);
-		}
-	}
-
-	return (0);
-}
-
-static int
 bcm2835_cpufreq_get_clock_rate(struct bcm2835_cpufreq_softc *sc,
     uint32_t clock_id)
 {
-	struct msg_get_clock_rate *msg;
+	struct msg_get_clock_rate msg;
 	int rate;
 	int err;
 
@@ -246,26 +178,18 @@ bcm2835_cpufreq_get_clock_rate(struct bcm2835_cpufreq_softc *sc,
 	 *       u32: rate (in Hz)
 	 */
 
-	/* using DMA buffer for VC */
-	msg = (struct msg_get_clock_rate *)sc->dma_buf;
-	if (sizeof(*msg) > sc->dma_size) {
-		device_printf(sc->dev, "DMA size overflow (%zu>%lu)\n",
-		    sizeof(*msg), sc->dma_size);
-		return (MSG_ERROR);
-	}
-
 	/* setup single tag buffer */
-	memset(msg, 0, sizeof(*msg));
-	msg->hdr.buf_size = sizeof(*msg);
-	msg->hdr.code = BCM2835_MBOX_CODE_REQ;
-	msg->tag_hdr.tag = BCM2835_MBOX_TAG_GET_CLOCK_RATE;
-	msg->tag_hdr.val_buf_size = sizeof(msg->body);
-	msg->tag_hdr.val_len = sizeof(msg->body.req);
-	msg->body.req.clock_id = clock_id;
-	msg->end_tag = 0;
+	memset(&msg, 0, sizeof(msg));
+	msg.hdr.buf_size = sizeof(msg);
+	msg.hdr.code = BCM2835_MBOX_CODE_REQ;
+	msg.tag_hdr.tag = BCM2835_MBOX_TAG_GET_CLOCK_RATE;
+	msg.tag_hdr.val_buf_size = sizeof(msg.body);
+	msg.tag_hdr.val_len = sizeof(msg.body.req);
+	msg.body.req.clock_id = clock_id;
+	msg.end_tag = 0;
 
 	/* call mailbox property */
-	err = bcm2835_mbox_call_prop(sc);
+	err = bcm2835_mbox_property(&msg, sizeof(msg));
 	if (err) {
 		device_printf(sc->dev, "can't get clock rate (id=%u)\n",
 		    clock_id);
@@ -273,7 +197,7 @@ bcm2835_cpufreq_get_clock_rate(struct bcm2835_cpufreq_softc *sc,
 	}
 
 	/* result (Hz) */
-	rate = (int)msg->body.resp.rate_hz;
+	rate = (int)msg.body.resp.rate_hz;
 	DPRINTF("clock = %d(Hz)\n", rate);
 	return (rate);
 }
@@ -282,7 +206,7 @@ static int
 bcm2835_cpufreq_get_max_clock_rate(struct bcm2835_cpufreq_softc *sc,
     uint32_t clock_id)
 {
-	struct msg_get_max_clock_rate *msg;
+	struct msg_get_max_clock_rate msg;
 	int rate;
 	int err;
 
@@ -300,26 +224,18 @@ bcm2835_cpufreq_get_max_clock_rate(struct bcm2835_cpufreq_softc *sc,
 	 *       u32: rate (in Hz)
 	 */
 
-	/* using DMA buffer for VC */
-	msg = (struct msg_get_max_clock_rate *)sc->dma_buf;
-	if (sizeof(*msg) > sc->dma_size) {
-		device_printf(sc->dev, "DMA size overflow (%zu>%lu)\n",
-		    sizeof(*msg), sc->dma_size);
-		return (MSG_ERROR);
-	}
-
 	/* setup single tag buffer */
-	memset(msg, 0, sizeof(*msg));
-	msg->hdr.buf_size = sizeof(*msg);
-	msg->hdr.code = BCM2835_MBOX_CODE_REQ;
-	msg->tag_hdr.tag = BCM2835_MBOX_TAG_GET_MAX_CLOCK_RATE;
-	msg->tag_hdr.val_buf_size = sizeof(msg->body);
-	msg->tag_hdr.val_len = sizeof(msg->body.req);
-	msg->body.req.clock_id = clock_id;
-	msg->end_tag = 0;
+	memset(&msg, 0, sizeof(msg));
+	msg.hdr.buf_size = sizeof(msg);
+	msg.hdr.code = BCM2835_MBOX_CODE_REQ;
+	msg.tag_hdr.tag = BCM2835_MBOX_TAG_GET_MAX_CLOCK_RATE;
+	msg.tag_hdr.val_buf_size = sizeof(msg.body);
+	msg.tag_hdr.val_len = sizeof(msg.body.req);
+	msg.body.req.clock_id = clock_id;
+	msg.end_tag = 0;
 
 	/* call mailbox property */
-	err = bcm2835_mbox_call_prop(sc);
+	err = bcm2835_mbox_property(&msg, sizeof(msg));
 	if (err) {
 		device_printf(sc->dev, "can't get max clock rate (id=%u)\n",
 		    clock_id);
@@ -327,7 +243,7 @@ bcm2835_cpufreq_get_max_clock_rate(struct bcm2835_cpufreq_softc *sc,
 	}
 
 	/* result (Hz) */
-	rate = (int)msg->body.resp.rate_hz;
+	rate = (int)msg.body.resp.rate_hz;
 	DPRINTF("clock = %d(Hz)\n", rate);
 	return (rate);
 }
@@ -336,7 +252,7 @@ static int
 bcm2835_cpufreq_get_min_clock_rate(struct bcm2835_cpufreq_softc *sc,
     uint32_t clock_id)
 {
-	struct msg_get_min_clock_rate *msg;
+	struct msg_get_min_clock_rate msg;
 	int rate;
 	int err;
 
@@ -354,26 +270,18 @@ bcm2835_cpufreq_get_min_clock_rate(struct bcm2835_cpufreq_softc *sc,
 	 *       u32: rate (in Hz)
 	 */
 
-	/* using DMA buffer for VC */
-	msg = (struct msg_get_min_clock_rate *)sc->dma_buf;
-	if (sizeof(*msg) > sc->dma_size) {
-		device_printf(sc->dev, "DMA size overflow (%zu>%lu)\n",
-		    sizeof(*msg), sc->dma_size);
-		return (MSG_ERROR);
-	}
-
 	/* setup single tag buffer */
-	memset(msg, 0, sizeof(*msg));
-	msg->hdr.buf_size = sizeof(*msg);
-	msg->hdr.code = BCM2835_MBOX_CODE_REQ;
-	msg->tag_hdr.tag = BCM2835_MBOX_TAG_GET_MIN_CLOCK_RATE;
-	msg->tag_hdr.val_buf_size = sizeof(msg->body);
-	msg->tag_hdr.val_len = sizeof(msg->body.req);
-	msg->body.req.clock_id = clock_id;
-	msg->end_tag = 0;
+	memset(&msg, 0, sizeof(msg));
+	msg.hdr.buf_size = sizeof(msg);
+	msg.hdr.code = BCM2835_MBOX_CODE_REQ;
+	msg.tag_hdr.tag = BCM2835_MBOX_TAG_GET_MIN_CLOCK_RATE;
+	msg.tag_hdr.val_buf_size = sizeof(msg.body);
+	msg.tag_hdr.val_len = sizeof(msg.body.req);
+	msg.body.req.clock_id = clock_id;
+	msg.end_tag = 0;
 
 	/* call mailbox property */
-	err = bcm2835_mbox_call_prop(sc);
+	err = bcm2835_mbox_property(&msg, sizeof(msg));
 	if (err) {
 		device_printf(sc->dev, "can't get min clock rate (id=%u)\n",
 		    clock_id);
@@ -381,7 +289,7 @@ bcm2835_cpufreq_get_min_clock_rate(struct bcm2835_cpufreq_softc *sc,
 	}
 
 	/* result (Hz) */
-	rate = (int)msg->body.resp.rate_hz;
+	rate = (int)msg.body.resp.rate_hz;
 	DPRINTF("clock = %d(Hz)\n", rate);
 	return (rate);
 }
@@ -390,7 +298,7 @@ static int
 bcm2835_cpufreq_set_clock_rate(struct bcm2835_cpufreq_softc *sc,
     uint32_t clock_id, uint32_t rate_hz)
 {
-	struct msg_set_clock_rate *msg;
+	struct msg_set_clock_rate msg;
 	int rate;
 	int err;
 
@@ -409,27 +317,19 @@ bcm2835_cpufreq_set_clock_rate(struct bcm2835_cpufreq_softc *sc,
 	 *       u32: rate (in Hz)
 	 */
 
-	/* using DMA buffer for VC */
-	msg = (struct msg_set_clock_rate *)sc->dma_buf;
-	if (sizeof(*msg) > sc->dma_size) {
-		device_printf(sc->dev, "DMA size overflow (%zu>%lu)\n",
-		    sizeof(*msg), sc->dma_size);
-		return (MSG_ERROR);
-	}
-
 	/* setup single tag buffer */
-	memset(msg, 0, sizeof(*msg));
-	msg->hdr.buf_size = sizeof(*msg);
-	msg->hdr.code = BCM2835_MBOX_CODE_REQ;
-	msg->tag_hdr.tag = BCM2835_MBOX_TAG_SET_CLOCK_RATE;
-	msg->tag_hdr.val_buf_size = sizeof(msg->body);
-	msg->tag_hdr.val_len = sizeof(msg->body.req);
-	msg->body.req.clock_id = clock_id;
-	msg->body.req.rate_hz = rate_hz;
-	msg->end_tag = 0;
+	memset(&msg, 0, sizeof(msg));
+	msg.hdr.buf_size = sizeof(msg);
+	msg.hdr.code = BCM2835_MBOX_CODE_REQ;
+	msg.tag_hdr.tag = BCM2835_MBOX_TAG_SET_CLOCK_RATE;
+	msg.tag_hdr.val_buf_size = sizeof(msg.body);
+	msg.tag_hdr.val_len = sizeof(msg.body.req);
+	msg.body.req.clock_id = clock_id;
+	msg.body.req.rate_hz = rate_hz;
+	msg.end_tag = 0;
 
 	/* call mailbox property */
-	err = bcm2835_mbox_call_prop(sc);
+	err = bcm2835_mbox_property(&msg, sizeof(msg));
 	if (err) {
 		device_printf(sc->dev, "can't set clock rate (id=%u)\n",
 		    clock_id);
@@ -447,18 +347,18 @@ bcm2835_cpufreq_set_clock_rate(struct bcm2835_cpufreq_softc *sc,
 		 */
 
 		/* setup single tag buffer */
-		memset(msg, 0, sizeof(*msg));
-		msg->hdr.buf_size = sizeof(*msg);
-		msg->hdr.code = BCM2835_MBOX_CODE_REQ;
-		msg->tag_hdr.tag = BCM2835_MBOX_TAG_SET_CLOCK_RATE;
-		msg->tag_hdr.val_buf_size = sizeof(msg->body);
-		msg->tag_hdr.val_len = sizeof(msg->body.req);
-		msg->body.req.clock_id = clock_id;
-		msg->body.req.rate_hz = rate_hz;
-		msg->end_tag = 0;
+		memset(&msg, 0, sizeof(msg));
+		msg.hdr.buf_size = sizeof(msg);
+		msg.hdr.code = BCM2835_MBOX_CODE_REQ;
+		msg.tag_hdr.tag = BCM2835_MBOX_TAG_SET_CLOCK_RATE;
+		msg.tag_hdr.val_buf_size = sizeof(msg.body);
+		msg.tag_hdr.val_len = sizeof(msg.body.req);
+		msg.body.req.clock_id = clock_id;
+		msg.body.req.rate_hz = rate_hz;
+		msg.end_tag = 0;
 
 		/* call mailbox property */
-		err = bcm2835_mbox_call_prop(sc);
+		err = bcm2835_mbox_property(&msg, sizeof(msg));
 		if (err) {
 			device_printf(sc->dev,
 			    "can't set clock rate (id=%u)\n", clock_id);
@@ -467,7 +367,7 @@ bcm2835_cpufreq_set_clock_rate(struct bcm2835_cpufreq_softc *sc,
 	}
 
 	/* result (Hz) */
-	rate = (int)msg->body.resp.rate_hz;
+	rate = (int)msg.body.resp.rate_hz;
 	DPRINTF("clock = %d(Hz)\n", rate);
 	return (rate);
 }
@@ -475,7 +375,7 @@ bcm2835_cpufreq_set_clock_rate(struct bcm2835_cpufreq_softc *sc,
 static int
 bcm2835_cpufreq_get_turbo(struct bcm2835_cpufreq_softc *sc)
 {
-	struct msg_get_turbo *msg;
+	struct msg_get_turbo msg;
 	int level;
 	int err;
 
@@ -493,33 +393,25 @@ bcm2835_cpufreq_get_turbo(struct bcm2835_cpufreq_softc *sc)
 	 *       u32: level
 	 */
 
-	/* using DMA buffer for VC */
-	msg = (struct msg_get_turbo *)sc->dma_buf;
-	if (sizeof(*msg) > sc->dma_size) {
-		device_printf(sc->dev, "DMA size overflow (%zu>%lu)\n",
-		    sizeof(*msg), sc->dma_size);
-		return (MSG_ERROR);
-	}
-
 	/* setup single tag buffer */
-	memset(msg, 0, sizeof(*msg));
-	msg->hdr.buf_size = sizeof(*msg);
-	msg->hdr.code = BCM2835_MBOX_CODE_REQ;
-	msg->tag_hdr.tag = BCM2835_MBOX_TAG_GET_TURBO;
-	msg->tag_hdr.val_buf_size = sizeof(msg->body);
-	msg->tag_hdr.val_len = sizeof(msg->body.req);
-	msg->body.req.id = 0;
-	msg->end_tag = 0;
+	memset(&msg, 0, sizeof(msg));
+	msg.hdr.buf_size = sizeof(msg);
+	msg.hdr.code = BCM2835_MBOX_CODE_REQ;
+	msg.tag_hdr.tag = BCM2835_MBOX_TAG_GET_TURBO;
+	msg.tag_hdr.val_buf_size = sizeof(msg.body);
+	msg.tag_hdr.val_len = sizeof(msg.body.req);
+	msg.body.req.id = 0;
+	msg.end_tag = 0;
 
 	/* call mailbox property */
-	err = bcm2835_mbox_call_prop(sc);
+	err = bcm2835_mbox_property(&msg, sizeof(msg));
 	if (err) {
 		device_printf(sc->dev, "can't get turbo\n");
 		return (MSG_ERROR);
 	}
 
 	/* result 0=non-turbo, 1=turbo */
-	level = (int)msg->body.resp.level;
+	level = (int)msg.body.resp.level;
 	DPRINTF("level = %d\n", level);
 	return (level);
 }
@@ -527,7 +419,7 @@ bcm2835_cpufreq_get_turbo(struct bcm2835_cpufreq_softc *sc)
 static int
 bcm2835_cpufreq_set_turbo(struct bcm2835_cpufreq_softc *sc, uint32_t level)
 {
-	struct msg_set_turbo *msg;
+	struct msg_set_turbo msg;
 	int value;
 	int err;
 
@@ -546,38 +438,30 @@ bcm2835_cpufreq_set_turbo(struct bcm2835_cpufreq_softc *sc, uint32_t level)
 	 *       u32: level
 	 */
 
-	/* using DMA buffer for VC */
-	msg = (struct msg_set_turbo *)sc->dma_buf;
-	if (sizeof(*msg) > sc->dma_size) {
-		device_printf(sc->dev, "DMA size overflow (%zu>%lu)\n",
-		    sizeof(*msg), sc->dma_size);
-		return (MSG_ERROR);
-	}
-
 	/* replace unknown value to OFF */
 	if (level != BCM2835_MBOX_TURBO_ON && level != BCM2835_MBOX_TURBO_OFF)
 		level = BCM2835_MBOX_TURBO_OFF;
 
 	/* setup single tag buffer */
-	memset(msg, 0, sizeof(*msg));
-	msg->hdr.buf_size = sizeof(*msg);
-	msg->hdr.code = BCM2835_MBOX_CODE_REQ;
-	msg->tag_hdr.tag = BCM2835_MBOX_TAG_SET_TURBO;
-	msg->tag_hdr.val_buf_size = sizeof(msg->body);
-	msg->tag_hdr.val_len = sizeof(msg->body.req);
-	msg->body.req.id = 0;
-	msg->body.req.level = level;
-	msg->end_tag = 0;
+	memset(&msg, 0, sizeof(msg));
+	msg.hdr.buf_size = sizeof(msg);
+	msg.hdr.code = BCM2835_MBOX_CODE_REQ;
+	msg.tag_hdr.tag = BCM2835_MBOX_TAG_SET_TURBO;
+	msg.tag_hdr.val_buf_size = sizeof(msg.body);
+	msg.tag_hdr.val_len = sizeof(msg.body.req);
+	msg.body.req.id = 0;
+	msg.body.req.level = level;
+	msg.end_tag = 0;
 
 	/* call mailbox property */
-	err = bcm2835_mbox_call_prop(sc);
+	err = bcm2835_mbox_property(&msg, sizeof(msg));
 	if (err) {
 		device_printf(sc->dev, "can't set turbo\n");
 		return (MSG_ERROR);
 	}
 
 	/* result 0=non-turbo, 1=turbo */
-	value = (int)msg->body.resp.level;
+	value = (int)msg.body.resp.level;
 	DPRINTF("level = %d\n", value);
 	return (value);
 }
@@ -586,7 +470,7 @@ static int
 bcm2835_cpufreq_get_voltage(struct bcm2835_cpufreq_softc *sc,
     uint32_t voltage_id)
 {
-	struct msg_get_voltage *msg;
+	struct msg_get_voltage msg;
 	int value;
 	int err;
 
@@ -604,33 +488,25 @@ bcm2835_cpufreq_get_voltage(struct bcm2835_cpufreq_softc *sc,
 	 *       u32: value (offset from 1.2V in units of 0.025V)
 	 */
 
-	/* using DMA buffer for VC */
-	msg = (struct msg_get_voltage *)sc->dma_buf;
-	if (sizeof(*msg) > sc->dma_size) {
-		device_printf(sc->dev, "DMA size overflow (%zu>%lu)\n",
-		    sizeof(*msg), sc->dma_size);
-		return (MSG_ERROR);
-	}
-
 	/* setup single tag buffer */
-	memset(msg, 0, sizeof(*msg));
-	msg->hdr.buf_size = sizeof(*msg);
-	msg->hdr.code = BCM2835_MBOX_CODE_REQ;
-	msg->tag_hdr.tag = BCM2835_MBOX_TAG_GET_VOLTAGE;
-	msg->tag_hdr.val_buf_size = sizeof(msg->body);
-	msg->tag_hdr.val_len = sizeof(msg->body.req);
-	msg->body.req.voltage_id = voltage_id;
-	msg->end_tag = 0;
+	memset(&msg, 0, sizeof(msg));
+	msg.hdr.buf_size = sizeof(msg);
+	msg.hdr.code = BCM2835_MBOX_CODE_REQ;
+	msg.tag_hdr.tag = BCM2835_MBOX_TAG_GET_VOLTAGE;
+	msg.tag_hdr.val_buf_size = sizeof(msg.body);
+	msg.tag_hdr.val_len = sizeof(msg.body.req);
+	msg.body.req.voltage_id = voltage_id;
+	msg.end_tag = 0;
 
 	/* call mailbox property */
-	err = bcm2835_mbox_call_prop(sc);
+	err = bcm2835_mbox_property(&msg, sizeof(msg));
 	if (err) {
 		device_printf(sc->dev, "can't get voltage\n");
 		return (MSG_ERROR);
 	}
 
 	/* result (offset from 1.2V) */
-	value = (int)msg->body.resp.value;
+	value = (int)msg.body.resp.value;
 	DPRINTF("value = %d\n", value);
 	return (value);
 }
@@ -639,7 +515,7 @@ static int
 bcm2835_cpufreq_get_max_voltage(struct bcm2835_cpufreq_softc *sc,
     uint32_t voltage_id)
 {
-	struct msg_get_max_voltage *msg;
+	struct msg_get_max_voltage msg;
 	int value;
 	int err;
 
@@ -657,33 +533,25 @@ bcm2835_cpufreq_get_max_voltage(struct bcm2835_cpufreq_softc *sc,
 	 *       u32: value (offset from 1.2V in units of 0.025V)
 	 */
 
-	/* using DMA buffer for VC */
-	msg = (struct msg_get_max_voltage *)sc->dma_buf;
-	if (sizeof(*msg) > sc->dma_size) {
-		device_printf(sc->dev, "DMA size overflow (%zu>%lu)\n",
-		    sizeof(*msg), sc->dma_size);
-		return (MSG_ERROR);
-	}
-
 	/* setup single tag buffer */
-	memset(msg, 0, sizeof(*msg));
-	msg->hdr.buf_size = sizeof(*msg);
-	msg->hdr.code = BCM2835_MBOX_CODE_REQ;
-	msg->tag_hdr.tag = BCM2835_MBOX_TAG_GET_MAX_VOLTAGE;
-	msg->tag_hdr.val_buf_size = sizeof(msg->body);
-	msg->tag_hdr.val_len = sizeof(msg->body.req);
-	msg->body.req.voltage_id = voltage_id;
-	msg->end_tag = 0;
+	memset(&msg, 0, sizeof(msg));
+	msg.hdr.buf_size = sizeof(msg);
+	msg.hdr.code = BCM2835_MBOX_CODE_REQ;
+	msg.tag_hdr.tag = BCM2835_MBOX_TAG_GET_MAX_VOLTAGE;
+	msg.tag_hdr.val_buf_size = sizeof(msg.body);
+	msg.tag_hdr.val_len = sizeof(msg.body.req);
+	msg.body.req.voltage_id = voltage_id;
+	msg.end_tag = 0;
 
 	/* call mailbox property */
-	err = bcm2835_mbox_call_prop(sc);
+	err = bcm2835_mbox_property(&msg, sizeof(msg));
 	if (err) {
 		device_printf(sc->dev, "can't get max voltage\n");
 		return (MSG_ERROR);
 	}
 
 	/* result (offset from 1.2V) */
-	value = (int)msg->body.resp.value;
+	value = (int)msg.body.resp.value;
 	DPRINTF("value = %d\n", value);
 	return (value);
 }
@@ -691,7 +559,7 @@ static int
 bcm2835_cpufreq_get_min_voltage(struct bcm2835_cpufreq_softc *sc,
     uint32_t voltage_id)
 {
-	struct msg_get_min_voltage *msg;
+	struct msg_get_min_voltage msg;
 	int value;
 	int err;
 
@@ -709,33 +577,25 @@ bcm2835_cpufreq_get_min_voltage(struct bcm2835_cpufreq_softc *sc,
 	 *       u32: value (offset from 1.2V in units of 0.025V)
 	 */
 
-	/* using DMA buffer for VC */
-	msg = (struct msg_get_min_voltage *)sc->dma_buf;
-	if (sizeof(*msg) > sc->dma_size) {
-		device_printf(sc->dev, "DMA size overflow (%zu>%lu)\n",
-		    sizeof(*msg), sc->dma_size);
-		return (MSG_ERROR);
-	}
-
 	/* setup single tag buffer */
-	memset(msg, 0, sizeof(*msg));
-	msg->hdr.buf_size = sizeof(*msg);
-	msg->hdr.code = BCM2835_MBOX_CODE_REQ;
-	msg->tag_hdr.tag = BCM2835_MBOX_TAG_GET_MIN_VOLTAGE;
-	msg->tag_hdr.val_buf_size = sizeof(msg->body);
-	msg->tag_hdr.val_len = sizeof(msg->body.req);
-	msg->body.req.voltage_id = voltage_id;
-	msg->end_tag = 0;
+	memset(&msg, 0, sizeof(msg));
+	msg.hdr.buf_size = sizeof(msg);
+	msg.hdr.code = BCM2835_MBOX_CODE_REQ;
+	msg.tag_hdr.tag = BCM2835_MBOX_TAG_GET_MIN_VOLTAGE;
+	msg.tag_hdr.val_buf_size = sizeof(msg.body);
+	msg.tag_hdr.val_len = sizeof(msg.body.req);
+	msg.body.req.voltage_id = voltage_id;
+	msg.end_tag = 0;
 
 	/* call mailbox property */
-	err = bcm2835_mbox_call_prop(sc);
+	err = bcm2835_mbox_property(&msg, sizeof(msg));
 	if (err) {
 		device_printf(sc->dev, "can't get min voltage\n");
 		return (MSG_ERROR);
 	}
 
 	/* result (offset from 1.2V) */
-	value = (int)msg->body.resp.value;
+	value = (int)msg.body.resp.value;
 	DPRINTF("value = %d\n", value);
 	return (value);
 }
@@ -744,7 +604,7 @@ static int
 bcm2835_cpufreq_set_voltage(struct bcm2835_cpufreq_softc *sc,
     uint32_t voltage_id, int32_t value)
 {
-	struct msg_set_voltage *msg;
+	struct msg_set_voltage msg;
 	int err;
 
 	/*
@@ -773,34 +633,26 @@ bcm2835_cpufreq_set_voltage(struct bcm2835_cpufreq_softc *sc,
 		return (MSG_ERROR);
 	}
 
-	/* using DMA buffer for VC */
-	msg = (struct msg_set_voltage *)sc->dma_buf;
-	if (sizeof(*msg) > sc->dma_size) {
-		device_printf(sc->dev, "DMA size overflow (%zu>%lu)\n",
-		    sizeof(*msg), sc->dma_size);
-		return (MSG_ERROR);
-	}
-
 	/* setup single tag buffer */
-	memset(msg, 0, sizeof(*msg));
-	msg->hdr.buf_size = sizeof(*msg);
-	msg->hdr.code = BCM2835_MBOX_CODE_REQ;
-	msg->tag_hdr.tag = BCM2835_MBOX_TAG_SET_VOLTAGE;
-	msg->tag_hdr.val_buf_size = sizeof(msg->body);
-	msg->tag_hdr.val_len = sizeof(msg->body.req);
-	msg->body.req.voltage_id = voltage_id;
-	msg->body.req.value = (uint32_t)value;
-	msg->end_tag = 0;
+	memset(&msg, 0, sizeof(msg));
+	msg.hdr.buf_size = sizeof(msg);
+	msg.hdr.code = BCM2835_MBOX_CODE_REQ;
+	msg.tag_hdr.tag = BCM2835_MBOX_TAG_SET_VOLTAGE;
+	msg.tag_hdr.val_buf_size = sizeof(msg.body);
+	msg.tag_hdr.val_len = sizeof(msg.body.req);
+	msg.body.req.voltage_id = voltage_id;
+	msg.body.req.value = (uint32_t)value;
+	msg.end_tag = 0;
 
 	/* call mailbox property */
-	err = bcm2835_mbox_call_prop(sc);
+	err = bcm2835_mbox_property(&msg, sizeof(msg));
 	if (err) {
 		device_printf(sc->dev, "can't set voltage\n");
 		return (MSG_ERROR);
 	}
 
 	/* result (offset from 1.2V) */
-	value = (int)msg->body.resp.value;
+	value = (int)msg.body.resp.value;
 	DPRINTF("value = %d\n", value);
 	return (value);
 }
@@ -808,7 +660,7 @@ bcm2835_cpufreq_set_voltage(struct bcm2835_cpufreq_softc *sc,
 static int
 bcm2835_cpufreq_get_temperature(struct bcm2835_cpufreq_softc *sc)
 {
-	struct msg_get_temperature *msg;
+	struct msg_get_temperature msg;
 	int value;
 	int err;
 
@@ -826,33 +678,25 @@ bcm2835_cpufreq_get_temperature(struct bcm2835_cpufreq_softc *sc)
 	 *       u32: value
 	 */
 
-	/* using DMA buffer for VC */
-	msg = (struct msg_get_temperature *)sc->dma_buf;
-	if (sizeof(*msg) > sc->dma_size) {
-		device_printf(sc->dev, "DMA size overflow (%zu>%lu)\n",
-		    sizeof(*msg), sc->dma_size);
-		return (MSG_ERROR);
-	}
-
 	/* setup single tag buffer */
-	memset(msg, 0, sizeof(*msg));
-	msg->hdr.buf_size = sizeof(*msg);
-	msg->hdr.code = BCM2835_MBOX_CODE_REQ;
-	msg->tag_hdr.tag = BCM2835_MBOX_TAG_GET_TEMPERATURE;
-	msg->tag_hdr.val_buf_size = sizeof(msg->body);
-	msg->tag_hdr.val_len = sizeof(msg->body.req);
-	msg->body.req.temperature_id = 0;
-	msg->end_tag = 0;
+	memset(&msg, 0, sizeof(msg));
+	msg.hdr.buf_size = sizeof(msg);
+	msg.hdr.code = BCM2835_MBOX_CODE_REQ;
+	msg.tag_hdr.tag = BCM2835_MBOX_TAG_GET_TEMPERATURE;
+	msg.tag_hdr.val_buf_size = sizeof(msg.body);
+	msg.tag_hdr.val_len = sizeof(msg.body.req);
+	msg.body.req.temperature_id = 0;
+	msg.end_tag = 0;
 
 	/* call mailbox property */
-	err = bcm2835_mbox_call_prop(sc);
+	err = bcm2835_mbox_property(&msg, sizeof(msg));
 	if (err) {
 		device_printf(sc->dev, "can't get temperature\n");
 		return (MSG_ERROR);
 	}
 
 	/* result (temperature of degree C) */
-	value = (int)msg->body.resp.value;
+	value = (int)msg.body.resp.value;
 	DPRINTF("value = %d\n", value);
 	return (value);
 }
@@ -1413,6 +1257,16 @@ bcm2835_cpufreq_init(void *arg)
 static void
 bcm2835_cpufreq_identify(driver_t *driver, device_t parent)
 {
+	const struct ofw_compat_data *compat;
+	phandle_t root;
+
+	root = OF_finddevice("/");
+	for (compat = compat_data; compat->ocd_str != NULL; compat++)
+		if (ofw_bus_node_is_compatible(root, compat->ocd_str))
+			break;
+
+	if (compat->ocd_data == 0)
+		return;
 
 	DPRINTF("driver=%p, parent=%p\n", driver, parent);
 	if (device_find_child(parent, "bcm2835_cpufreq", -1) != NULL)
@@ -1432,23 +1286,11 @@ bcm2835_cpufreq_probe(device_t dev)
 	return (0);
 }
 
-static void
-bcm2835_cpufreq_cb(void *arg, bus_dma_segment_t *segs, int nseg, int err)
-{
-	bus_addr_t *addr;
-
-	if (err)
-		return;
-	addr = (bus_addr_t *)arg;
-	*addr = PHYS_TO_VCBUS(segs[0].ds_addr);
-}
-
 static int
 bcm2835_cpufreq_attach(device_t dev)
 {
 	struct bcm2835_cpufreq_softc *sc;
 	struct sysctl_oid *oid;
-	int err;
 
 	/* set self dev */
 	sc = device_get_softc(dev);
@@ -1463,41 +1305,6 @@ bcm2835_cpufreq_attach(device_t dev)
 	sc->sdram_min_freq = -1;
 	sc->max_voltage_core = 0;
 	sc->min_voltage_core = 0;
-
-	/* create VC mbox buffer */
-	sc->dma_size = PAGE_SIZE;
-	err = bus_dma_tag_create(
-	    bus_get_dma_tag(sc->dev),
-	    PAGE_SIZE, 0,		/* alignment, boundary */
-	    BUS_SPACE_MAXADDR_32BIT,	/* lowaddr */
-	    BUS_SPACE_MAXADDR,		/* highaddr */
-	    NULL, NULL,			/* filter, filterarg */
-	    sc->dma_size, 1,		/* maxsize, nsegments */
-	    sc->dma_size, 0,		/* maxsegsize, flags */
-	    NULL, NULL,			/* lockfunc, lockarg */
-	    &sc->dma_tag);
-	if (err) {
-		device_printf(dev, "can't create DMA tag\n");
-		return (ENXIO);
-	}
-
-	err = bus_dmamem_alloc(sc->dma_tag, (void **)&sc->dma_buf, 0,
-	    &sc->dma_map);
-	if (err) {
-		bus_dma_tag_destroy(sc->dma_tag);
-		device_printf(dev, "can't allocate dmamem\n");
-		return (ENXIO);
-	}
-
-	err = bus_dmamap_load(sc->dma_tag, sc->dma_map, sc->dma_buf,
-	    sc->dma_size, bcm2835_cpufreq_cb, &sc->dma_phys, 0);
-	if (err) {
-		bus_dmamem_free(sc->dma_tag, sc->dma_buf, sc->dma_map);
-		bus_dma_tag_destroy(sc->dma_tag);
-		device_printf(dev, "can't load DMA map\n");
-		return (ENXIO);
-	}
-	/* OK, ready to use VC buffer */
 
 	/* setup sysctl at first device */
 	if (device_get_unit(dev) == 0) {
@@ -1568,9 +1375,6 @@ bcm2835_cpufreq_attach(device_t dev)
 	sc->init_hook.ich_arg = sc;
 
 	if (config_intrhook_establish(&sc->init_hook) != 0) {
-		bus_dmamap_unload(sc->dma_tag, sc->dma_map);
-		bus_dmamem_free(sc->dma_tag, sc->dma_buf, sc->dma_map);
-		bus_dma_tag_destroy(sc->dma_tag);
 		device_printf(dev, "config_intrhook_establish failed\n");
 		return (ENOMEM);
 	}
@@ -1584,18 +1388,8 @@ bcm2835_cpufreq_attach(device_t dev)
 static int
 bcm2835_cpufreq_detach(device_t dev)
 {
-	struct bcm2835_cpufreq_softc *sc;
-
-	sc = device_get_softc(dev);
 
 	sema_destroy(&vc_sema);
-
-	if (sc->dma_phys != 0)
-		bus_dmamap_unload(sc->dma_tag, sc->dma_map);
-	if (sc->dma_buf != NULL)
-		bus_dmamem_free(sc->dma_tag, sc->dma_buf, sc->dma_map);
-	if (sc->dma_tag != NULL)
-		bus_dma_tag_destroy(sc->dma_tag);
 
 	return (cpufreq_unregister(dev));
 }
@@ -1605,7 +1399,10 @@ bcm2835_cpufreq_set(device_t dev, const struct cf_setting *cf)
 {
 	struct bcm2835_cpufreq_softc *sc;
 	uint32_t rate_hz, rem;
-	int cur_freq, resp_freq, arm_freq, min_freq, core_freq;
+	int resp_freq, arm_freq, min_freq, core_freq;
+#ifdef DEBUG
+	int cur_freq;
+#endif
 
 	if (cf == NULL || cf->freq < 0)
 		return (EINVAL);
@@ -1630,8 +1427,10 @@ bcm2835_cpufreq_set(device_t dev, const struct cf_setting *cf)
 
 	/* set new value and verify it */
 	VC_LOCK(sc);
+#ifdef DEBUG
 	cur_freq = bcm2835_cpufreq_get_clock_rate(sc,
 	    BCM2835_MBOX_CLOCK_ID_ARM);
+#endif
 	resp_freq = bcm2835_cpufreq_set_clock_rate(sc,
 	    BCM2835_MBOX_CLOCK_ID_ARM, rate_hz);
 	DELAY(TRANSITION_LATENCY);
@@ -1750,7 +1549,20 @@ bcm2835_cpufreq_make_freq_list(device_t dev, struct cf_setting *sets,
 		if (min_freq > cpufreq_lowest_freq)
 			min_freq = cpufreq_lowest_freq;
 
-#ifdef SOC_BCM2836
+#ifdef SOC_BCM2835
+	/* from freq to min_freq */
+	for (idx = 0; idx < *count && freq >= min_freq; idx++) {
+		if (freq > sc->arm_min_freq)
+			volts = sc->max_voltage_core;
+		else
+			volts = sc->min_voltage_core;
+		sets[idx].freq = freq;
+		sets[idx].volts = volts;
+		sets[idx].lat = TRANSITION_LATENCY;
+		sets[idx].dev = dev;
+		freq -= MHZSTEP;
+	}
+#else
 	/* XXX RPi2 have only 900/600MHz */
 	idx = 0;
 	volts = sc->min_voltage_core;
@@ -1765,19 +1577,6 @@ bcm2835_cpufreq_make_freq_list(device_t dev, struct cf_setting *sets,
 		sets[idx].lat = TRANSITION_LATENCY;
 		sets[idx].dev = dev;
 		idx++;
-	}
-#else
-	/* from freq to min_freq */
-	for (idx = 0; idx < *count && freq >= min_freq; idx++) {
-		if (freq > sc->arm_min_freq)
-			volts = sc->max_voltage_core;
-		else
-			volts = sc->min_voltage_core;
-		sets[idx].freq = freq;
-		sets[idx].volts = volts;
-		sets[idx].lat = TRANSITION_LATENCY;
-		sets[idx].dev = dev;
-		freq -= MHZSTEP;
 	}
 #endif
 	*count = idx;

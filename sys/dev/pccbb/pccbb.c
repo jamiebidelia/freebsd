@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2002-2004 M. Warner Losh.
  * Copyright (c) 2000-2001 Jonathan Chen.
  * All rights reserved.
@@ -84,7 +86,6 @@ __FBSDID("$FreeBSD$");
 #include <sys/kernel.h>
 #include <sys/module.h>
 #include <sys/kthread.h>
-#include <sys/interrupt.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/mutex.h>
@@ -166,8 +167,8 @@ static int	cbb_cardbus_activate_resource(device_t brdev, device_t child,
 static int	cbb_cardbus_deactivate_resource(device_t brdev,
 		    device_t child, int type, int rid, struct resource *res);
 static struct resource	*cbb_cardbus_alloc_resource(device_t brdev,
-		    device_t child, int type, int *rid, u_long start,
-		    u_long end, u_long count, u_int flags);
+		    device_t child, int type, int *rid, rman_res_t start,
+		    rman_res_t end, rman_res_t count, u_int flags);
 static int	cbb_cardbus_release_resource(device_t brdev, device_t child,
 		    int type, int rid, struct resource *res);
 static int	cbb_cardbus_power_enable_socket(device_t brdev,
@@ -229,7 +230,7 @@ cbb_destroy_res(struct cbb_softc *sc)
 	while ((rle = SLIST_FIRST(&sc->rl)) != NULL) {
 		device_printf(sc->dev, "Danger Will Robinson: Resource "
 		    "left allocated!  This is a bug... "
-		    "(rid=%x, type=%d, addr=%lx)\n", rle->rid, rle->type,
+		    "(rid=%x, type=%d, addr=%jx)\n", rle->rid, rle->type,
 		    rman_get_start(rle->res));
 		SLIST_REMOVE_HEAD(&sc->rl, link);
 		free(rle, M_DEVBUF);
@@ -274,6 +275,8 @@ cbb_enable_func_intr(struct cbb_softc *sc)
 	reg = (exca_getb(&sc->exca[0], EXCA_INTR) & ~EXCA_INTR_IRQ_MASK) | 
 	    EXCA_INTR_IRQ_NONE;
 	exca_putb(&sc->exca[0], EXCA_INTR, reg);
+	PCI_MASK_CONFIG(sc->dev, CBBR_BRIDGECTRL,
+	    & ~CBBM_BRIDGECTRL_INTR_IREQ_ISA_EN, 2);
 }
 
 int
@@ -330,7 +333,7 @@ cbb_detach(device_t brdev)
 
 	/*
 	 * Wait for the thread to die.  kproc_exit will do a wakeup
-	 * on the event thread's struct thread * so that we know it is
+	 * on the event thread's struct proc * so that we know it is
 	 * safe to proceed.  IF the thread is running, set the please
 	 * die flag and wait for it to comply.  Since the wakeup on
 	 * the event thread happens only in kproc_exit, we don't
@@ -468,14 +471,6 @@ cbb_event_thread(void *arg)
 	sc->flags |= CBB_KTHREAD_RUNNING;
 	while ((sc->flags & CBB_KTHREAD_DONE) == 0) {
 		mtx_unlock(&sc->mtx);
-		/*
-		 * We take out Giant here because we need it deep,
-		 * down in the bowels of the vm system for mapping the
-		 * memory we need to read the CIS.  In addition, since
-		 * we are adding/deleting devices from the dev tree,
-		 * and that code isn't MP safe, we have to hold Giant.
-		 */
-		mtx_lock(&Giant);
 		status = cbb_get(sc, CBB_SOCKET_STATE);
 		DPRINTF(("Status is 0x%x\n", status));
 		if (!CBB_CARD_PRESENT(status)) {
@@ -501,7 +496,6 @@ cbb_event_thread(void *arg)
 			not_a_card = 0;		/* We know card type */
 			cbb_insert(sc);
 		}
-		mtx_unlock(&Giant);
 
 		/*
 		 * First time through we need to tell mountroot that we're
@@ -722,7 +716,7 @@ cbb_o2micro_power_hack(struct cbb_softc *sc)
 
 /*
  * Restore the damage that cbb_o2micro_power_hack does to EXCA_INTR so
- * we don't have an interrupt storm on power on.  This has the efect of
+ * we don't have an interrupt storm on power on.  This has the effect of
  * disabling card status change interrupts for the duration of poweron.
  */
 static void
@@ -881,8 +875,6 @@ cbb_power(device_t brdev, int volts)
 			reg_ctrl &= ~TOPIC97_REG_CTRL_CLKRUN_ENA;
 		pci_write_config(sc->dev, TOPIC_REG_CTRL, reg_ctrl, 4);
 	}
-	PCI_MASK_CONFIG(brdev, CBBR_BRIDGECTRL,
-	    & ~CBBM_BRIDGECTRL_INTR_IREQ_ISA_EN, 2);
 	retval = 1;
 done:;
 	if (volts != 0 && sc->chipset == CB_O2MICRO)
@@ -1155,7 +1147,7 @@ cbb_cardbus_auto_open(struct cbb_softc *sc, int type)
 		if (starts[i] == START_NONE)
 			continue;
 		starts[i] &= ~(align - 1);
-		ends[i] = ((ends[i] + align - 1) & ~(align - 1)) - 1;
+		ends[i] = roundup2(ends[i], align) - 1;
 	}
 	if (starts[0] != START_NONE && starts[1] != START_NONE) {
 		if (starts[0] < starts[1]) {
@@ -1230,19 +1222,19 @@ cbb_cardbus_deactivate_resource(device_t brdev, device_t child, int type,
 
 static struct resource *
 cbb_cardbus_alloc_resource(device_t brdev, device_t child, int type,
-    int *rid, u_long start, u_long end, u_long count, u_int flags)
+    int *rid, rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
 {
 	struct cbb_softc *sc = device_get_softc(brdev);
 	int tmp;
 	struct resource *res;
-	u_long align;
+	rman_res_t align;
 
 	switch (type) {
 	case SYS_RES_IRQ:
 		tmp = rman_get_start(sc->irq_res);
 		if (start > tmp || end < tmp || count != 1) {
-			device_printf(child, "requested interrupt %ld-%ld,"
-			    "count = %ld not supported by cbb\n",
+			device_printf(child, "requested interrupt %jd-%jd,"
+			    "count = %jd not supported by cbb\n",
 			    start, end, count);
 			return (NULL);
 		}
@@ -1395,7 +1387,7 @@ cbb_pcic_deactivate_resource(device_t brdev, device_t child, int type,
 
 static struct resource *
 cbb_pcic_alloc_resource(device_t brdev, device_t child, int type, int *rid,
-    u_long start, u_long end, u_long count, u_int flags)
+    rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
 {
 	struct resource *res = NULL;
 	struct cbb_softc *sc = device_get_softc(brdev);
@@ -1425,8 +1417,8 @@ cbb_pcic_alloc_resource(device_t brdev, device_t child, int type, int *rid,
 	case SYS_RES_IRQ:
 		tmp = rman_get_start(sc->irq_res);
 		if (start > tmp || end < tmp || count != 1) {
-			device_printf(child, "requested interrupt %ld-%ld,"
-			    "count = %ld not supported by cbb\n",
+			device_printf(child, "requested interrupt %jd-%jd,"
+			    "count = %jd not supported by cbb\n",
 			    start, end, count);
 			return (NULL);
 		}
@@ -1538,7 +1530,7 @@ cbb_deactivate_resource(device_t brdev, device_t child, int type,
 
 struct resource *
 cbb_alloc_resource(device_t brdev, device_t child, int type, int *rid,
-    u_long start, u_long end, u_long count, u_int flags)
+    rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
 {
 	struct cbb_softc *sc = device_get_softc(brdev);
 

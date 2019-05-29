@@ -1,4 +1,4 @@
-//===-- MICmdArgValConsume.cpp -------------------------------------*- C++ -*-===//
+//===-- MICmdArgValConsume.cpp ----------------------------------*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -7,59 +7,48 @@
 //
 //===----------------------------------------------------------------------===//
 
-//++
-// File:        MICmdArgValConsume.cpp
-//
-// Overview:    CMICmdArgValConsume implementation.
-//
-// Environment: Compilers:  Visual C++ 12.
-//                          gcc (Ubuntu/Linaro 4.8.1-10ubuntu9) 4.8.1
-//              Libraries:  See MIReadmetxt.
-//
-// Copyright:   None.
-//--
-
 // In-house headers:
 #include "MICmdArgValConsume.h"
 #include "MICmdArgContext.h"
 
-//++ ------------------------------------------------------------------------------------
+//++
+//------------------------------------------------------------------------------------
 // Details: CMICmdArgValConsume constructor.
 // Type:    Method.
 // Args:    None.
 // Return:  None.
 // Throws:  None.
 //--
-CMICmdArgValConsume::CMICmdArgValConsume(void)
-{
-}
+CMICmdArgValConsume::CMICmdArgValConsume() {}
 
-//++ ------------------------------------------------------------------------------------
+//++
+//------------------------------------------------------------------------------------
 // Details: CMICmdArgValConsume constructor.
 // Type:    Method.
 // Args:    vrArgName       - (R) Argument's name to search by.
-//          vbMandatory     - (R) True = Yes must be present, false = optional argument.
+//          vbMandatory     - (R) True = Yes must be present, false = optional
+//          argument.
 // Return:  None.
 // Throws:  None.
 //--
-CMICmdArgValConsume::CMICmdArgValConsume(const CMIUtilString &vrArgName, const bool vbMandatory)
-    : CMICmdArgValBaseTemplate(vrArgName, vbMandatory, true)
-{
-}
+CMICmdArgValConsume::CMICmdArgValConsume(const CMIUtilString &vrArgName,
+                                         const bool vbMandatory)
+    : CMICmdArgValBaseTemplate(vrArgName, vbMandatory, true) {}
 
-//++ ------------------------------------------------------------------------------------
+//++
+//------------------------------------------------------------------------------------
 // Details: CMICmdArgValConsume destructor.
 // Type:    Overidden.
 // Args:    None.
 // Return:  None.
 // Throws:  None.
 //--
-CMICmdArgValConsume::~CMICmdArgValConsume(void)
-{
-}
+CMICmdArgValConsume::~CMICmdArgValConsume() {}
 
-//++ ------------------------------------------------------------------------------------
-// Details: Parse the command's argument options string and try to extract the value *this
+//++
+//------------------------------------------------------------------------------------
+// Details: Parse the command's argument options string and try to extract the
+// value *this
 //          argument is looking for.
 // Type:    Overridden.
 // Args:    vwArgContext    - (R) The command's argument options string.
@@ -67,55 +56,39 @@ CMICmdArgValConsume::~CMICmdArgValConsume(void)
 //          MIstatus::failure - Functional failed.
 // Throws:  None.
 //--
-bool
-CMICmdArgValConsume::Validate(CMICmdArgContext &vwArgContext)
-{
-    if (vwArgContext.IsEmpty())
-        return MIstatus::success;
+bool CMICmdArgValConsume::Validate(CMICmdArgContext &vwArgContext) {
+  if (vwArgContext.IsEmpty())
+    return m_bMandatory ? MIstatus::failure : MIstatus::success;
 
-    if (vwArgContext.GetNumberArgsPresent() == 1)
-    {
-        const CMIUtilString &rArg(vwArgContext.GetArgsLeftToParse());
-        m_bFound = true;
-        m_bValid = true;
-        vwArgContext.RemoveArg(rArg);
-        return MIstatus::success;
+  // Consume the optional file, line, linenum arguments till the mode '--'
+  // argument
+  const CMIUtilString::VecString_t vecOptions(vwArgContext.GetArgs());
+  CMIUtilString::VecString_t::const_iterator it = vecOptions.begin();
+  while (it != vecOptions.end()) {
+    const CMIUtilString &rTxt(*it);
+
+    if (rTxt == "--") {
+      m_bFound = true;
+      m_bValid = true;
+      if (!vwArgContext.RemoveArg(rTxt))
+        return MIstatus::failure;
+      return MIstatus::success;
     }
+    // Next
+    ++it;
+  }
 
-    // In reality there are more than one option,  if so the file option
-    // is the last one (don't handle that here - find the best looking one)
-    const CMIUtilString::VecString_t vecOptions(vwArgContext.GetArgs());
-    CMIUtilString::VecString_t::const_iterator it = vecOptions.begin();
-    while (it != vecOptions.end())
-    {
-        const CMIUtilString &rTxt(*it);
-        m_bFound = true;
-
-        if (vwArgContext.RemoveArg(rTxt))
-        {
-            m_bValid = true;
-            return MIstatus::success;
-        }
-        else
-            return MIstatus::success;
-
-        // Next
-        ++it;
-    }
-
-    return MIstatus::failure;
+  return MIstatus::failure;
 }
 
-//++ ------------------------------------------------------------------------------------
-// Details: Nothing to examine as we just want to consume the argument or option (ignore
+//++
+//------------------------------------------------------------------------------------
+// Details: Nothing to examine as we just want to consume the argument or option
+// (ignore
 //          it).
 // Type:    Method.
 // Args:    None.
 // Return:  bool -  True = yes ok, false = not ok.
 // Throws:  None.
 //--
-bool
-CMICmdArgValConsume::IsOk(void) const
-{
-    return true;
-}
+bool CMICmdArgValConsume::IsOk() const { return true; }

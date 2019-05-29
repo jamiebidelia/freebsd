@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
  * BSD LICENSE
  *
  * Copyright(c) 2008 - 2011 Intel Corporation. All rights reserved.
@@ -426,7 +428,8 @@ int isci_controller_allocate_memory(struct ISCI_CONTROLLER *controller)
 	uncached_controller_memory->size = sci_mdl_decorator_get_memory_size(
 	    controller->mdl, SCI_MDE_ATTRIBUTE_PHYSICALLY_CONTIGUOUS);
 
-	error = isci_allocate_dma_buffer(device, uncached_controller_memory);
+	error = isci_allocate_dma_buffer(device, controller,
+	    uncached_controller_memory);
 
 	if (error != 0)
 	    return (error);
@@ -441,7 +444,8 @@ int isci_controller_allocate_memory(struct ISCI_CONTROLLER *controller)
 	    SCI_MDE_ATTRIBUTE_CACHEABLE | SCI_MDE_ATTRIBUTE_PHYSICALLY_CONTIGUOUS
 	);
 
-	error = isci_allocate_dma_buffer(device, cached_controller_memory);
+	error = isci_allocate_dma_buffer(device, controller,
+	    cached_controller_memory);
 
 	if (error != 0)
 	    return (error);
@@ -454,7 +458,7 @@ int isci_controller_allocate_memory(struct ISCI_CONTROLLER *controller)
 	request_memory->size =
 	    controller->queue_depth * isci_io_request_get_object_size();
 
-	error = isci_allocate_dma_buffer(device, request_memory);
+	error = isci_allocate_dma_buffer(device, controller, request_memory);
 
 	if (error != 0)
 	    return (error);
@@ -470,13 +474,14 @@ int isci_controller_allocate_memory(struct ISCI_CONTROLLER *controller)
 
 	/* Create DMA tag for our I/O requests.  Then we can create DMA maps based off
 	 *  of this tag and store them in each of our ISCI_IO_REQUEST objects.  This
-	 *  will enable better performance than creating the DMA maps everytime we get
+	 *  will enable better performance than creating the DMA maps every time we get
 	 *  an I/O.
 	 */
 	status = bus_dma_tag_create(bus_get_dma_tag(device), 0x1, 0x0,
 	    BUS_SPACE_MAXADDR, BUS_SPACE_MAXADDR, NULL, NULL,
 	    isci_io_request_get_max_io_size(),
-	    SCI_MAX_SCATTER_GATHER_ELEMENTS, max_segment_size, 0, NULL, NULL,
+	    SCI_MAX_SCATTER_GATHER_ELEMENTS, max_segment_size, 0,
+	    busdma_lock_mutex, &controller->lock,
 	    &controller->buffer_dma_tag);
 
 	sci_pool_initialize(controller->request_pool);
@@ -691,9 +696,9 @@ void isci_action(struct cam_sim *sim, union ccb *ccb)
 			cpi->bus_id = bus;
 			cpi->initiator_id = SCI_MAX_REMOTE_DEVICES;
 			cpi->base_transfer_speed = 300000;
-			strncpy(cpi->sim_vid, "FreeBSD", SIM_IDLEN);
-			strncpy(cpi->hba_vid, "Intel Corp.", HBA_IDLEN);
-			strncpy(cpi->dev_name, cam_sim_name(sim), DEV_IDLEN);
+			strlcpy(cpi->sim_vid, "FreeBSD", SIM_IDLEN);
+			strlcpy(cpi->hba_vid, "Intel Corp.", HBA_IDLEN);
+			strlcpy(cpi->dev_name, cam_sim_name(sim), DEV_IDLEN);
 			cpi->transport = XPORT_SAS;
 			cpi->transport_version = 0;
 			cpi->protocol = PROTO_SCSI;
@@ -740,6 +745,11 @@ void isci_action(struct cam_sim *sim, union ccb *ccb)
 		}
 		break;
 	case XPT_SCSI_IO:
+		if (ccb->ccb_h.flags & CAM_CDB_PHYS) {
+			ccb->ccb_h.status = CAM_REQ_INVALID;
+			xpt_done(ccb);
+			break;
+		}
 		isci_io_request_execute_scsi_io(ccb, controller);
 		break;
 #if __FreeBSD_version >= 900026
@@ -802,6 +812,7 @@ isci_controller_release_queued_ccbs(struct ISCI_CONTROLLER *controller)
 {
 	struct ISCI_REMOTE_DEVICE *dev;
 	struct ccb_hdr *ccb_h;
+	uint8_t *ptr;
 	int dev_idx;
 
 	KASSERT(mtx_owned(&controller->lock), ("controller lock not owned"));
@@ -821,8 +832,8 @@ isci_controller_release_queued_ccbs(struct ISCI_CONTROLLER *controller)
 			if (ccb_h == NULL)
 				continue;
 
-			isci_log_message(1, "ISCI", "release %p %x\n", ccb_h,
-			    ((union ccb *)ccb_h)->csio.cdb_io.cdb_bytes[0]);
+			ptr = scsiio_cdb_ptr(&((union ccb *)ccb_h)->csio);
+			isci_log_message(1, "ISCI", "release %p %x\n", ccb_h, *ptr);
 
 			dev->queued_ccb_in_progress = (union ccb *)ccb_h;
 			isci_io_request_execute_scsi_io(

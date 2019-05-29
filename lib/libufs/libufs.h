@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2002 Juli Mallett.  All rights reserved.
  *
  * This software was written by Juli Mallett <jmallett@FreeBSD.org> for the
@@ -33,6 +35,10 @@
 /*
  * libufs structures.
  */
+union dinodep {
+	struct ufs1_dinode *dp1;
+	struct ufs2_dinode *dp2;
+};
 
 /*
  * userland ufs disk.
@@ -45,8 +51,9 @@ struct uufsd {
 	ufs2_daddr_t d_sblock;	/* superblock location */
 	struct csum *d_sbcsum;	/* Superblock summary info */
 	caddr_t d_inoblock;	/* inode block */
-	ino_t d_inomin;		/* low inode */
-	ino_t d_inomax;		/* high inode */
+	uint32_t d_inomin;	/* low inode (not ino_t for ABI compat) */
+	uint32_t d_inomax;	/* high inode (not ino_t for ABI compat) */
+	union dinodep d_dp;	/* pointer to currently active inode */
 	union {
 		struct fs d_fs;	/* filesystem information */
 		char d_sb[MAXBSIZE];
@@ -97,6 +104,28 @@ __BEGIN_DECLS
  */
 
 /*
+ * ffs_subr.c
+ */
+void	ffs_clrblock(struct fs *, u_char *, ufs1_daddr_t);
+void	ffs_clusteracct(struct fs *, struct cg *, ufs1_daddr_t, int);
+void	ffs_fragacct(struct fs *, int, int32_t [], int);
+int	ffs_isblock(struct fs *, u_char *, ufs1_daddr_t);
+int	ffs_isfreeblock(struct fs *, u_char *, ufs1_daddr_t);
+void	ffs_setblock(struct fs *, u_char *, ufs1_daddr_t);
+int	ffs_sbget(void *, struct fs **, off_t, char *,
+	    int (*)(void *, off_t, void **, int));
+int	ffs_sbput(void *, struct fs *, off_t,
+	    int (*)(void *, off_t, void *, int));
+void	ffs_update_dinode_ckhash(struct fs *, struct ufs2_dinode *);
+int	ffs_verify_dinode_ckhash(struct fs *, struct ufs2_dinode *);
+
+/*
+ * Request standard superblock location in ffs_sbget
+ */
+#define	STDSB			-1	/* Fail if check-hash is bad */
+#define	STDSB_NOHASHFAIL	-2	/* Ignore check-hash failure */
+
+/*
  * block.c
  */
 ssize_t bread(struct uufsd *, ufs2_daddr_t, void *, size_t);
@@ -109,6 +138,8 @@ int berase(struct uufsd *, ufs2_daddr_t, ufs2_daddr_t);
 ufs2_daddr_t cgballoc(struct uufsd *);
 int cgbfree(struct uufsd *, ufs2_daddr_t, long);
 ino_t cgialloc(struct uufsd *);
+int cgget(struct uufsd *, int, struct cg *);
+int cgput(struct uufsd *, struct cg *);
 int cgread(struct uufsd *);
 int cgread1(struct uufsd *, int);
 int cgwrite(struct uufsd *);
@@ -117,14 +148,17 @@ int cgwrite1(struct uufsd *, int);
 /*
  * inode.c
  */
-int getino(struct uufsd *, void **, ino_t, int *);
-int putino(struct uufsd *);
+int getinode(struct uufsd *, union dinodep *, ino_t);
+int putinode(struct uufsd *);
 
 /*
  * sblock.c
  */
 int sbread(struct uufsd *);
 int sbwrite(struct uufsd *, int);
+/* low level superblock read/write functions */
+int sbget(int, struct fs **, off_t);
+int sbput(int, struct fs *, int);
 
 /*
  * type.c
@@ -135,14 +169,9 @@ int ufs_disk_fillout_blank(struct uufsd *, const char *);
 int ufs_disk_write(struct uufsd *);
 
 /*
- * ffs_subr.c
+ * crc32c.c
  */
-void	ffs_clrblock(struct fs *, u_char *, ufs1_daddr_t);
-void	ffs_clusteracct(struct fs *, struct cg *, ufs1_daddr_t, int);
-void	ffs_fragacct(struct fs *, int, int32_t [], int);
-int	ffs_isblock(struct fs *, u_char *, ufs1_daddr_t);
-int	ffs_isfreeblock(struct fs *, u_char *, ufs1_daddr_t);
-void	ffs_setblock(struct fs *, u_char *, ufs1_daddr_t);
+uint32_t calculate_crc32c(uint32_t, const void *, size_t);
 
 __END_DECLS
 

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2012 The FreeBSD Foundation
  * All rights reserved.
  *
@@ -34,7 +36,6 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-#include <openssl/md5.h>
 
 #include <iscsi_ioctl.h>
 
@@ -43,7 +44,7 @@
 #define	CONN_DIGEST_NONE		0
 #define	CONN_DIGEST_CRC32C		1
 
-#define CONN_MUTUAL_CHALLENGE_LEN	1024
+#define	CONN_MUTUAL_CHALLENGE_LEN	1024
 #define	SOCKBUF_SIZE			1048576
 
 struct connection {
@@ -60,9 +61,10 @@ struct connection {
 	int			conn_data_digest;
 	bool			conn_initial_r2t;
 	bool			conn_immediate_data;
-	size_t			conn_max_data_segment_length;
-	size_t			conn_max_burst_length;
-	size_t			conn_first_burst_length;
+	int			conn_max_recv_data_segment_length;
+	int			conn_max_send_data_segment_length;
+	int			conn_max_burst_length;
+	int			conn_first_burst_length;
 	struct chap		*conn_mutual_chap;
 };
 
@@ -83,11 +85,12 @@ struct keys {
 };
 
 #define	CHAP_CHALLENGE_LEN	1024
+#define	CHAP_DIGEST_LEN		16 /* Equal to MD5 digest size. */
 
 struct chap {
 	unsigned char	chap_id;
 	char		chap_challenge[CHAP_CHALLENGE_LEN];
-	char		chap_response[MD5_DIGEST_LENGTH];
+	char		chap_response[CHAP_DIGEST_LEN];
 };
 
 struct rchap {

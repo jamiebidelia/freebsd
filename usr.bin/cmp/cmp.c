@@ -1,4 +1,6 @@
 /*
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1987, 1990, 1993, 1994
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -10,7 +12,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 4. Neither the name of the University nor the names of its contributors
+ * 3. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -45,9 +47,12 @@ __FBSDID("$FreeBSD$");
 #include <sys/types.h>
 #include <sys/stat.h>
 
+#include <capsicum_helpers.h>
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <getopt.h>
+#include <nl_types.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -56,6 +61,14 @@ __FBSDID("$FreeBSD$");
 #include "extern.h"
 
 int	lflag, sflag, xflag, zflag;
+
+static const struct option long_opts[] =
+{
+	{"verbose",	no_argument,		NULL, 'l'},
+	{"silent",	no_argument,		NULL, 's'},
+	{"quiet",	no_argument,		NULL, 's'},
+	{NULL,		no_argument,		NULL, 0}
+};
 
 static void usage(void);
 
@@ -68,7 +81,7 @@ main(int argc, char *argv[])
 	const char *file1, *file2;
 
 	oflag = O_RDONLY;
-	while ((ch = getopt(argc, argv, "hlsxz")) != -1)
+	while ((ch = getopt_long(argc, argv, "+hlsxz", long_opts, NULL)) != -1)
 		switch (ch) {
 		case 'h':		/* Don't follow symlinks */
 			oflag |= O_NOFOLLOW;
@@ -100,14 +113,19 @@ main(int argc, char *argv[])
 	if (argc < 2 || argc > 4)
 		usage();
 
+	/* Don't limit rights on stdin since it may be one of the inputs. */
+	if (caph_limit_stream(STDOUT_FILENO, CAPH_WRITE | CAPH_IGNORE_EBADF))
+		err(ERR_EXIT, "unable to limit rights on stdout");
+	if (caph_limit_stream(STDERR_FILENO, CAPH_WRITE | CAPH_IGNORE_EBADF))
+		err(ERR_EXIT, "unable to limit rights on stderr");
+
 	/* Backward compatibility -- handle "-" meaning stdin. */
 	special = 0;
 	if (strcmp(file1 = argv[0], "-") == 0) {
 		special = 1;
-		fd1 = 0;
+		fd1 = STDIN_FILENO;
 		file1 = "stdin";
-	}
-	else if ((fd1 = open(file1, oflag, 0)) < 0 && errno != EMLINK) {
+	} else if ((fd1 = open(file1, oflag, 0)) < 0 && errno != EMLINK) {
 		if (!sflag)
 			err(ERR_EXIT, "%s", file1);
 		else
@@ -118,10 +136,9 @@ main(int argc, char *argv[])
 			errx(ERR_EXIT,
 				"standard input may only be specified once");
 		special = 1;
-		fd2 = 0;
+		fd2 = STDIN_FILENO;
 		file2 = "stdin";
-	}
-	else if ((fd2 = open(file2, oflag, 0)) < 0 && errno != EMLINK) {
+	} else if ((fd2 = open(file2, oflag, 0)) < 0 && errno != EMLINK) {
 		if (!sflag)
 			err(ERR_EXIT, "%s", file2);
 		else
@@ -145,6 +162,9 @@ main(int argc, char *argv[])
 		else
 			exit(ERR_EXIT);
 	}
+
+	/* FD rights are limited in c_special() and c_regular(). */
+	caph_cache_catpages();
 
 	if (!special) {
 		if (fstat(fd1, &sb1)) {

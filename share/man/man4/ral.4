@@ -14,7 +14,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd May 10, 2012
+.Dd April 4, 2017
 .Dt RAL 4
 .Os
 .Sh NAME
@@ -184,6 +184,7 @@ chipsets, including:
 .It "MSI PC54G2" Ta RT2560 Ta PCI
 .It "OvisLink EVO-W54PCI" Ta RT2560 Ta PCI
 .It "PheeNet HWL-PCIG/RA" Ta RT2560 Ta PCI
+.It "Planex GW-NS300N" Ta RT2860 Ta CardBus
 .It "Pro-Nets CB80211G" Ta RT2560 Ta CardBus
 .It "Pro-Nets PC80211G" Ta RT2560 Ta PCI
 .It "Repotec RP-WB7108" Ta RT2560 Ta CardBus
@@ -291,13 +292,13 @@ driver does not support any of the 802.11n capabilities offered by
 the RT2700 and RT2800 chipsets.
 Additional work is required in before those features can be supported.
 .Pp
-Host AP mode doesn't support power saving.
+Host AP mode does not support power saving.
 Clients attempting to use power saving mode may experience significant
 packet loss (disabling power saving on the client will fix this).
 .Pp
 Some PCI
 .Nm
-adapters seem to strictly require a system supporting PCI 2.2 or greater and
-will likely not work in systems based on older revisions of the PCI
+adapters strictly require a system supporting PCI 2.2 or greater.
+Check the board's PCI version before purchasing the card as it is likely these
+adapters will not work in systems based on older revisions of the PCI
 specification.
-Check the board's PCI version before purchasing the card.

@@ -10,33 +10,33 @@
 #ifndef lldb_Host_HostProcesPosix_h_
 #define lldb_Host_HostProcesPosix_h_
 
-#include "lldb/lldb-types.h"
-#include "lldb/Core/Error.h"
 #include "lldb/Host/HostNativeProcessBase.h"
+#include "lldb/Utility/Status.h"
+#include "lldb/lldb-types.h"
 
-namespace lldb_private
-{
+namespace lldb_private {
 
 class FileSpec;
 
-class HostProcessPosix : public HostNativeProcessBase
-{
-  public:
-    HostProcessPosix();
-    HostProcessPosix(lldb::process_t process);
-    virtual ~HostProcessPosix();
+class HostProcessPosix : public HostNativeProcessBase {
+public:
+  HostProcessPosix();
+  HostProcessPosix(lldb::process_t process);
+  ~HostProcessPosix() override;
 
-    virtual Error Signal(int signo) const;
-    static Error Signal(lldb::process_t process, int signo);
+  virtual Status Signal(int signo) const;
+  static Status Signal(lldb::process_t process, int signo);
 
-    virtual Error Terminate();
-    virtual Error GetMainModule(FileSpec &file_spec) const;
+  Status Terminate() override;
+  Status GetMainModule(FileSpec &file_spec) const override;
 
-    virtual lldb::pid_t GetProcessId() const;
-    virtual bool IsRunning() const;
+  lldb::pid_t GetProcessId() const override;
+  bool IsRunning() const override;
 
-    virtual HostThread StartMonitoring(HostProcess::MonitorCallback callback, void *callback_baton, bool monitor_signals);
+  HostThread StartMonitoring(const Host::MonitorChildProcessCallback &callback,
+                             bool monitor_signals) override;
 };
-}
 
-#endif
+} // namespace lldb_private
+
+#endif // lldb_Host_HostProcesPosix_h_

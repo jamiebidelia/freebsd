@@ -78,7 +78,8 @@ skip_efields(
 	
 	u_int nlen;	/* next extension length */
 	while ((tail - head) > 6) {
-		nlen = ntohl(*head++) & 0xffff;
+		nlen = ntohl(*head) & 0xffff;
+		++head;
 		nlen = (nlen + 3) >> 2;
 		if (nlen > (u_int)(tail - head) || nlen < 4)
 			return NULL;	/* Blooper! Inconsistent! */
@@ -113,7 +114,7 @@ process_pkt (
 	l_fp		sent_xmt;
 	l_fp		resp_org;
 
-	key_id = 0;
+	// key_id = 0;
 	pkt_key = NULL;
 	is_authentic = (HAVE_OPT(AUTHENTICATION)) ? 0 : -1;
 
@@ -135,8 +136,10 @@ process_pkt (
 			func_name, pkt_len);
 		return PACKET_UNUSEABLE;
 	}
+
+	/* HMS: the following needs a bit of work */
 	/* Note: pkt_len must be a multiple of 4 at this point! */
-	packet_end = (u_int32*)((char*)rpkt + pkt_len);
+	packet_end = (void*)((char*)rpkt + pkt_len);
 	exten_end = skip_efields(rpkt->exten, packet_end);
 	if (NULL == exten_end) {
 		msyslog(LOG_ERR,
@@ -144,18 +147,20 @@ process_pkt (
 			func_name);
 		return PACKET_UNUSEABLE;
 	}
+
 	/* get size of MAC in cells; can be zero */
 	exten_len = (u_int)(packet_end - exten_end);
 
 	/* deduce action required from remaining length */
 	switch (exten_len) {
 
-	case 0:	/* no MAC at all */
+	case 0:	/* no Legacy MAC */
 		break;
 
 	case 1:	/* crypto NAK */		
+		/* Only if the keyID is 0 and there were no EFs */
 		key_id = ntohl(*exten_end);
-		printf("Crypto NAK = 0x%08x\n", key_id);
+		printf("Crypto NAK = 0x%08x from %s\n", key_id, stoa(sender));
 		break;
 
 	case 3: /* key ID + 3DES MAC -- unsupported! */
@@ -184,7 +189,7 @@ process_pkt (
 		** keyfile and compare those md5sums.
 		*/
 		mac_size = exten_len << 2;
-		if (!auth_md5((char *)rpkt, pkt_len - mac_size,
+		if (!auth_md5(rpkt, pkt_len - mac_size,
 			      mac_size - 4, pkt_key)) {
 			is_authentic = FALSE;
 			break;

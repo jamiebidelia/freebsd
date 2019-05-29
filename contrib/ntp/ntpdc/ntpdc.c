@@ -32,6 +32,7 @@
 
 #include "ntp_libopts.h"
 #include "ntpdc-opts.h"
+#include "safecast.h"
 
 #ifdef SYS_VXWORKS
 				/* vxWorks needs mode flag -casey*/
@@ -74,8 +75,8 @@ int		ntpdcmain	(int,	char **);
 static	int	openhost	(const char *);
 static	int	sendpkt		(void *, size_t);
 static	void	growpktdata	(void);
-static	int	getresponse	(int, int, int *, int *, char **, int);
-static	int	sendrequest	(int, int, int, u_int, size_t, char *);
+static	int	getresponse	(int, int, size_t *, size_t *, const char **, size_t);
+static	int	sendrequest	(int, int, int, size_t, size_t, const char *);
 static	void	getcmds		(void);
 static	RETSIGTYPE abortcmd	(int);
 static	void	docmd		(const char *);
@@ -225,22 +226,34 @@ static	const char *chosts[MAXHOSTS];
 #define	STREQ(a, b)	(*(a) == *(b) && strcmp((a), (b)) == 0)
 
 /*
- * Jump buffer for longjumping back to the command level
+ * Jump buffer for longjumping back to the command level.
+ *
+ * See ntpq/ntpq.c for an explanation why 'sig{set,long}jmp()' is used
+ * when available.
  */
-static	jmp_buf interrupt_buf;
-static  volatile int jump = 0;
+#if HAVE_DECL_SIGSETJMP && HAVE_DECL_SIGLONGJMP
+# define JMP_BUF	sigjmp_buf
+# define SETJMP(x)	sigsetjmp((x), 1)
+# define LONGJMP(x, v)	siglongjmp((x),(v))
+#else
+# define JMP_BUF	jmp_buf
+# define SETJMP(x)	setjmp((x))
+# define LONGJMP(x, v)	longjmp((x),(v))
+#endif
+static	JMP_BUF		interrupt_buf;
+static	volatile int	jump = 0;
 
 /*
  * Pointer to current output unit
  */
-static	FILE *current_output;
+static	FILE *current_output = NULL;
 
 /*
  * Command table imported from ntpdc_ops.c
  */
 extern struct xcmd opcmds[];
 
-char *progname;
+char const *progname;
 
 #ifdef NO_MAIN_ALLOWED
 CALL(ntpdc,"ntpdc",ntpdcmain);
@@ -274,7 +287,6 @@ ntpdcmain(
 	char *argv[]
 	)
 {
-
 	delay_time.l_ui = 0;
 	delay_time.l_uf = DEFDELAY;
 
@@ -351,7 +363,7 @@ ntpdcmain(
 
 #ifndef SYS_WINNT /* Under NT cannot handle SIGINT, WIN32 spawns a handler */
 	if (interactive)
-	    (void) signal_no_reset(SIGINT, abortcmd);
+		(void) signal_no_reset(SIGINT, abortcmd);
 #endif /* SYS_WINNT */
 
 	/*
@@ -392,31 +404,28 @@ openhost(
 	)
 {
 	char temphost[LENHOSTNAME];
-	int a_info, i;
+	int a_info;
 	struct addrinfo hints, *ai = NULL;
 	sockaddr_u addr;
 	size_t octets;
-	register const char *cp;
+	const char *cp;
 	char name[LENHOSTNAME];
 	char service[5];
 
 	/*
 	 * We need to get by the [] if they were entered 
 	 */
-	
-	cp = hname;
-	
-	if (*cp == '[') {
-		cp++;	
-		for (i = 0; *cp && *cp != ']'; cp++, i++)
-			name[i] = *cp;
-		if (*cp == ']') {
-			name[i] = '\0';
-			hname = name;
-		} else {
+	if (*hname == '[') {
+		cp = strchr(hname + 1, ']');
+		if (!cp || (octets = (size_t)(cp - hname) - 1) >= sizeof(name)) {
+			errno = EINVAL;
+			warning("%s", "bad hostname/address");
 			return 0;
 		}
-	}	
+		memcpy(name, hname + 1, octets);
+		name[octets] = '\0';
+		hname = name;
+	}
 
 	/*
 	 * First try to resolve it as an ip address and if that fails,
@@ -498,7 +507,7 @@ openhost(
 		int optionValue = SO_SYNCHRONOUS_NONALERT;
 		int err;
 
-		err = setsockopt(INVALID_SOCKET, SOL_SOCKET, SO_OPENTYPE, (char *)&optionValue, sizeof(optionValue));
+		err = setsockopt(INVALID_SOCKET, SOL_SOCKET, SO_OPENTYPE, (void *)&optionValue, sizeof(optionValue));
 		if (err != NO_ERROR) {
 			(void) fprintf(stderr, "cannot open nonoverlapped sockets\n");
 			exit(1);
@@ -518,7 +527,7 @@ openhost(
 		int rbufsize = INITDATASIZE + 2048; /* 2K for slop */
 
 		if (setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF,
-			       &rbufsize, sizeof(int)) == -1)
+			       (void *)&rbufsize, sizeof(int)) == -1)
 		    error("setsockopt");
 	}
 # endif
@@ -526,10 +535,11 @@ openhost(
 
 #ifdef SYS_VXWORKS
 	if (connect(sockfd, (struct sockaddr *)&hostaddr, 
-		    sizeof(hostaddr)) == -1) {
+		    sizeof(hostaddr)) == -1)
 #else
-	if (connect(sockfd, ai->ai_addr, ai->ai_addrlen) == -1) {
+	if (connect(sockfd, ai->ai_addr, ai->ai_addrlen) == -1)
 #endif /* SYS_VXWORKS */
+	{
 		error("connect");
 		exit(-1);
 	}
@@ -582,18 +592,18 @@ static int
 getresponse(
 	int implcode,
 	int reqcode,
-	int *ritems,
-	int *rsize,
-	char **rdata,
-	int esize
+	size_t *ritems,
+	size_t *rsize,
+	const char **rdata,
+	size_t esize
 	)
 {
 	struct resp_pkt rpkt;
 	struct sock_timeval tvo;
-	int items;
-	int i;
-	int size;
-	int datasize;
+	size_t items;
+	size_t i;
+	size_t size;
+	size_t datasize;
 	char *datap;
 	char *tmp_data;
 	char haveseq[MAXSEQ+1];
@@ -604,6 +614,10 @@ getresponse(
 	fd_set fds;
 	ssize_t n;
 	int pad;
+	/* absolute timeout checks. Not 'time_t' by intention! */
+	uint32_t tobase;	/* base value for timeout */
+	uint32_t tospan;	/* timeout span (max delay) */
+	uint32_t todiff;	/* current delay */
 
 	/*
 	 * This is pretty tricky.  We may get between 1 and many packets
@@ -620,27 +634,40 @@ getresponse(
 	lastseq = 999;	/* too big to be a sequence number */
 	ZERO(haveseq);
 	FD_ZERO(&fds);
+	tobase = (uint32_t)time(NULL);
 
     again:
 	if (firstpkt)
 		tvo = tvout;
 	else
 		tvo = tvsout;
+	tospan = (uint32_t)tvo.tv_sec + (tvo.tv_usec != 0);
 	
 	FD_SET(sockfd, &fds);
-	n = select(sockfd+1, &fds, (fd_set *)0, (fd_set *)0, &tvo);
-
+	n = select(sockfd+1, &fds, NULL, NULL, &tvo);
 	if (n == -1) {
 		warning("select fails");
 		return -1;
 	}
+	
+	/*
+	 * Check if this is already too late. Trash the data and fake a
+	 * timeout if this is so.
+	 */
+	todiff = (((uint32_t)time(NULL)) - tobase) & 0x7FFFFFFFu;
+	if ((n > 0) && (todiff > tospan)) {
+		n = recv(sockfd, (char *)&rpkt, sizeof(rpkt), 0);
+		n -= n; /* faked timeout return from 'select()'*/
+	}
+	
 	if (n == 0) {
 		/*
 		 * Timed out.  Return what we have
 		 */
 		if (firstpkt) {
 			(void) fprintf(stderr,
-				       "%s: timed out, nothing received\n", currenthost);
+				       "%s: timed out, nothing received\n",
+				       currenthost);
 			return ERR_TIMEOUT;
 		} else {
 			(void) fprintf(stderr,
@@ -650,7 +677,7 @@ getresponse(
 				printf("Received sequence numbers");
 				for (n = 0; n <= MAXSEQ; n++)
 				    if (haveseq[n])
-					printf(" %zd,", n);
+					printf(" %zd,", (size_t)n);
 				if (lastseq != 999)
 				    printf(" last frame received\n");
 				else
@@ -672,7 +699,7 @@ getresponse(
 	 */
 	if (n < (ssize_t)RESP_HEADER_SIZE) {
 		if (debug)
-			printf("Short (%zd byte) packet received\n", n);
+			printf("Short (%zd byte) packet received\n", (size_t)n);
 		goto again;
 	}
 	if (INFO_VERSION(rpkt.rm_vn_mode) > NTP_VERSION ||
@@ -740,7 +767,7 @@ getresponse(
 	if ((size_t)datasize > (n-RESP_HEADER_SIZE)) {
 		if (debug)
 		    printf(
-			    "Received items %d, size %d (total %d), data in packet is %zu\n",
+			    "Received items %zu, size %zu (total %zu), data in packet is %zu\n",
 			    items, size, datasize, n-RESP_HEADER_SIZE);
 		goto again;
 	}
@@ -751,7 +778,7 @@ getresponse(
 	 */
 	if (!firstpkt && size != *rsize) {
 		if (debug)
-		    printf("Received itemsize %d, previous %d\n",
+		    printf("Received itemsize %zu, previous %zu\n",
 			   size, *rsize);
 		goto again;
 	}
@@ -778,10 +805,12 @@ getresponse(
 	}
 
 	/*
-	 * So far, so good.  Copy this data into the output array.
+	 * So far, so good.  Copy this data into the output array. Bump
+	 * the timeout base, in case we expect more data.
 	 */
+	tobase = (uint32_t)time(NULL);
 	if ((datap + datasize + (pad * items)) > (pktdata + pktdatasize)) {
-		int offset = datap - pktdata;
+		size_t offset = datap - pktdata;
 		growpktdata();
 		*rdata = pktdata; /* might have been realloced ! */
 		datap = pktdata + offset;
@@ -844,9 +873,9 @@ sendrequest(
 	int implcode,
 	int reqcode,
 	int auth,
-	u_int qitems,
+	size_t qitems,
 	size_t qsize,
-	char *qdata
+	const char *qdata
 	)
 {
 	struct req_pkt qpkt;
@@ -855,7 +884,7 @@ sendrequest(
 	u_long	key_id;
 	l_fp	ts;
 	l_fp *	ptstamp;
-	int	maclen;
+	size_t	maclen;
 	char *	pass;
 
 	ZERO(qpkt);
@@ -918,13 +947,14 @@ sendrequest(
 	get_systime(&ts);
 	L_ADD(&ts, &delay_time);
 	HTONL_FP(&ts, ptstamp);
-	maclen = authencrypt(info_auth_keyid, (void *)&qpkt, reqsize);
+	maclen = authencrypt(
+		info_auth_keyid, (void *)&qpkt, size2int_chk(reqsize));
 	if (!maclen) {  
 		fprintf(stderr, "Key not found\n");
 		return 1;
-	} else if (maclen != (int)(info_auth_hashlen + sizeof(keyid_t))) {
+	} else if (maclen != (size_t)(info_auth_hashlen + sizeof(keyid_t))) {
 		fprintf(stderr,
-			"%d octet MAC, %zu expected with %zu octet digest\n",
+			"%zu octet MAC, %zu expected with %zu octet digest\n",
 			maclen, (info_auth_hashlen + sizeof(keyid_t)),
 			info_auth_hashlen);
 		return 1;
@@ -941,12 +971,12 @@ doquery(
 	int implcode,
 	int reqcode,
 	int auth,
-	int qitems,
-	int qsize,
-	char *qdata,
-	int *ritems,
-	int *rsize,
-	char **rdata,
+	size_t qitems,
+	size_t qsize,
+	const char *qdata,
+	size_t *ritems,
+	size_t *rsize,
+	const char **rdata,
  	int quiet_mask,
 	int esize
 	)
@@ -972,8 +1002,7 @@ again:
 		tvzero.tv_sec = tvzero.tv_usec = 0;
 		FD_ZERO(&fds);
 		FD_SET(sockfd, &fds);
-		res = select(sockfd+1, &fds, (fd_set *)0, (fd_set *)0, &tvzero);
-
+		res = select(sockfd+1, &fds, NULL, NULL, &tvzero);
 		if (res == -1) {
 			warning("polling select");
 			return -1;
@@ -1097,12 +1126,14 @@ abortcmd(
 	int sig
 	)
 {
-
 	if (current_output == stdout)
-	    (void) fflush(stdout);
+		(void)fflush(stdout);
 	putc('\n', stderr);
-	(void) fflush(stderr);
-	if (jump) longjmp(interrupt_buf, 1);
+	(void)fflush(stderr);
+	if (jump) {
+		jump = 0;
+		LONGJMP(interrupt_buf, 1);
+	}
 }
 #endif /* SYS_WINNT */
 
@@ -1214,14 +1245,22 @@ docmd(
 		current_output = stdout;
 	}
 
-	if (interactive && setjmp(interrupt_buf)) {
-		return;
+	if (interactive) {
+		if ( ! SETJMP(interrupt_buf)) {
+			jump = 1;
+			(xcmd->handler)(&pcmd, current_output);
+			jump = 0;
+		} else {
+			fflush(current_output);
+			fputs("\n >>> command aborted <<<\n", stderr);
+			fflush(stderr);
+		}
 	} else {
-		jump = 1;
-		(xcmd->handler)(&pcmd, current_output);
 		jump = 0;
-		if (current_output != stdout)
-			(void) fclose(current_output);
+		(xcmd->handler)(&pcmd, current_output);
+	}
+	if ((NULL != current_output) && (stdout != current_output)) {
+		(void)fclose(current_output);
 		current_output = NULL;
 	}
 }
@@ -1271,7 +1310,7 @@ findcmd(
 	)
 {
 	register struct xcmd *cl;
-	register int clen;
+	size_t clen;
 	int nmatch;
 	struct xcmd *nearmatch = NULL;
 	struct xcmd *clist;
@@ -1384,7 +1423,7 @@ getarg(
 				return 0;
 			}
 			argp->uval *= 10;
-			argp->uval += (cp - digits);
+			argp->uval += (u_long)(cp - digits);
 		} while (*(++np) != '\0');
 
 		if (isneg) {
@@ -1443,7 +1482,7 @@ getnetnum(
 				    LENHOSTNAME, NULL, 0, 0);
 		return 1;
 	} else if (getaddrinfo(hname, "ntp", &hints, &ai) == 0) {
-		NTP_INSIST(sizeof(*num) >= ai->ai_addrlen);
+		INSIST(sizeof(*num) >= ai->ai_addrlen);
 		memcpy(num, ai->ai_addr, ai->ai_addrlen);
 		if (fullhost != NULL) {
 			if (ai->ai_canonname != NULL)

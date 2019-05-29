@@ -621,8 +621,10 @@ CFLAGS+=	-I${KRB5DIR}/lib/krb5 \
 		-I${KRB5DIR}/lib/asn1 \
 		-I${KRB5DIR}/lib/roken \
 		-I${KRB5DIR}/lib/ipc \
-		-I${KRB5DIR}/base -I.
+		-I${KRB5DIR}/base \
+		-I${SRCTOP}/contrib/com_err \
+		-I.
 
 .include <bsd.lib.mk>
 
-.PATH: ${KRB5DIR}/lib/krb5 ${KRB5DIR}/lib/asn1 ${KRB5DIR}/include ${.CURDIR}/../../include ${KRB5DIR}/doc/doxyout/krb5/man/man3/
+.PATH: ${KRB5DIR}/lib/krb5 ${KRB5DIR}/lib/asn1 ${KRB5DIR}/include ${SRCTOP}/kerberos5/include ${KRB5DIR}/doc/doxyout/krb5/man/man3/

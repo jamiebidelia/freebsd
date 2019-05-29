@@ -10,7 +10,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 4. Neither the name of the University nor the names of its contributors
+ * 3. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -41,6 +41,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/domain.h>
 #include <sys/protosw.h>
 #include <sys/socket.h>
+#define	_WANT_SOCKET
 #include <sys/socketvar.h>
 #include <sys/sysctl.h>
 
@@ -66,7 +67,6 @@ __FBSDID("$FreeBSD$");
 #include <netinet/tcp_fsm.h>
 #include <netinet/tcp_timer.h>
 #include <netinet/tcp_var.h>
-#include <netinet/tcp_debug.h>
 #include <netinet/udp.h>
 #include <netinet/udp_var.h>
 
@@ -83,15 +83,18 @@ __FBSDID("$FreeBSD$");
 #include <unistd.h>
 #include <libxo/xo.h>
 #include "netstat.h"
+#include "nl_defs.h"
 
-char	*inetname(struct in_addr *);
-void	inetprint(const char *, struct in_addr *, int, const char *, int);
+#ifdef INET
+static void inetprint(const char *, struct in_addr *, int, const char *, int,
+    const int);
+#endif
 #ifdef INET6
 static int udp_done, tcp_done, sdp_done;
 #endif /* INET6 */
 
 static int
-pcblist_sysctl(int proto, const char *name, char **bufp, int istcp __unused)
+pcblist_sysctl(int proto, const char *name, char **bufp)
 {
 	const char *mibvar;
 	char *buf;
@@ -119,7 +122,7 @@ pcblist_sysctl(int proto, const char *name, char **bufp, int istcp __unused)
 			xo_warn("sysctl: %s", mibvar);
 		return (0);
 	}
-	if ((buf = malloc(len)) == 0) {
+	if ((buf = malloc(len)) == NULL) {
 		xo_warnx("malloc %lu bytes", (u_long)len);
 		return (0);
 	}
@@ -158,141 +161,30 @@ sotoxsocket(struct socket *so, struct xsocket *xso)
 
 	bzero(xso, sizeof *xso);
 	xso->xso_len = sizeof *xso;
-	xso->xso_so = so;
+	xso->xso_so = (uintptr_t)so;
 	xso->so_type = so->so_type;
 	xso->so_options = so->so_options;
 	xso->so_linger = so->so_linger;
 	xso->so_state = so->so_state;
-	xso->so_pcb = so->so_pcb;
+	xso->so_pcb = (uintptr_t)so->so_pcb;
 	if (kread((uintptr_t)so->so_proto, &proto, sizeof(proto)) != 0)
 		return (-1);
 	xso->xso_protocol = proto.pr_protocol;
 	if (kread((uintptr_t)proto.pr_domain, &domain, sizeof(domain)) != 0)
 		return (-1);
 	xso->xso_family = domain.dom_family;
-	xso->so_qlen = so->so_qlen;
-	xso->so_incqlen = so->so_incqlen;
-	xso->so_qlimit = so->so_qlimit;
 	xso->so_timeo = so->so_timeo;
 	xso->so_error = so->so_error;
-	xso->so_oobmark = so->so_oobmark;
-	sbtoxsockbuf(&so->so_snd, &xso->so_snd);
-	sbtoxsockbuf(&so->so_rcv, &xso->so_rcv);
-	return (0);
-}
-
-static int
-pcblist_kvm(u_long off, char **bufp, int istcp)
-{
-	struct inpcbinfo pcbinfo;
-	struct inpcbhead listhead;
-	struct inpcb *inp;
-	struct xinpcb xi;
-	struct xinpgen xig;
-	struct xtcpcb xt;
-	struct socket so;
-	struct xsocket *xso;
-	char *buf, *p;
-	size_t len;
-
-	if (off == 0)
-		return (0);
-	kread(off, &pcbinfo, sizeof(pcbinfo));
-	if (istcp)
-		len = 2 * sizeof(xig) +
-		    (pcbinfo.ipi_count + pcbinfo.ipi_count / 8) *
-		    sizeof(struct xtcpcb);
-	else
-		len = 2 * sizeof(xig) +
-		    (pcbinfo.ipi_count + pcbinfo.ipi_count / 8) *
-		    sizeof(struct xinpcb);
-	if ((buf = malloc(len)) == 0) {
-		xo_warnx("malloc %lu bytes", (u_long)len);
-		return (0);
+	if ((so->so_options & SO_ACCEPTCONN) != 0) {
+		xso->so_qlen = so->sol_qlen;
+		xso->so_incqlen = so->sol_incqlen;
+		xso->so_qlimit = so->sol_qlimit;
+	} else {
+		sbtoxsockbuf(&so->so_snd, &xso->so_snd);
+		sbtoxsockbuf(&so->so_rcv, &xso->so_rcv);
+		xso->so_oobmark = so->so_oobmark;
 	}
-	p = buf;
-
-#define	COPYOUT(obj, size) do {						\
-	if (len < (size)) {						\
-		xo_warnx("buffer size exceeded");			\
-		goto fail;						\
-	}								\
-	bcopy((obj), p, (size));					\
-	len -= (size);							\
-	p += (size);							\
-} while (0)
-
-#define	KREAD(off, buf, len) do {					\
-	if (kread((uintptr_t)(off), (buf), (len)) != 0)			\
-		goto fail;						\
-} while (0)
-
-	/* Write out header. */
-	xig.xig_len = sizeof xig;
-	xig.xig_count = pcbinfo.ipi_count;
-	xig.xig_gen = pcbinfo.ipi_gencnt;
-	xig.xig_sogen = 0;
-	COPYOUT(&xig, sizeof xig);
-
-	/* Walk the PCB list. */
-	xt.xt_len = sizeof xt;
-	xi.xi_len = sizeof xi;
-	if (istcp)
-		xso = &xt.xt_socket;
-	else
-		xso = &xi.xi_socket;
-	KREAD(pcbinfo.ipi_listhead, &listhead, sizeof(listhead));
-	LIST_FOREACH(inp, &listhead, inp_list) {
-		if (istcp) {
-			KREAD(inp, &xt.xt_inp, sizeof(*inp));
-			inp = &xt.xt_inp;
-		} else {
-			KREAD(inp, &xi.xi_inp, sizeof(*inp));
-			inp = &xi.xi_inp;
-		}
-
-		if (inp->inp_gencnt > pcbinfo.ipi_gencnt)
-			continue;
-
-		if (istcp) {
-			if (inp->inp_ppcb == NULL)
-				bzero(&xt.xt_tp, sizeof xt.xt_tp);
-			else if (inp->inp_flags & INP_TIMEWAIT) {
-				bzero(&xt.xt_tp, sizeof xt.xt_tp);
-				xt.xt_tp.t_state = TCPS_TIME_WAIT;
-			} else
-				KREAD(inp->inp_ppcb, &xt.xt_tp,
-				    sizeof xt.xt_tp);
-		}
-		if (inp->inp_socket) {
-			KREAD(inp->inp_socket, &so, sizeof(so));
-			if (sotoxsocket(&so, xso) != 0)
-				goto fail;
-		} else {
-			bzero(xso, sizeof(*xso));
-			if (istcp)
-				xso->xso_protocol = IPPROTO_TCP;
-		}
-		if (istcp)
-			COPYOUT(&xt, sizeof xt);
-		else
-			COPYOUT(&xi, sizeof xi);
-	}
-
-	/* Reread the pcbinfo and write out the footer. */
-	kread(off, &pcbinfo, sizeof(pcbinfo));
-	xig.xig_count = pcbinfo.ipi_count;
-	xig.xig_gen = pcbinfo.ipi_gencnt;
-	COPYOUT(&xig, sizeof xig);
-
-	*bufp = buf;
-	return (1);
-
-fail:
-	free(buf);
 	return (0);
-#undef COPYOUT
-#undef KREAD
 }
 
 /*
@@ -304,15 +196,14 @@ fail:
 void
 protopr(u_long off, const char *name, int af1, int proto)
 {
-	int istcp;
 	static int first = 1;
+	int istcp;
 	char *buf;
 	const char *vchar;
-	struct tcpcb *tp = NULL;
-	struct inpcb *inp;
+	struct xtcpcb *tp;
+	struct xinpcb *inp;
 	struct xinpgen *xig, *oxig;
 	struct xsocket *so;
-	struct xtcp_timer *timer;
 
 	istcp = 0;
 	switch (proto) {
@@ -341,28 +232,21 @@ protopr(u_long off, const char *name, int af1, int proto)
 #endif
 		break;
 	}
-	if (live) {
-		if (!pcblist_sysctl(proto, name, &buf, istcp))
-			return;
-	} else {
-		if (!pcblist_kvm(off, &buf, istcp))
-			return;
-	}
+
+	if (!pcblist_sysctl(proto, name, &buf))
+		return;
 
 	oxig = xig = (struct xinpgen *)buf;
 	for (xig = (struct xinpgen *)((char *)xig + xig->xig_len);
 	    xig->xig_len > sizeof(struct xinpgen);
 	    xig = (struct xinpgen *)((char *)xig + xig->xig_len)) {
 		if (istcp) {
-			timer = &((struct xtcpcb *)xig)->xt_timer;
-			tp = &((struct xtcpcb *)xig)->xt_tp;
-			inp = &((struct xtcpcb *)xig)->xt_inp;
-			so = &((struct xtcpcb *)xig)->xt_socket;
+			tp = (struct xtcpcb *)xig;
+			inp = &tp->xt_inp;
 		} else {
-			inp = &((struct xinpcb *)xig)->xi_inp;
-			so = &((struct xinpcb *)xig)->xi_socket;
-			timer = NULL;
+			inp = (struct xinpcb *)xig;
 		}
+		so = &inp->xi_socket;
 
 		/* Ignore sockets for protocols other than the desired one. */
 		if (so->xso_protocol != proto)
@@ -417,23 +301,29 @@ protopr(u_long off, const char *name, int af1, int proto)
 				    "Tcpcb");
 			if (Lflag)
 				xo_emit((Aflag && !Wflag) ?
-				    "{T:/%-5.5s} {T:/%-14.14s} {T:/%-18.18s}" :
-				    "{T:/%-5.5s} {T:/%-14.14s} {T:/%-22.22s}",
+				    "{T:/%-5.5s} {T:/%-32.32s} {T:/%-18.18s}" :
+				    ((!Wflag || af1 == AF_INET) ?
+				    "{T:/%-5.5s} {T:/%-32.32s} {T:/%-22.22s}" :
+				    "{T:/%-5.5s} {T:/%-32.32s} {T:/%-45.45s}"),
 				    "Proto", "Listen", "Local Address");
 			else if (Tflag)
 				xo_emit((Aflag && !Wflag) ?
     "{T:/%-5.5s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-18.18s} {T:/%s}" :
-    "{T:/%-5.5s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-22.22s} {T:/%s}",
+				    ((!Wflag || af1 == AF_INET) ?
+    "{T:/%-5.5s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-22.22s} {T:/%s}" :
+    "{T:/%-5.5s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-45.45s} {T:/%s}"),
 				    "Proto", "Rexmit", "OOORcv", "0-win",
 				    "Local Address", "Foreign Address");
 			else {
 				xo_emit((Aflag && !Wflag) ?
     "{T:/%-5.5s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-18.18s} {T:/%-18.18s}" :
-    "{T:/%-5.5s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-22.22s} {T:/%-22.22s}",
+				    ((!Wflag || af1 == AF_INET) ?
+    "{T:/%-5.5s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-22.22s} {T:/%-22.22s}" :
+    "{T:/%-5.5s} {T:/%-6.6s} {T:/%-6.6s} {T:/%-45.45s} {T:/%-45.45s}"),
 				    "Proto", "Recv-Q", "Send-Q",
 				    "Local Address", "Foreign Address");
 				if (!xflag && !Rflag)
-					xo_emit(" (state)");
+					xo_emit(" {T:/%-11.11s}", "(state)");
 			}
 			if (xflag) {
 				xo_emit(" {T:/%-6.6s} {T:/%-6.6s} {T:/%-6.6s} "
@@ -451,6 +341,8 @@ protopr(u_long off, const char *name, int af1, int proto)
 				xo_emit("  {T:/%8.8s} {T:/%5.5s}",
 				    "flowid", "ftype");
 			}
+			if (Pflag)
+				xo_emit(" {T:/%s}", "Log ID");
 			xo_emit("\n");
 			first = 0;
 		}
@@ -463,7 +355,7 @@ protopr(u_long off, const char *name, int af1, int proto)
 				    2 * (int)sizeof(void *),
 				    (u_long)inp->inp_ppcb);
 			else
-				xo_emit("{q:adddress/%*lx} ",
+				xo_emit("{q:address/%*lx} ",
 				    2 * (int)sizeof(void *),
 				    (u_long)so->so_pcb);
 		}
@@ -480,11 +372,11 @@ protopr(u_long off, const char *name, int af1, int proto)
 		else
 			xo_emit("{:protocol/%-3.3s%-2.2s/%s%s} ", name, vchar);
 		if (Lflag) {
-			char buf1[15];
+			char buf1[33];
 
-			snprintf(buf1, 15, "%d/%d/%d", so->so_qlen,
+			snprintf(buf1, sizeof buf1, "%u/%u/%u", so->so_qlen,
 			    so->so_incqlen, so->so_qlimit);
-			xo_emit("{:listen-queue-sizes/%-14.14s} ", buf1);
+			xo_emit("{:listen-queue-sizes/%-32.32s} ", buf1);
 		} else if (Tflag) {
 			if (istcp)
 				xo_emit("{:sent-retransmit-packets/%6u} "
@@ -492,21 +384,28 @@ protopr(u_long off, const char *name, int af1, int proto)
 				    "{:sent-zero-window/%6u} ",
 				    tp->t_sndrexmitpack, tp->t_rcvoopack,
 				    tp->t_sndzerowin);
+			else
+				xo_emit("{P:/%21s}", "");
 		} else {
 			xo_emit("{:receive-bytes-waiting/%6u} "
 			    "{:send-bytes-waiting/%6u} ",
 			    so->so_rcv.sb_cc, so->so_snd.sb_cc);
 		}
 		if (numeric_port) {
+#ifdef INET
 			if (inp->inp_vflag & INP_IPV4) {
 				inetprint("local", &inp->inp_laddr,
-				    (int)inp->inp_lport, name, 1);
+				    (int)inp->inp_lport, name, 1, af1);
 				if (!Lflag)
 					inetprint("remote", &inp->inp_faddr,
-					    (int)inp->inp_fport, name, 1);
+					    (int)inp->inp_fport, name, 1, af1);
 			}
+#endif
+#if defined(INET) && defined(INET6)
+			else
+#endif
 #ifdef INET6
-			else if (inp->inp_vflag & INP_IPV6) {
+			if (inp->inp_vflag & INP_IPV6) {
 				inet6print("local", &inp->in6p_laddr,
 				    (int)inp->inp_lport, name, 1);
 				if (!Lflag)
@@ -515,15 +414,20 @@ protopr(u_long off, const char *name, int af1, int proto)
 			} /* else nothing printed now */
 #endif /* INET6 */
 		} else if (inp->inp_flags & INP_ANONPORT) {
+#ifdef INET
 			if (inp->inp_vflag & INP_IPV4) {
 				inetprint("local", &inp->inp_laddr,
-				    (int)inp->inp_lport, name, 1);
+				    (int)inp->inp_lport, name, 1, af1);
 				if (!Lflag)
 					inetprint("remote", &inp->inp_faddr,
-					    (int)inp->inp_fport, name, 0);
+					    (int)inp->inp_fport, name, 0, af1);
 			}
+#endif
+#if defined(INET) && defined(INET6)
+			else
+#endif
 #ifdef INET6
-			else if (inp->inp_vflag & INP_IPV6) {
+			if (inp->inp_vflag & INP_IPV6) {
 				inet6print("local", &inp->in6p_laddr,
 				    (int)inp->inp_lport, name, 1);
 				if (!Lflag)
@@ -532,16 +436,22 @@ protopr(u_long off, const char *name, int af1, int proto)
 			} /* else nothing printed now */
 #endif /* INET6 */
 		} else {
+#ifdef INET
 			if (inp->inp_vflag & INP_IPV4) {
 				inetprint("local", &inp->inp_laddr,
-				    (int)inp->inp_lport, name, 0);
+				    (int)inp->inp_lport, name, 0, af1);
 				if (!Lflag)
 					inetprint("remote", &inp->inp_faddr,
 					    (int)inp->inp_fport, name,
-					    inp->inp_lport != inp->inp_fport);
+					    inp->inp_lport != inp->inp_fport,
+					    af1);
 			}
+#endif
+#if defined(INET) && defined(INET6)
+			else
+#endif
 #ifdef INET6
-			else if (inp->inp_vflag & INP_IPV6) {
+			if (inp->inp_vflag & INP_IPV6) {
 				inet6print("local", &inp->in6p_laddr,
 				    (int)inp->inp_lport, name, 0);
 				if (!Lflag)
@@ -565,31 +475,31 @@ protopr(u_long off, const char *name, int af1, int proto)
 			    so->so_rcv.sb_lowat, so->so_snd.sb_lowat,
 			    so->so_rcv.sb_mbcnt, so->so_snd.sb_mbcnt,
 			    so->so_rcv.sb_mbmax, so->so_snd.sb_mbmax);
-			if (timer != NULL)
+			if (istcp)
 				xo_emit(" {:retransmit-timer/%4d.%02d} "
 				    "{:persist-timer/%4d.%02d} "
 				    "{:keepalive-timer/%4d.%02d} "
 				    "{:msl2-timer/%4d.%02d} "
 				    "{:delay-ack-timer/%4d.%02d} "
 				    "{:inactivity-timer/%4d.%02d}",
-				    timer->tt_rexmt / 1000,
-				    (timer->tt_rexmt % 1000) / 10,
-				    timer->tt_persist / 1000,
-				    (timer->tt_persist % 1000) / 10,
-				    timer->tt_keep / 1000,
-				    (timer->tt_keep % 1000) / 10,
-				    timer->tt_2msl / 1000,
-				    (timer->tt_2msl % 1000) / 10,
-				    timer->tt_delack / 1000,
-				    (timer->tt_delack % 1000) / 10,
-				    timer->t_rcvtime / 1000,
-				    (timer->t_rcvtime % 1000) / 10);
+				    tp->tt_rexmt / 1000,
+				    (tp->tt_rexmt % 1000) / 10,
+				    tp->tt_persist / 1000,
+				    (tp->tt_persist % 1000) / 10,
+				    tp->tt_keep / 1000,
+				    (tp->tt_keep % 1000) / 10,
+				    tp->tt_2msl / 1000,
+				    (tp->tt_2msl % 1000) / 10,
+				    tp->tt_delack / 1000,
+				    (tp->tt_delack % 1000) / 10,
+				    tp->t_rcvtime / 1000,
+				    (tp->t_rcvtime % 1000) / 10);
 		}
 		if (istcp && !Lflag && !xflag && !Tflag && !Rflag) {
 			if (tp->t_state < 0 || tp->t_state >= TCP_NSTATES)
-				xo_emit("{:tcp-state/%d}", tp->t_state);
+				xo_emit("{:tcp-state/%-11d}", tp->t_state);
 			else {
-				xo_emit("{:tcp-state/%s}",
+				xo_emit("{:tcp-state/%-11s}",
 				    tcpstates[tp->t_state]);
 #if defined(TF_NEEDSYN) && defined(TF_NEEDFIN)
 				/* Show T/TCP `hidden state' */
@@ -604,6 +514,9 @@ protopr(u_long off, const char *name, int af1, int proto)
 			    inp->inp_flowid,
 			    inp->inp_flowtype);
 		}
+		if (istcp && Pflag)
+			xo_emit(" {:log-id/%s}", tp->xt_logid[0] == '\0' ?
+			    "-" : tp->xt_logid);
 		xo_emit("\n");
 		xo_close_instance("socket");
 	}
@@ -628,8 +541,8 @@ protopr(u_long off, const char *name, int af1, int proto)
 void
 tcp_stats(u_long off, const char *name, int af1 __unused, int proto __unused)
 {
-	struct tcpstat tcpstat, zerostat;
-	size_t len = sizeof tcpstat;
+	struct tcpstat tcpstat;
+	uint64_t tcps_states[TCP_NSTATES];
 
 #ifdef INET6
 	if (tcp_done != 0)
@@ -638,16 +551,13 @@ tcp_stats(u_long off, const char *name, int af1 __unused, int proto __unused)
 		tcp_done = 1;
 #endif
 
-	if (live) {
-		if (zflag)
-			memset(&zerostat, 0, len);
-		if (sysctlbyname("net.inet.tcp.stats", &tcpstat, &len,
-		    zflag ? &zerostat : NULL, zflag ? len : 0) < 0) {
-			xo_warn("sysctl: net.inet.tcp.stats");
-			return;
-		}
-	} else
-		kread_counters(off, &tcpstat, len);
+	if (fetch_stats("net.inet.tcp.stats", off, &tcpstat,
+	    sizeof(tcpstat), kread_counters) != 0)
+		return;
+
+	if (fetch_stats_ro("net.inet.tcp.states", nl[N_TCPS_STATES].n_value,
+	    &tcps_states, sizeof(tcps_states), kread_counters) != 0)
+		return;
 
 	xo_open_container("tcp");
 	xo_emit("{T:/%s}:\n", name);
@@ -744,6 +654,12 @@ tcp_stats(u_long off, const char *name, int af1 __unused, int proto __unused)
 	    "{N:/ignored RSTs in the window%s}\n");
 	p(tcps_connects, "\t{:connections-established/%ju} "
 	    "{N:/connection%s established (including accepts)}\n");
+	p(tcps_usedrtt, "\t\t{:connections-hostcache-rtt/%ju} "
+	    "{N:/time%s used RTT from hostcache}\n");
+	p(tcps_usedrttvar, "\t\t{:connections-hostcache-rttvar/%ju} "
+	    "{N:/time%s used RTT variance from hostcache}\n");
+	p(tcps_usedssthresh, "\t\t{:connections-hostcache-ssthresh/%ju} "
+	    "{N:/time%s used slow-start threshold from hostcache}\n");
 	p2(tcps_closed, tcps_drops, "\t{:connections-closed/%ju} "
 	    "{N:/connection%s closed (including} "
 	    "{:connection-drops/%ju} {N:/drop%s})\n");
@@ -846,12 +762,59 @@ tcp_stats(u_long off, const char *name, int af1 __unused, int proto __unused)
 	    "{N:/successful ECN handshake%s}\n");
 	p(tcps_ecn_rcwnd, "\t{:congestion-reductions/%ju} "
 	    "{N:/time%s ECN reduced the congestion window}\n");
+
+	xo_close_container("ecn");
+	xo_open_container("tcp-signature");
+	p(tcps_sig_rcvgoodsig, "\t{:received-good-signature/%ju} "
+	    "{N:/packet%s with matching signature received}\n");
+	p(tcps_sig_rcvbadsig, "\t{:received-bad-signature/%ju} "
+	    "{N:/packet%s with bad signature received}\n");
+	p(tcps_sig_err_buildsig, "\t{:failed-make-signature/%ju} "
+	    "{N:/time%s failed to make signature due to no SA}\n");
+	p(tcps_sig_err_sigopt, "\t{:no-signature-expected/%ju} "
+	    "{N:/time%s unexpected signature received}\n");
+	p(tcps_sig_err_nosigopt, "\t{:no-signature-provided/%ju} "
+	    "{N:/time%s no signature provided by segment}\n");
+
+	xo_close_container("tcp-signature");
+	xo_open_container("pmtud");
+
+	p(tcps_pmtud_blackhole_activated, "\t{:pmtud-activated/%ju} "
+	    "{N:/Path MTU discovery black hole detection activation%s}\n");
+	p(tcps_pmtud_blackhole_activated_min_mss,
+	    "\t{:pmtud-activated-min-mss/%ju} "
+	    "{N:/Path MTU discovery black hole detection min MSS activation%s}\n");
+	p(tcps_pmtud_blackhole_failed, "\t{:pmtud-failed/%ju} "
+	    "{N:/Path MTU discovery black hole detection failure%s}\n");
  #undef p
  #undef p1a
  #undef p2
  #undef p2a
  #undef p3
-	xo_close_container("ecn");
+	xo_close_container("pmtud");
+
+
+	xo_open_container("TCP connection count by state");
+	xo_emit("{T:/TCP connection count by state}:\n");
+	for (int i = 0; i < TCP_NSTATES; i++) {
+		/*
+		 * XXXGL: is there a way in libxo to use %s
+		 * in the "content string" of a format
+		 * string? I failed to do that, that's why
+		 * a temporary buffer is used to construct
+		 * format string for xo_emit().
+		 */
+		char fmtbuf[80];
+
+		if (sflag > 1 && tcps_states[i] == 0)
+			continue;
+		snprintf(fmtbuf, sizeof(fmtbuf), "\t{:%s/%%ju} "
+                    "{Np:/connection ,connections} in %s state\n",
+		    tcpstates[i], tcpstates[i]);
+		xo_emit(fmtbuf, (uintmax_t )tcps_states[i]);
+	}
+	xo_close_container("TCP connection count by state");
+
 	xo_close_container("tcp");
 }
 
@@ -861,8 +824,7 @@ tcp_stats(u_long off, const char *name, int af1 __unused, int proto __unused)
 void
 udp_stats(u_long off, const char *name, int af1 __unused, int proto __unused)
 {
-	struct udpstat udpstat, zerostat;
-	size_t len = sizeof udpstat;
+	struct udpstat udpstat;
 	uint64_t delivered;
 
 #ifdef INET6
@@ -872,16 +834,9 @@ udp_stats(u_long off, const char *name, int af1 __unused, int proto __unused)
 		udp_done = 1;
 #endif
 
-	if (live) {
-		if (zflag)
-			memset(&zerostat, 0, len);
-		if (sysctlbyname("net.inet.udp.stats", &udpstat, &len,
-		    zflag ? &zerostat : NULL, zflag ? len : 0) < 0) {
-			xo_warn("sysctl: net.inet.udp.stats");
-			return;
-		}
-	} else
-		kread_counters(off, &udpstat, len);
+	if (fetch_stats("net.inet.udp.stats", off, &udpstat,
+	    sizeof(udpstat), kread_counters) != 0)
+		return;
 
 	xo_open_container("udp");
 	xo_emit("{T:/%s}:\n", name);
@@ -934,23 +889,11 @@ udp_stats(u_long off, const char *name, int af1 __unused, int proto __unused)
 void
 carp_stats(u_long off, const char *name, int af1 __unused, int proto __unused)
 {
-	struct carpstats carpstat, zerostat;
-	size_t len = sizeof(struct carpstats);
+	struct carpstats carpstat;
 
-	if (live) {
-		if (zflag)
-			memset(&zerostat, 0, len);
-		if (sysctlbyname("net.inet.carp.stats", &carpstat, &len,
-		    zflag ? &zerostat : NULL, zflag ? len : 0) < 0) {
-			if (errno != ENOENT)
-				xo_warn("sysctl: net.inet.carp.stats");
-			return;
-		}
-	} else {
-		if (off == 0)
-			return;
-		kread_counters(off, &carpstat, len);
-	}
+	if (fetch_stats("net.inet.carp.stats", off, &carpstat,
+	    sizeof(carpstat), kread_counters) != 0)
+		return;
 
 	xo_open_container(name);
 	xo_emit("{T:/%s}:\n", name);
@@ -1001,19 +944,11 @@ carp_stats(u_long off, const char *name, int af1 __unused, int proto __unused)
 void
 ip_stats(u_long off, const char *name, int af1 __unused, int proto __unused)
 {
-	struct ipstat ipstat, zerostat;
-	size_t len = sizeof ipstat;
+	struct ipstat ipstat;
 
-	if (live) {
-		if (zflag)
-			memset(&zerostat, 0, len);
-		if (sysctlbyname("net.inet.ip.stats", &ipstat, &len,
-		    zflag ? &zerostat : NULL, zflag ? len : 0) < 0) {
-			xo_warn("sysctl: net.inet.ip.stats");
-			return;
-		}
-	} else
-		kread_counters(off, &ipstat, len);
+	if (fetch_stats("net.inet.ip.stats", off, &ipstat,
+	    sizeof(ipstat), kread_counters) != 0)
+		return;
 
 	xo_open_container(name);
 	xo_emit("{T:/%s}:\n", name);
@@ -1094,19 +1029,11 @@ ip_stats(u_long off, const char *name, int af1 __unused, int proto __unused)
 void
 arp_stats(u_long off, const char *name, int af1 __unused, int proto __unused)
 {
-	struct arpstat arpstat, zerostat;
-	size_t len = sizeof(arpstat);
+	struct arpstat arpstat;
 
-	if (live) {
-		if (zflag)
-			memset(&zerostat, 0, len);
-		if (sysctlbyname("net.link.ether.arp.stats", &arpstat, &len,
-		    zflag ? &zerostat : NULL, zflag ? len : 0) < 0) {
-			xo_warn("sysctl: net.link.ether.arp.stats");
-			return;
-		}
-	} else
-		kread_counters(off, &arpstat, len);
+	if (fetch_stats("net.link.ether.arp.stats", off, &arpstat,
+	    sizeof(arpstat), kread_counters) != 0)
+		return;
 
 	xo_open_container(name);
 	xo_emit("{T:/%s}:\n", name);
@@ -1117,6 +1044,7 @@ arp_stats(u_long off, const char *name, int af1 __unused, int proto __unused)
 	xo_emit("\t" m, (uintmax_t)arpstat.f, pluralies(arpstat.f))
 
 	p(txrequests, "{:sent-requests/%ju} {N:/ARP request%s sent}\n");
+	p(txerrors, "{:sent-failures/%ju} {N:/ARP request%s failed to sent}\n");
 	p2(txreplies, "{:sent-replies/%ju} {N:/ARP repl%s sent}\n");
 	p(rxrequests, "{:received-requests/%ju} "
 	    "{N:/ARP request%s received}\n");
@@ -1187,21 +1115,13 @@ static	const char *icmpnames[ICMP_MAXTYPE + 1] = {
 void
 icmp_stats(u_long off, const char *name, int af1 __unused, int proto __unused)
 {
-	struct icmpstat icmpstat, zerostat;
-	int i, first;
+	struct icmpstat icmpstat;
 	size_t len;
+	int i, first;
 
-	len = sizeof icmpstat;
-	if (live) {
-		if (zflag)
-			memset(&zerostat, 0, len);
-		if (sysctlbyname("net.inet.icmp.stats", &icmpstat, &len,
-		    zflag ? &zerostat : NULL, zflag ? len : 0) < 0) {
-			xo_warn("sysctl: net.inet.icmp.stats");
-			return;
-		}
-	} else
-		kread_counters(off, &icmpstat, len);
+	if (fetch_stats("net.inet.icmp.stats", off, &icmpstat,
+	    sizeof(icmpstat), kread_counters) != 0)
+		return;
 
 	xo_open_container(name);
 	xo_emit("{T:/%s}:\n", name);
@@ -1301,22 +1221,11 @@ icmp_stats(u_long off, const char *name, int af1 __unused, int proto __unused)
 void
 igmp_stats(u_long off, const char *name, int af1 __unused, int proto __unused)
 {
-	struct igmpstat igmpstat, zerostat;
-	size_t len;
+	struct igmpstat igmpstat;
 
-	len = sizeof(igmpstat);
-	if (live) {
-		if (zflag)
-			memset(&zerostat, 0, len);
-		if (sysctlbyname("net.inet.igmp.stats", &igmpstat, &len,
-		    zflag ? &zerostat : NULL, zflag ? len : 0) < 0) {
-			xo_warn("sysctl: net.inet.igmp.stats");
-			return;
-		}
-	} else {
-		len = sizeof(igmpstat);
-		kread(off, &igmpstat, len);
-	}
+	if (fetch_stats("net.inet.igmp.stats", 0, &igmpstat,
+	    sizeof(igmpstat), kread) != 0)
+		return;
 
 	if (igmpstat.igps_version != IGPS_VERSION_3) {
 		xo_warnx("%s: version mismatch (%d != %d)", __func__,
@@ -1381,23 +1290,11 @@ void
 pim_stats(u_long off __unused, const char *name, int af1 __unused,
     int proto __unused)
 {
-	struct pimstat pimstat, zerostat;
-	size_t len = sizeof pimstat;
+	struct pimstat pimstat;
 
-	if (live) {
-		if (zflag)
-			memset(&zerostat, 0, len);
-		if (sysctlbyname("net.inet.pim.stats", &pimstat, &len,
-		    zflag ? &zerostat : NULL, zflag ? len : 0) < 0) {
-			if (errno != ENOENT)
-				xo_warn("sysctl: net.inet.pim.stats");
-			return;
-		}
-	} else {
-		if (off == 0)
-			return;
-		kread_counters(off, &pimstat, len);
-	}
+	if (fetch_stats("net.inet.pim.stats", off, &pimstat,
+	    sizeof(pimstat), kread_counters) != 0)
+		return;
 
 	xo_open_container(name);
 	xo_emit("{T:/%s}:\n", name);
@@ -1435,38 +1332,46 @@ pim_stats(u_long off __unused, const char *name, int af1 __unused,
 	xo_close_container(name);
 }
 
+#ifdef INET
 /*
  * Pretty print an Internet address (net address + port).
  */
-void
+static void
 inetprint(const char *container, struct in_addr *in, int port,
-    const char *proto, int num_port)
+    const char *proto, int num_port, const int af1)
 {
 	struct servent *sp = 0;
 	char line[80], *cp;
 	int width;
+	size_t alen, plen;
 
 	if (container)
 		xo_open_container(container);
 
 	if (Wflag)
-	    sprintf(line, "%s.", inetname(in));
+	    snprintf(line, sizeof(line), "%s.", inetname(in));
 	else
-	    sprintf(line, "%.*s.", (Aflag && !num_port) ? 12 : 16, inetname(in));
-	cp = strchr(line, '\0');
+	    snprintf(line, sizeof(line), "%.*s.",
+		(Aflag && !num_port) ? 12 : 16, inetname(in));
+	alen = strlen(line);
+	cp = line + alen;
 	if (!num_port && port)
 		sp = getservbyport((int)port, proto);
 	if (sp || port == 0)
-		sprintf(cp, "%.15s ", sp ? sp->s_name : "*");
+		snprintf(cp, sizeof(line) - alen,
+		    "%.15s ", sp ? sp->s_name : "*");
 	else
-		sprintf(cp, "%d ", ntohs((u_short)port));
-	width = (Aflag && !Wflag) ? 18 : 22;
+		snprintf(cp, sizeof(line) - alen,
+		    "%d ", ntohs((u_short)port));
+	width = (Aflag && !Wflag) ? 18 :
+		((!Wflag || af1 == AF_INET) ? 22 : 45);
 	if (Wflag)
 		xo_emit("{d:target/%-*s} ", width, line);
 	else
 		xo_emit("{d:target/%-*.*s} ", width, width, line);
 
-	int alen = cp - line - 1, plen = strlen(cp) - 1;
+	plen = strlen(cp) - 1;
+	alen--;
 	xo_emit("{e:address/%*.*s}{e:port/%*.*s}", alen, alen, line, plen,
 	    plen, cp);
 
@@ -1497,7 +1402,7 @@ inetname(struct in_addr *inp)
 			if (np)
 				cp = np->n_name;
 		}
-		if (cp == 0) {
+		if (cp == NULL) {
 			hp = gethostbyaddr((char *)inp, sizeof (*inp), AF_INET);
 			if (hp) {
 				cp = hp->h_name;
@@ -1512,8 +1417,10 @@ inetname(struct in_addr *inp)
 	} else {
 		inp->s_addr = ntohl(inp->s_addr);
 #define	C(x)	((u_int)((x) & 0xff))
-		sprintf(line, "%u.%u.%u.%u", C(inp->s_addr >> 24),
-		    C(inp->s_addr >> 16), C(inp->s_addr >> 8), C(inp->s_addr));
+		snprintf(line, sizeof(line), "%u.%u.%u.%u",
+		    C(inp->s_addr >> 24), C(inp->s_addr >> 16),
+		    C(inp->s_addr >> 8), C(inp->s_addr));
 	}
 	return (line);
 }
+#endif

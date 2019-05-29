@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2003 Peter Wemm.
  * Copyright (c) 1991 Regents of the University of California.
  * All rights reserved.
@@ -15,7 +17,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 4. Neither the name of the University nor the names of its contributors
+ * 3. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -64,12 +66,17 @@
 #define	X86_PG_AVAIL2	0x400	/*   <	programmers use		*/
 #define	X86_PG_AVAIL3	0x800	/*    \				*/
 #define	X86_PG_PDE_PAT	0x1000	/* PAT	PAT index		*/
+#define	X86_PG_PKU(idx)	((pt_entry_t)idx << 59)
 #define	X86_PG_NX	(1ul<<63) /* No-execute */
 #define	X86_PG_AVAIL(x)	(1ul << (x))
 
 /* Page level cache control fields used to determine the PAT type */
 #define	X86_PG_PDE_CACHE (X86_PG_PDE_PAT | X86_PG_NC_PWT | X86_PG_NC_PCD)
 #define	X86_PG_PTE_CACHE (X86_PG_PTE_PAT | X86_PG_NC_PWT | X86_PG_NC_PCD)
+
+/* Protection keys indexes */
+#define	PMAP_MAX_PKRU_IDX	0xf
+#define	X86_PG_PKU_MASK		X86_PG_PKU(PMAP_MAX_PKRU_IDX)
 
 /*
  * Intel extended page table (EPT) bit definitions.
@@ -109,15 +116,17 @@
 #define	PG_MANAGED	X86_PG_AVAIL2
 #define	EPT_PG_EMUL_V	X86_PG_AVAIL(52)
 #define	EPT_PG_EMUL_RW	X86_PG_AVAIL(53)
+#define	PG_PROMOTED	X86_PG_AVAIL(54)	/* PDE only */
 #define	PG_FRAME	(0x000ffffffffff000ul)
 #define	PG_PS_FRAME	(0x000fffffffe00000ul)
+#define	PG_PS_PDP_FRAME	(0x000fffffc0000000ul)
 
 /*
  * Promotion to a 2MB (PDE) page mapping requires that the corresponding 4KB
  * (PTE) page mappings have identical settings for the following fields:
  */
 #define	PG_PTE_PROMOTE	(PG_NX | PG_MANAGED | PG_W | PG_G | PG_PTE_CACHE | \
-	    PG_M | PG_A | PG_U | PG_RW | PG_V)
+	    PG_M | PG_A | PG_U | PG_RW | PG_V | PG_PKU_MASK)
 
 /*
  * Page Protection Exception bits
@@ -128,6 +137,8 @@
 #define PGEX_U		0x04	/* access from User mode (UPL) */
 #define PGEX_RSV	0x08	/* reserved PTE field is non-zero */
 #define PGEX_I		0x10	/* during an instruction fetch */
+#define	PGEX_PK		0x20	/* protection key violation */
+#define	PGEX_SGX	0x40	/* SGX-related */
 
 /* 
  * undef the PG_xx macros that define bits in the regular x86 PTEs that
@@ -213,6 +224,10 @@
 #define	KPML4I		(NPML4EPG-1)
 #define	KPDPI		(NPDPEPG-2)	/* kernbase at -2GB */
 
+/* Large map: index of the first and max last pml4 entry */
+#define	LMSPML4I	(PML4PML4I + 1)
+#define	LMEPML4I	(DMPML4I - 1)
+
 /*
  * XXX doesn't really belong here I guess...
  */
@@ -222,6 +237,10 @@
 #define	PMAP_PCID_NONE		0xffffffff
 #define	PMAP_PCID_KERN		0
 #define	PMAP_PCID_OVERMAX	0x1000
+#define	PMAP_PCID_OVERMAX_KERN	0x800
+#define	PMAP_PCID_USER_PT	0x800
+
+#define	PMAP_NO_CR3		(~0UL)
 
 #ifndef LOCORE
 
@@ -229,6 +248,8 @@
 #include <sys/_cpuset.h>
 #include <sys/_lock.h>
 #include <sys/_mutex.h>
+#include <sys/_pctrie.h>
+#include <sys/_rangeset.h>
 
 #include <vm/_vm_radix.h>
 
@@ -284,9 +305,13 @@ extern pt_entry_t pg_nx;
 struct	pv_entry;
 struct	pv_chunk;
 
+/*
+ * Locks
+ * (p) PV list lock
+ */
 struct md_page {
-	TAILQ_HEAD(,pv_entry)	pv_list;
-	int			pv_gen;
+	TAILQ_HEAD(, pv_entry)	pv_list;  /* (p) */
+	int			pv_gen;   /* (p) */
 	int			pat_mode;
 };
 
@@ -308,7 +333,9 @@ struct pmap_pcids {
 struct pmap {
 	struct mtx		pm_mtx;
 	pml4_entry_t		*pm_pml4;	/* KVA of level 4 page table */
+	pml4_entry_t		*pm_pml4u;	/* KVA of user l4 page table */
 	uint64_t		pm_cr3;
+	uint64_t		pm_ucr3;
 	TAILQ_HEAD(,pv_chunk)	pm_pvchunk;	/* list of mappings in pmap */
 	cpuset_t		pm_active;	/* active on cpus */
 	enum pmap_type		pm_type;	/* regular or nested tables */
@@ -317,6 +344,7 @@ struct pmap {
 	long			pm_eptgen;	/* EPT pmap generation id */
 	int			pm_flags;
 	struct pmap_pcids	pm_pcids[MAXCPU];
+	struct rangeset		pm_pkru;
 };
 
 /* flags */
@@ -361,11 +389,18 @@ typedef struct pv_entry {
  */
 #define	_NPCM	3
 #define	_NPCPV	168
-struct pv_chunk {
-	pmap_t			pc_pmap;
-	TAILQ_ENTRY(pv_chunk)	pc_list;
-	uint64_t		pc_map[_NPCM];	/* bitmap; 1 = free */
+#define	PV_CHUNK_HEADER							\
+	pmap_t			pc_pmap;				\
+	TAILQ_ENTRY(pv_chunk)	pc_list;				\
+	uint64_t		pc_map[_NPCM];	/* bitmap; 1 = free */	\
 	TAILQ_ENTRY(pv_chunk)	pc_lru;
+
+struct pv_chunk_header {
+	PV_CHUNK_HEADER
+};
+
+struct pv_chunk {
+	PV_CHUNK_HEADER
 	struct pv_entry		pc_pventry[_NPCPV];
 };
 
@@ -378,6 +413,8 @@ extern vm_paddr_t dump_avail[];
 extern vm_offset_t virtual_avail;
 extern vm_offset_t virtual_end;
 extern vm_paddr_t dmaplimit;
+extern int pmap_pcid_enabled;
+extern int invpcid_works;
 
 #define	pmap_page_get_memattr(m)	((vm_memattr_t)(m)->md.pat_mode)
 #define	pmap_page_is_write_mapped(m)	(((m)->aflags & PGA_WRITEABLE) != 0)
@@ -385,32 +422,83 @@ extern vm_paddr_t dmaplimit;
 
 struct thread;
 
+void	pmap_activate_boot(pmap_t pmap);
 void	pmap_activate_sw(struct thread *);
 void	pmap_bootstrap(vm_paddr_t *);
+int	pmap_cache_bits(pmap_t pmap, int mode, boolean_t is_pde);
 int	pmap_change_attr(vm_offset_t, vm_size_t, int);
 void	pmap_demote_DMAP(vm_paddr_t base, vm_size_t len, boolean_t invalidate);
+void	pmap_flush_cache_range(vm_offset_t, vm_offset_t);
+void	pmap_flush_cache_phys_range(vm_paddr_t, vm_paddr_t, vm_memattr_t);
 void	pmap_init_pat(void);
 void	pmap_kenter(vm_offset_t va, vm_paddr_t pa);
 void	*pmap_kenter_temporary(vm_paddr_t pa, int i);
 vm_paddr_t pmap_kextract(vm_offset_t);
 void	pmap_kremove(vm_offset_t);
+int	pmap_large_map(vm_paddr_t, vm_size_t, void **, vm_memattr_t);
+void	pmap_large_map_wb(void *sva, vm_size_t len);
+void	pmap_large_unmap(void *sva, vm_size_t len);
 void	*pmap_mapbios(vm_paddr_t, vm_size_t);
 void	*pmap_mapdev(vm_paddr_t, vm_size_t);
 void	*pmap_mapdev_attr(vm_paddr_t, vm_size_t, int);
+void	*pmap_mapdev_pciecfg(vm_paddr_t pa, vm_size_t size);
+bool	pmap_not_in_di(void);
 boolean_t pmap_page_is_mapped(vm_page_t m);
 void	pmap_page_set_memattr(vm_page_t m, vm_memattr_t ma);
+void	pmap_pinit_pml4(vm_page_t);
+bool	pmap_ps_enabled(pmap_t pmap);
 void	pmap_unmapdev(vm_offset_t, vm_size_t);
 void	pmap_invalidate_page(pmap_t, vm_offset_t);
 void	pmap_invalidate_range(pmap_t, vm_offset_t, vm_offset_t);
 void	pmap_invalidate_all(pmap_t);
 void	pmap_invalidate_cache(void);
 void	pmap_invalidate_cache_pages(vm_page_t *pages, int count);
-void	pmap_invalidate_cache_range(vm_offset_t sva, vm_offset_t eva,
-	    boolean_t force);
+void	pmap_invalidate_cache_range(vm_offset_t sva, vm_offset_t eva);
+void	pmap_force_invalidate_cache_range(vm_offset_t sva, vm_offset_t eva);
 void	pmap_get_mapping(pmap_t pmap, vm_offset_t va, uint64_t *ptr, int *num);
 boolean_t pmap_map_io_transient(vm_page_t *, vm_offset_t *, int, boolean_t);
 void	pmap_unmap_io_transient(vm_page_t *, vm_offset_t *, int, boolean_t);
+void	pmap_pti_add_kva(vm_offset_t sva, vm_offset_t eva, bool exec);
+void	pmap_pti_remove_kva(vm_offset_t sva, vm_offset_t eva);
+void	pmap_pti_pcid_invalidate(uint64_t ucr3, uint64_t kcr3);
+void	pmap_pti_pcid_invlpg(uint64_t ucr3, uint64_t kcr3, vm_offset_t va);
+void	pmap_pti_pcid_invlrng(uint64_t ucr3, uint64_t kcr3, vm_offset_t sva,
+	    vm_offset_t eva);
+int	pmap_pkru_clear(pmap_t pmap, vm_offset_t sva, vm_offset_t eva);
+int	pmap_pkru_set(pmap_t pmap, vm_offset_t sva, vm_offset_t eva,
+	    u_int keyidx, int flags);
+void	pmap_thread_init_invl_gen(struct thread *td);
+int	pmap_vmspace_copy(pmap_t dst_pmap, pmap_t src_pmap);
 #endif /* _KERNEL */
+
+/* Return various clipped indexes for a given VA */
+static __inline vm_pindex_t
+pmap_pte_index(vm_offset_t va)
+{
+
+	return ((va >> PAGE_SHIFT) & ((1ul << NPTEPGSHIFT) - 1));
+}
+
+static __inline vm_pindex_t
+pmap_pde_index(vm_offset_t va)
+{
+
+	return ((va >> PDRSHIFT) & ((1ul << NPDEPGSHIFT) - 1));
+}
+
+static __inline vm_pindex_t
+pmap_pdpe_index(vm_offset_t va)
+{
+
+	return ((va >> PDPSHIFT) & ((1ul << NPDPEPGSHIFT) - 1));
+}
+
+static __inline vm_pindex_t
+pmap_pml4e_index(vm_offset_t va)
+{
+
+	return ((va >> PML4SHIFT) & ((1ul << NPML4EPGSHIFT) - 1));
+}
 
 #endif /* !LOCORE */
 

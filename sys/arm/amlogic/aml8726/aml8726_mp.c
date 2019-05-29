@@ -53,6 +53,7 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm.h>
 #include <vm/pmap.h>
 
+#include <machine/cpu.h>
 #include <machine/bus.h>
 #include <machine/smp.h>
 #include <machine/fdt.h>
@@ -177,7 +178,7 @@ find_node_for_device(const char *device, const char **compatible)
 	 * Try to access the node directly i.e. through /aliases/.
 	 */
 
-	if ((node = OF_finddevice(device)) != 0)
+	if ((node = OF_finddevice(device)) != -1)
 		for (i = 0; compatible[i]; i++)
 			if (fdt_is_compatible_strict(node, compatible[i]))
 				return node;
@@ -187,7 +188,7 @@ find_node_for_device(const char *device, const char **compatible)
 	 */
 
 	for (i = 0; compatible[i]; i++) {
-		if ((node = OF_finddevice("/soc")) == 0)
+		if ((node = OF_finddevice("/soc")) == -1)
 			return (0);
 
 		if ((node = fdt_find_compatible(node, compatible[i], 1)) != 0)
@@ -340,21 +341,6 @@ power_on_cpu(int cpu)
 	}
 }
 
-
-void
-platform_mp_init_secondary(void)
-{
-
-	/*
-	 * Consider modifying the timer driver to support
-	 * per-cpu timers and then enabling the timer for
-	 * each AP.
-	 */
-
-	 arm_init_secondary_ic();
-}
-
-
 void
 platform_mp_setmaxid(void)
 {
@@ -432,18 +418,6 @@ moveon:
 	mp_maxid = ncpu - 1;
 }
 
-
-int
-platform_mp_probe(void)
-{
-
-	if (mp_ncpus == 0)
-		platform_mp_setmaxid();
-
-	return (mp_ncpus > 1);
-}
-
-
 void
 platform_mp_start_ap(void)
 {
@@ -485,7 +459,7 @@ platform_mp_start_ap(void)
 	value |= AML_SCU_CONTROL_ENABLE;
 	SCU_WRITE_4(AML_SCU_CONTROL_REG, value);
 	SCU_BARRIER(AML_SCU_CONTROL_REG);
-	cpu_idcache_wbinv_all();
+	dcache_wbinv_poc_all();
 
 	/* Set the boot address and power on each AP. */
 	paddr = pmap_kextract((vm_offset_t)mpentry);
@@ -513,7 +487,8 @@ platform_mp_start_ap(void)
 	CPUCONF_BARRIER(AML_CPUCONF_CONTROL_REG);
 
 	/* Wakeup the now enabled APs */
-	armv7_sev();
+	dsb();
+	sev();
 
 	/*
 	 * Free the resources which are not needed after startup.
@@ -531,13 +506,6 @@ platform_mp_start_ap(void)
 	    aml8726_smp.cbus_res.r_bushandle,
 	    0x100000);
 	memset(&aml8726_smp, 0, sizeof(aml8726_smp));
-}
-
-void
-platform_ipi_send(cpuset_t cpus, u_int ipi)
-{
-
-	pic_ipi_send(cpus, ipi);
 }
 
 /*

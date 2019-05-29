@@ -1,22 +1,10 @@
 # $FreeBSD$
 
-.include <bsd.own.mk>
+PROG_CXX=	llvm-symbolizer
 
-PROG_CXX=llvm-symbolizer
+SRCDIR=		tools/llvm-symbolizer
+SRCS+=		llvm-symbolizer.cpp
 
-SRCDIR=	tools/llvm-symbolizer
-SRCS=	llvm-symbolizer.cpp \
-	LLVMSymbolize.cpp
+LIBADD+=	z
 
-LIBDEPS=llvmdebuginfo \
-	llvmobject \
-	llvmmcparser \
-	llvmmc \
-	llvmbitreader \
-	llvmcore \
-	llvmsupport
-
-.include "../clang.prog.mk"
-
-DPADD+= ${LIBZ}
-LDADD+= -lz
+.include "../llvm.prog.mk"

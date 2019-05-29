@@ -4,7 +4,7 @@
  *	All rights reserved.
  *
  * Author: Harti Brandt <harti@freebsd.org>
- * 
+ *
  * Copyright (c) 2010 The FreeBSD Foundation
  * All rights reserved.
  *
@@ -19,7 +19,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 
+ *
  * THIS SOFTWARE IS PROVIDED BY AUTHOR AND CONTRIBUTORS ``AS IS'' AND
  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
@@ -55,6 +55,48 @@
  * tail queues to hold the objects in ascending order in the list.
  * ordering can be done either on an integer/unsigned field, an asn_oid
  * or an ordering function.
+ */
+
+/*
+ * First set of macros is used when the link is embedded into sub-struct
+ * and links these sub-structs. The sub-struct must be the first field.
+ *
+ * The list is a list of the subfield types.
+ */
+#define INSERT_OBJECT_OID_LINK_INDEX_TYPE(PTR, LIST, LINK, INDEX, SUBF) do {\
+	typedef __typeof ((PTR)->SUBF) _subf_type;			\
+	_subf_type *_lelem;						\
+									\
+	TAILQ_FOREACH(_lelem, (LIST), LINK)				\
+		if (asn_compare_oid(&_lelem->INDEX, &(PTR)->SUBF.INDEX) > 0)\
+			break;						\
+	if (_lelem == NULL)						\
+		TAILQ_INSERT_TAIL((LIST), &(PTR)->SUBF, LINK);		\
+	else								\
+		TAILQ_INSERT_BEFORE(_lelem, &(PTR)->SUBF, LINK);	\
+    } while (0)
+
+#define NEXT_OBJECT_OID_LINK_INDEX_TYPE(LIST, OID, SUB, LINK, INDEX, TYPE) ({\
+	__typeof (TAILQ_FIRST((LIST))) _lelem;				\
+									\
+	TAILQ_FOREACH(_lelem, (LIST), LINK)				\
+		if (index_compare(OID, SUB, &_lelem->INDEX) < 0)	\
+			break;						\
+	(TYPE *)(_lelem);						\
+    })
+
+#define FIND_OBJECT_OID_LINK_INDEX_TYPE(LIST, OID, SUB, LINK, INDEX, TYPE) ({\
+	__typeof (TAILQ_FIRST((LIST))) _lelem;				\
+									\
+	TAILQ_FOREACH(_lelem, (LIST), LINK)				\
+		if (index_compare(OID, SUB, &_lelem->INDEX) == 0)	\
+			break;						\
+	(TYPE *)(_lelem);						\
+    })
+
+/*
+ * This set of macros allows specification of the link and index name.
+ * The index is an OID.
  */
 #define INSERT_OBJECT_OID_LINK_INDEX(PTR, LIST, LINK, INDEX) do {	\
 	__typeof (PTR) _lelem;						\
@@ -317,8 +359,8 @@ struct systemg {
 	u_char		*contact;
 	u_char		*name;
 	u_char		*location;
-	u_int32_t	services;
-	u_int32_t	or_last_change;
+	uint32_t	services;
+	uint32_t	or_last_change;
 };
 extern struct systemg systemg;
 
@@ -334,6 +376,8 @@ extern struct systemg systemg;
 #define COMM_WRITE	2
 
 u_int comm_define(u_int, const char *descr, struct lmodule *, const char *str);
+struct community *comm_define_ordered(u_int priv, const char *descr,
+    struct asn_oid *index, struct lmodule *owner, const char *str);
 const char * comm_string(u_int);
 
 /* community for current packet */

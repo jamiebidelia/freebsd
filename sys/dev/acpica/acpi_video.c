@@ -30,10 +30,11 @@
 __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
+#include <sys/bus.h>
+#include <sys/eventhandler.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/module.h>
-#include <sys/bus.h>
 #include <sys/power.h>
 #include <sys/queue.h>
 #include <sys/sysctl.h>
@@ -597,23 +598,28 @@ acpi_video_vo_bind(struct acpi_video_output *vo, ACPI_HANDLE handle)
 {
 
 	ACPI_SERIAL_BEGIN(video_output);
-	if (vo->vo_levels != NULL)
+	if (vo->vo_levels != NULL) {
+		AcpiRemoveNotifyHandler(vo->handle, ACPI_DEVICE_NOTIFY,
+		    acpi_video_vo_notify_handler);
 		AcpiOsFree(vo->vo_levels);
+		vo->vo_levels = NULL;
+	}
 	vo->handle = handle;
 	vo->vo_numlevels = vo_get_brightness_levels(handle, &vo->vo_levels);
 	if (vo->vo_numlevels >= 2) {
-		if (vo->vo_fullpower == -1
-		    || acpi_video_vo_check_level(vo, vo->vo_fullpower) != 0)
+		if (vo->vo_fullpower == -1 ||
+		    acpi_video_vo_check_level(vo, vo->vo_fullpower) != 0) {
 			/* XXX - can't deal with rebinding... */
 			vo->vo_fullpower = vo->vo_levels[BCL_FULLPOWER];
-		if (vo->vo_economy == -1
-		    || acpi_video_vo_check_level(vo, vo->vo_economy) != 0)
+		}
+		if (vo->vo_economy == -1 ||
+		    acpi_video_vo_check_level(vo, vo->vo_economy) != 0) {
 			/* XXX - see above. */
 			vo->vo_economy = vo->vo_levels[BCL_ECONOMY];
-	}
-	if (vo->vo_levels != NULL)
+		}
 		AcpiInstallNotifyHandler(handle, ACPI_DEVICE_NOTIFY,
 		    acpi_video_vo_notify_handler, vo);
+	}
 	ACPI_SERIAL_END(video_output);
 }
 

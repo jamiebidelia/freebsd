@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2011
  *	Ben Gray <ben.r.gray@gmail.com>.
  * All rights reserved.
@@ -41,8 +43,6 @@ __FBSDID("$FreeBSD$");
 #include <sys/malloc.h>
 
 #include <machine/bus.h>
-#include <machine/cpu.h>
-#include <machine/cpufunc.h>
 #include <machine/resource.h>
 #include <machine/intr.h>
 
@@ -51,7 +51,6 @@ __FBSDID("$FreeBSD$");
 #include <arm/ti/ti_prcm.h>
 #include <arm/ti/omap4/omap4_reg.h>
 
-#include <dev/fdt/fdt_common.h>
 #include <dev/ofw/openfirm.h>
 #include <dev/ofw/ofw_bus.h>
 #include <dev/ofw/ofw_bus_subr.h>
@@ -177,6 +176,7 @@ struct omap4_prcm_softc {
 	struct resource	*sc_res;
 	int		sc_rid;
 	int		sc_instance;
+	int		attach_done;
 };
 
 static int omap4_clk_generic_activate(struct ti_clock_dev *clkdev);
@@ -217,7 +217,8 @@ static int omap4_clk_get_arm_fclk_freq(struct ti_clock_dev *clkdev, unsigned int
 		.clk_deactivate = omap4_clk_generic_deactivate, \
 		.clk_set_source = omap4_clk_generic_set_source, \
 		.clk_accessible = omap4_clk_generic_accessible, \
-		.clk_get_source_freq = omap4_clk_generic_get_source_freq \
+		.clk_get_source_freq = omap4_clk_generic_get_source_freq, \
+		.clk_set_source_freq = NULL \
 	}
 
 #define OMAP4_GPTIMER_CLOCK_DEV(i) \
@@ -226,7 +227,8 @@ static int omap4_clk_get_arm_fclk_freq(struct ti_clock_dev *clkdev, unsigned int
 		.clk_deactivate = omap4_clk_generic_deactivate, \
 		.clk_set_source = omap4_clk_gptimer_set_source, \
 		.clk_accessible = omap4_clk_generic_accessible, \
-		.clk_get_source_freq = omap4_clk_gptimer_get_source_freq \
+		.clk_get_source_freq = omap4_clk_gptimer_get_source_freq, \
+		.clk_set_source_freq = NULL \
 	}
 
 #define OMAP4_HSMMC_CLOCK_DEV(i) \
@@ -235,7 +237,8 @@ static int omap4_clk_get_arm_fclk_freq(struct ti_clock_dev *clkdev, unsigned int
 		.clk_deactivate = omap4_clk_generic_deactivate, \
 		.clk_set_source = omap4_clk_hsmmc_set_source, \
 		.clk_accessible = omap4_clk_generic_accessible, \
-		.clk_get_source_freq = omap4_clk_hsmmc_get_source_freq \
+		.clk_get_source_freq = omap4_clk_hsmmc_get_source_freq, \
+		.clk_set_source_freq = NULL \
 	}
 
 #define OMAP4_HSUSBHOST_CLOCK_DEV(i) \
@@ -244,7 +247,8 @@ static int omap4_clk_get_arm_fclk_freq(struct ti_clock_dev *clkdev, unsigned int
 		.clk_deactivate = omap4_clk_hsusbhost_deactivate, \
 		.clk_set_source = omap4_clk_hsusbhost_set_source, \
 		.clk_accessible = omap4_clk_hsusbhost_accessible, \
-		.clk_get_source_freq = NULL \
+		.clk_get_source_freq = NULL, \
+		.clk_set_source_freq = NULL \
 	}
 
 
@@ -257,6 +261,7 @@ struct ti_clock_dev ti_omap4_clk_devmap[] = {
 		.clk_set_source      = NULL,
 		.clk_accessible      = NULL,
 		.clk_get_source_freq = omap4_clk_get_sysclk_freq,
+		.clk_set_source_freq = NULL,
 	},
 	/* MPU (ARM) core clocks */
 	{	.id                  = MPU_CLK,
@@ -265,6 +270,7 @@ struct ti_clock_dev ti_omap4_clk_devmap[] = {
 		.clk_set_source      = NULL,
 		.clk_accessible      = NULL,
 		.clk_get_source_freq = omap4_clk_get_arm_fclk_freq,
+		.clk_set_source_freq = NULL,
 	},
 
 
@@ -360,9 +366,9 @@ static struct omap4_clk_details g_omap4_clk_details[] = {
 	OMAP4_GENERIC_CLOCK_DETAILS(UART2_CLK, FREQ_48MHZ, CM2_INSTANCE,
 		(L4PER_CM2_OFFSET + 0x0148), CLKCTRL_MODULEMODE_ENABLE),
 	OMAP4_GENERIC_CLOCK_DETAILS(UART3_CLK, FREQ_48MHZ, CM2_INSTANCE,
-		(L4PER_CM2_OFFSET + 0x0140), CLKCTRL_MODULEMODE_ENABLE),
+		(L4PER_CM2_OFFSET + 0x0150), CLKCTRL_MODULEMODE_ENABLE),
 	OMAP4_GENERIC_CLOCK_DETAILS(UART4_CLK, FREQ_48MHZ, CM2_INSTANCE,
-		(L4PER_CM2_OFFSET + 0x0148), CLKCTRL_MODULEMODE_ENABLE),
+		(L4PER_CM2_OFFSET + 0x0158), CLKCTRL_MODULEMODE_ENABLE),
 
 	/* General purpose timers */
 	OMAP4_GENERIC_CLOCK_DETAILS(TIMER1_CLK,  -1, PRM_INSTANCE,
@@ -1029,7 +1035,7 @@ omap4_clk_get_arm_fclk_freq(struct ti_clock_dev *clkdev,
  *	The USB clocking setup seems to be a bit more tricky than the other modules,
  *	to start with the clocking diagram for the HS host module shows 13 different
  *	clocks.  So to try and make it easier to follow the clocking activation
- *	and deactivation is handled in it's own set of callbacks.
+ *	and deactivation is handled in its own set of callbacks.
  *
  *	LOCKING:
  *	Inherits the locks from the omap_prcm driver, no internal locking.
@@ -1323,7 +1329,7 @@ omap4_clk_hsusbhost_accessible(struct ti_clock_dev *clkdev)
  *	Inherits the locks from the omap_prcm driver, no internal locking.
  *
  *	RETURNS:
- *	Returns 0 if sucessful otherwise a negative error code on failure.
+ *	Returns 0 if successful otherwise a negative error code on failure.
  */
 static int
 omap4_clk_hsusbhost_set_source(struct ti_clock_dev *clkdev,
@@ -1441,9 +1447,7 @@ static int
 omap4_prcm_attach(device_t dev)
 {
 	struct omap4_prcm_softc *sc;
-	unsigned int freq;
 	const struct ofw_compat_data *ocd;
-
 
 	sc = device_get_softc(dev);
 	ocd = ofw_bus_search_compatible(dev, compat_data);
@@ -1458,6 +1462,22 @@ omap4_prcm_attach(device_t dev)
 
 	ti_cpu_reset = omap4_prcm_reset;
 
+	return (0);
+}
+
+static void
+omap4_prcm_new_pass(device_t dev)
+{
+	struct omap4_prcm_softc *sc = device_get_softc(dev);
+	unsigned int freq;
+
+	if (sc->attach_done ||
+	  bus_current_pass < (BUS_PASS_TIMER + BUS_PASS_ORDER_EARLY)) {
+		bus_generic_new_pass(dev);
+		return;
+	}
+	sc->attach_done = 1;
+
 	/*
 	 * In order to determine ARM frequency we need both RPM and CM1 
 	 * instances up and running. So wait until all CRM devices are
@@ -1468,12 +1488,16 @@ omap4_prcm_attach(device_t dev)
 		arm_tmr_change_frequency(freq / 2);
 	}
 
-	return (0);
+	return;
 }
 
 static device_method_t omap4_prcm_methods[] = {
 	DEVMETHOD(device_probe, omap4_prcm_probe),
 	DEVMETHOD(device_attach, omap4_prcm_attach),
+
+	/* Bus interface */
+	DEVMETHOD(bus_new_pass, omap4_prcm_new_pass),
+
 	{0, 0},
 };
 
@@ -1486,5 +1510,5 @@ static driver_t omap4_prcm_driver = {
 static devclass_t omap4_prcm_devclass;
 
 EARLY_DRIVER_MODULE(omap4_prcm, simplebus, omap4_prcm_driver,
-    omap4_prcm_devclass, 0, 0, BUS_PASS_TIMER + BUS_PASS_ORDER_EARLY);
+    omap4_prcm_devclass, 0, 0, BUS_PASS_BUS + BUS_PASS_ORDER_MIDDLE);
 MODULE_VERSION(omap4_prcm, 1);

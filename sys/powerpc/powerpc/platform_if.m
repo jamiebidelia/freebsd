@@ -84,6 +84,10 @@ CODE {
 	{
 		return;
 	}
+	static void platform_null_smp_probe_threads(void)
+	{
+		return;
+	}
 };
 
 /**
@@ -124,6 +128,22 @@ METHOD void mem_regions {
 	int		   *_memsz;
 	struct mem_region  *_availp;
 	int		   *_availsz;
+};
+
+
+/**
+ * @brief Return the system's physical memory map.
+ *
+ * It shall provide the total RAM with the corresponding domains.
+ *
+ * @param _memp		Array of physical memory chunks
+ * @param _memsz	Number of physical memory chunks
+ */
+
+METHOD void numa_mem_regions {
+	platform_t	    _plat;
+	struct numa_mem_region  *_memp;
+	int		   *_memsz;
 };
 
 /**
@@ -197,6 +217,13 @@ METHOD void smp_ap_init {
 } DEFAULT platform_null_smp_ap_init;
 
 /**
+ * @brief Probe mp_ncores and smp_threads_per_core for early MI code
+ */
+METHOD void smp_probe_threads {
+	platform_t	_plat;
+} DEFAULT platform_null_smp_probe_threads;
+
+/**
  * @brief Return SMP topology
  */
 METHOD cpu_group_t smp_topo {
@@ -215,5 +242,16 @@ METHOD void reset {
  */
 METHOD void sleep {
 	platform_t	_plat;
+};
+
+/**
+ * @brief Attempt to synchronize timebase of current CPU with others.
+ * Entered (approximately) simultaneously on all CPUs, including the BSP.
+ * Passed the timebase value on the BSP as of shortly before the call.
+ */
+METHOD void smp_timebase_sync {
+	platform_t	_plat;
+	u_long		_tb;
+	int		_ap;
 };
 

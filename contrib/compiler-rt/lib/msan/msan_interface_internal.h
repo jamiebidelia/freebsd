@@ -27,7 +27,7 @@ SANITIZER_INTERFACE_ATTRIBUTE
 void __msan_init();
 
 // Print a warning and maybe return.
-// This function can die based on flags()->exit_code.
+// This function can die based on common_flags()->exitcode.
 SANITIZER_INTERFACE_ATTRIBUTE
 void __msan_warning();
 
@@ -36,6 +36,16 @@ void __msan_warning();
 // (i.e. -mllvm -msan-keep-going)
 SANITIZER_INTERFACE_ATTRIBUTE __attribute__((noreturn))
 void __msan_warning_noreturn();
+
+using __sanitizer::uptr;
+using __sanitizer::sptr;
+using __sanitizer::uu64;
+using __sanitizer::uu32;
+using __sanitizer::uu16;
+using __sanitizer::u64;
+using __sanitizer::u32;
+using __sanitizer::u16;
+using __sanitizer::u8;
 
 SANITIZER_INTERFACE_ATTRIBUTE
 void __msan_maybe_warning_1(u8 s, u32 o);
@@ -96,12 +106,15 @@ u32 __msan_chain_origin(u32 id);
 SANITIZER_INTERFACE_ATTRIBUTE
 u32 __msan_get_origin(const void *a);
 
+// Test that this_id is a descendant of prev_id (or they are simply equal).
+// "descendant" here means that are part of the same chain, created with
+// __msan_chain_origin.
+SANITIZER_INTERFACE_ATTRIBUTE
+int __msan_origin_is_descendant_or_same(u32 this_id, u32 prev_id);
+
+
 SANITIZER_INTERFACE_ATTRIBUTE
 void __msan_clear_on_return();
-
-// Default: -1 (don't exit on error).
-SANITIZER_INTERFACE_ATTRIBUTE
-void __msan_set_exit_code(int exit_code);
 
 SANITIZER_INTERFACE_ATTRIBUTE
 void __msan_set_keep_going(int keep_going);
@@ -133,6 +146,11 @@ void __msan_partial_poison(const void* data, void* shadow, uptr size);
 SANITIZER_INTERFACE_ATTRIBUTE
 void __msan_allocated_memory(const void* data, uptr size);
 
+// Tell MSan about newly destroyed memory. Memory will be marked
+// uninitialized.
+SANITIZER_INTERFACE_ATTRIBUTE
+void __sanitizer_dtor_callback(const void* data, uptr size);
+
 SANITIZER_INTERFACE_ATTRIBUTE
 u16 __sanitizer_unaligned_load16(const uu16 *p);
 
@@ -153,6 +171,15 @@ void __sanitizer_unaligned_store64(uu64 *p, u64 x);
 
 SANITIZER_INTERFACE_ATTRIBUTE
 void __msan_set_death_callback(void (*callback)(void));
+
+SANITIZER_INTERFACE_ATTRIBUTE
+void __msan_copy_shadow(void *dst, const void *src, uptr size);
+
+SANITIZER_INTERFACE_ATTRIBUTE
+void __msan_scoped_disable_interceptor_checks();
+
+SANITIZER_INTERFACE_ATTRIBUTE
+void __msan_scoped_enable_interceptor_checks();
 }  // extern "C"
 
 #endif  // MSAN_INTERFACE_INTERNAL_H

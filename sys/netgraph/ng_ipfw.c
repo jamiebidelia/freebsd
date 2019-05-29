@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright 2005, Gleb Smirnoff <glebius@FreeBSD.org>
  * All rights reserved.
  *
@@ -70,8 +72,7 @@ static ng_rcvdata_t	ng_ipfw_rcvdata;
 static ng_disconnect_t	ng_ipfw_disconnect;
 
 static hook_p		ng_ipfw_findhook1(node_p, u_int16_t );
-static int		ng_ipfw_input(struct mbuf **, int, struct ip_fw_args *,
-			    int);
+static int	ng_ipfw_input(struct mbuf **, struct ip_fw_args *, bool);
 
 /* We have only one node */
 static node_p	fw_node;
@@ -117,7 +118,7 @@ ng_ipfw_mod_event(module_t mod, int event, void *data)
 		    != 0) {
 			log(LOG_ERR, "%s: can't create ng_ipfw node", __func__);
                 	break;
-		};
+		}
 
 		/* Try to name node */
 		if (ng_name_node(fw_node, "ipfw") != 0)
@@ -240,7 +241,7 @@ ng_ipfw_rcvdata(hook_p hook, item_p item)
 	if (tag == NULL) {
 		NG_FREE_M(m);
 		return (EINVAL);	/* XXX: find smth better */
-	};
+	}
 
 	if (m->m_len < sizeof(struct ip) &&
 	    (m = m_pullup(m, sizeof(struct ip))) == NULL)
@@ -283,10 +284,9 @@ ng_ipfw_rcvdata(hook_p hook, item_p item)
 }
 
 static int
-ng_ipfw_input(struct mbuf **m0, int dir, struct ip_fw_args *fwa, int tee)
+ng_ipfw_input(struct mbuf **m0, struct ip_fw_args *fwa, bool tee)
 {
 	struct mbuf *m;
-	struct ip *ip;
 	hook_p	hook;
 	int error = 0;
 
@@ -302,7 +302,7 @@ ng_ipfw_input(struct mbuf **m0, int dir, struct ip_fw_args *fwa, int tee)
 	 * important to return packet back to IP stack. In tee mode we make
 	 * a copy of a packet and forward it into netgraph without a tag.
 	 */
-	if (tee == 0) {
+	if (tee == false) {
 		struct m_tag *tag;
 		struct ipfw_rule_ref *r;
 		m = *m0;
@@ -317,7 +317,8 @@ ng_ipfw_input(struct mbuf **m0, int dir, struct ip_fw_args *fwa, int tee)
 		r = (struct ipfw_rule_ref *)(tag + 1);
 		*r = fwa->rule;
 		r->info &= IPFW_ONEPASS;  /* keep this info */
-		r->info |= dir ? IPFW_INFO_IN : IPFW_INFO_OUT;
+		r->info |= (fwa->flags & IPFW_ARGS_IN) ?
+		    IPFW_INFO_IN : IPFW_INFO_OUT;
 		m_tag_prepend(m, tag);
 
 	} else
@@ -327,8 +328,6 @@ ng_ipfw_input(struct mbuf **m0, int dir, struct ip_fw_args *fwa, int tee)
 	if (m->m_len < sizeof(struct ip) &&
 	    (m = m_pullup(m, sizeof(struct ip))) == NULL)
 		return (EINVAL);
-
-	ip = mtod(m, struct ip *);
 
 	NG_SEND_DATA_ONLY(error, hook, m);
 

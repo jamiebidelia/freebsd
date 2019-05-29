@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: (BSD-4-Clause AND MIT-CMU)
+ *
  * Copyright (c) 1982, 1986 The Regents of the University of California.
  * Copyright (c) 1989, 1990 William Jolitz
  * Copyright (c) 1994 John Dyson
@@ -143,7 +145,7 @@ cpu_fork(struct thread *td1, struct proc *p2, struct thread *td2, int flags)
 
 	cf = (struct callframe *)tf - 1;
 	memset(cf, 0, sizeof(struct callframe));
-	#ifdef __powerpc64__
+	#if defined(__powerpc64__) && (!defined(_CALL_ELF) || _CALL_ELF == 1)
 	cf->cf_toc = ((register_t *)fork_return)[1];
 	#endif
 	cf->cf_func = (register_t)fork_return;
@@ -152,11 +154,12 @@ cpu_fork(struct thread *td1, struct proc *p2, struct thread *td2, int flags)
 
 	pcb->pcb_sp = (register_t)cf;
 	KASSERT(pcb->pcb_sp % 16 == 0, ("stack misaligned"));
-	#ifdef __powerpc64__
+	#if defined(__powerpc64__) && (!defined(_CALL_ELF) || _CALL_ELF == 1)
 	pcb->pcb_lr = ((register_t *)fork_trampoline)[0];
 	pcb->pcb_toc = ((register_t *)fork_trampoline)[1];
 	#else
 	pcb->pcb_lr = (register_t)fork_trampoline;
+	pcb->pcb_context[0] = pcb->pcb_lr;
 	#endif
 	#ifdef AIM
 	pcb->pcb_cpu.aim.usr_vsid = 0;
@@ -164,7 +167,7 @@ cpu_fork(struct thread *td1, struct proc *p2, struct thread *td2, int flags)
 
 	/* Setup to release spin count in fork_exit(). */
 	td2->td_md.md_spinlock_count = 1;
-	td2->td_md.md_saved_msr = PSL_KERNSET;
+	td2->td_md.md_saved_msr = psl_kernset;
 
 	/*
  	 * Now cpu_switch() can schedule the new process.
@@ -178,7 +181,7 @@ cpu_fork(struct thread *td1, struct proc *p2, struct thread *td2, int flags)
  * This is needed to make kernel threads stay in kernel mode.
  */
 void
-cpu_set_fork_handler(struct thread *td, void (*func)(void *), void *arg)
+cpu_fork_kthread_handler(struct thread *td, void (*func)(void *), void *arg)
 {
 	struct callframe *cf;
 
@@ -187,6 +190,9 @@ cpu_set_fork_handler(struct thread *td, void (*func)(void *), void *arg)
 
 	cf = (struct callframe *)td->td_pcb->pcb_sp;
 
+	#if defined(__powerpc64__) && (!defined(_CALL_ELF) || _CALL_ELF == 1)
+	cf->cf_toc = ((register_t *)func)[1];
+	#endif
 	cf->cf_func = (register_t)func;
 	cf->cf_arg0 = (register_t)arg;
 }
@@ -243,3 +249,17 @@ cpu_thread_swapout(struct thread *td)
 
 }
 
+bool
+cpu_exec_vmspace_reuse(struct proc *p __unused, vm_map_t map __unused)
+{
+
+	return (true);
+}
+
+int
+cpu_procctl(struct thread *td __unused, int idtype __unused, id_t id __unused,
+    int com __unused, void *data __unused)
+{
+
+	return (EINVAL);
+}

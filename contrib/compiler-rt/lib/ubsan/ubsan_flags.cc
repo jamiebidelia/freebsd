@@ -11,15 +11,28 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "ubsan_platform.h"
+#if CAN_SANITIZE_UB
 #include "ubsan_flags.h"
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_flags.h"
 #include "sanitizer_common/sanitizer_flag_parser.h"
 
+#include <stdlib.h>
+
 namespace __ubsan {
 
-static const char *MaybeCallUbsanDefaultOptions() {
+const char *MaybeCallUbsanDefaultOptions() {
   return (&__ubsan_default_options) ? __ubsan_default_options() : "";
+}
+
+static const char *GetFlag(const char *flag) {
+  // We cannot call getenv() from inside a preinit array initializer
+  if (SANITIZER_CAN_USE_PREINIT_ARRAY) {
+    return GetEnv(flag);
+  } else {
+    return getenv(flag);
+  }
 }
 
 Flags ubsan_flags;
@@ -37,43 +50,37 @@ void RegisterUbsanFlags(FlagParser *parser, Flags *f) {
 #undef UBSAN_FLAG
 }
 
-void InitializeFlags(bool standalone) {
-  Flags *f = flags();
-  FlagParser parser;
-  RegisterUbsanFlags(&parser, f);
-
-  if (standalone) {
-    RegisterCommonFlags(&parser);
-
-    SetCommonFlagsDefaults();
+void InitializeFlags() {
+  SetCommonFlagsDefaults();
+  {
     CommonFlags cf;
     cf.CopyFrom(*common_flags());
     cf.print_summary = false;
+    cf.external_symbolizer_path = GetFlag("UBSAN_SYMBOLIZER_PATH");
     OverrideCommonFlags(cf);
-  } else {
-    // Ignore common flags if not standalone.
-    // This is inconsistent with LSan, which allows common flags in LSAN_FLAGS.
-    // This is caused by undefined initialization order between ASan and UBsan,
-    // which makes it impossible to make sure that common flags from ASAN_OPTIONS
-    // have not been used (in __asan_init) before they are overwritten with flags
-    // from UBSAN_OPTIONS.
-    CommonFlags cf_ignored;
-    RegisterCommonFlags(&parser, &cf_ignored);
   }
 
+  Flags *f = flags();
   f->SetDefaults();
+
+  FlagParser parser;
+  RegisterCommonFlags(&parser);
+  RegisterUbsanFlags(&parser, f);
+
   // Override from user-specified string.
   parser.ParseString(MaybeCallUbsanDefaultOptions());
   // Override from environment variable.
-  parser.ParseString(GetEnv("UBSAN_OPTIONS"));
-  SetVerbosity(common_flags()->verbosity);
+  parser.ParseString(GetFlag("UBSAN_OPTIONS"));
+  InitializeCommonFlags();
+  if (Verbosity()) ReportUnrecognizedFlags();
+
+  if (common_flags()->help) parser.PrintFlagDescriptions();
 }
 
 }  // namespace __ubsan
 
-#if !SANITIZER_SUPPORTS_WEAK_HOOKS
-extern "C" {
-SANITIZER_INTERFACE_ATTRIBUTE SANITIZER_WEAK_ATTRIBUTE
-const char *__ubsan_default_options() { return ""; }
-}  // extern "C"
-#endif
+SANITIZER_INTERFACE_WEAK_DEF(const char *, __ubsan_default_options, void) {
+  return "";
+}
+
+#endif  // CAN_SANITIZE_UB

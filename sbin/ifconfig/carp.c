@@ -1,7 +1,9 @@
 /*	$FreeBSD$ */
 /*	from $OpenBSD: ifconfig.c,v 1.82 2003/10/19 05:43:35 mcbride Exp $ */
 
-/*
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2002 Michael Shalayeff. All rights reserved.
  * Copyright (c) 2003 Ryan McBride. All rights reserved.
  *
@@ -217,11 +219,9 @@ static struct afswtch af_carp = {
 static __constructor void
 carp_ctor(void)
 {
-#define	N(a)	(sizeof(a) / sizeof(a[0]))
 	int i;
 
-	for (i = 0; i < N(carp_cmds);  i++)
+	for (i = 0; i < nitems(carp_cmds);  i++)
 		cmd_register(&carp_cmds[i]);
 	af_register(&af_carp);
-#undef N
 }

@@ -27,15 +27,10 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
-#include <sys/types.h>
-#include <sys/linker_set.h>
-#include <sys/queue.h>
 #include <sys/stat.h>
 #include <assert.h>
-#include <err.h>
 #include <errno.h>
 #include <limits.h>
-#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -50,6 +45,7 @@ static struct {
 } scheme_alias[] = {
 	{ "ebr", ALIAS_EBR },
 	{ "efi", ALIAS_EFI },
+	{ "fat16b", ALIAS_FAT16B },
 	{ "fat32", ALIAS_FAT32 },
 	{ "freebsd", ALIAS_FREEBSD },
 	{ "freebsd-boot", ALIAS_FREEBSD_BOOT },
@@ -59,9 +55,12 @@ static struct {
 	{ "freebsd-vinum", ALIAS_FREEBSD_VINUM },
 	{ "freebsd-zfs", ALIAS_FREEBSD_ZFS },
 	{ "mbr", ALIAS_MBR },
+	{ "ntfs", ALIAS_NTFS },
+	{ "prepboot", ALIAS_PPCBOOT },
 	{ NULL, ALIAS_NONE }		/* Keep last! */
 };
 
+static struct mkimg_scheme *first;
 static struct mkimg_scheme *scheme;
 static void *bootcode;
 
@@ -79,13 +78,27 @@ scheme_parse_alias(const char *name)
 	return (ALIAS_NONE);
 }
 
+struct mkimg_scheme *
+scheme_iterate(struct mkimg_scheme *s)
+{
+
+	return ((s == NULL) ? first : s->next);
+}
+
+void
+scheme_register(struct mkimg_scheme *s)
+{
+	s->next = first;
+	first = s;
+}
+
 int
 scheme_select(const char *spec)
 {
-	struct mkimg_scheme *s, **iter;
+	struct mkimg_scheme *s;
 
-	SET_FOREACH(iter, schemes) {
-		s = *iter;
+	s = NULL;
+	while ((s = scheme_iterate(s)) != NULL) {
 		if (strcasecmp(spec, s->name) == 0) {
 			scheme = s;
 			return (0);

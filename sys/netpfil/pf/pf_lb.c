@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
  * Copyright (c) 2001 Daniel Hartmeier
  * Copyright (c) 2002 - 2008 Henning Brauer
  * All rights reserved.
@@ -44,7 +46,6 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/lock.h>
 #include <sys/mbuf.h>
-#include <sys/rwlock.h>
 #include <sys/socket.h>
 #include <sys/sysctl.h>
 
@@ -259,7 +260,8 @@ pf_get_sport(sa_family_t af, u_int8_t proto, struct pf_rule *r,
 				return (0);
 			}
 		} else {
-			uint16_t tmp, cut;
+			uint32_t tmp;
+			uint16_t cut;
 
 			if (low > high) {
 				tmp = low;
@@ -269,7 +271,7 @@ pf_get_sport(sa_family_t af, u_int8_t proto, struct pf_rule *r,
 			/* low < high */
 			cut = arc4random() % (1 + high - low) + low;
 			/* low <= cut <= high */
-			for (tmp = cut; tmp <= high; ++(tmp)) {
+			for (tmp = cut; tmp <= high && tmp <= 0xffff; ++tmp) {
 				key.port[1] = htons(tmp);
 				if (pf_find_state_all(&key, PF_IN, NULL) ==
 				    NULL) {
@@ -277,7 +279,8 @@ pf_get_sport(sa_family_t af, u_int8_t proto, struct pf_rule *r,
 					return (0);
 				}
 			}
-			for (tmp = cut - 1; tmp >= low; --(tmp)) {
+			tmp = cut;
+			for (tmp -= 1; tmp >= low && tmp <= 0xffff; --tmp) {
 				key.port[1] = htons(tmp);
 				if (pf_find_state_all(&key, PF_IN, NULL) ==
 				    NULL) {
@@ -290,6 +293,10 @@ pf_get_sport(sa_family_t af, u_int8_t proto, struct pf_rule *r,
 		switch (r->rpool.opts & PF_POOL_TYPEMASK) {
 		case PF_POOL_RANDOM:
 		case PF_POOL_ROUNDROBIN:
+			/*
+			 * pick a different source address since we're out
+			 * of free port choices for the current one.
+			 */
 			if (pf_map_addr(af, r, saddr, naddr, &init_addr, sn))
 				return (1);
 			break;
@@ -321,6 +328,12 @@ pf_map_addr(sa_family_t af, struct pf_rule *r, struct pf_addr *saddr,
 	   src node was created just a moment ago in pf_create_state and it
 	   needs to be filled in with routing decision calculated here. */
 	if (*sn != NULL && !PF_AZERO(&(*sn)->raddr, af)) {
+		/* If the supplied address is the same as the current one we've
+		 * been asked before, so tell the caller that there's no other
+		 * address to be had. */
+		if (PF_AEQ(naddr, &(*sn)->raddr, af))
+			return (1);
+
 		PF_ACPY(naddr, &(*sn)->raddr, af);
 		if (V_pf_status.debug >= PF_DEBUG_MISC) {
 			printf("pf_map_addr: src tracking maps ");
@@ -553,7 +566,7 @@ pf_get_translation(struct pf_pdesc *pd, struct mbuf *m, int off, int direction,
 		return (NULL);
 	*nkp = pf_state_key_clone(*skp);
 	if (*nkp == NULL) {
-		uma_zfree(V_pf_state_key_z, skp);
+		uma_zfree(V_pf_state_key_z, *skp);
 		*skp = NULL;
 		return (NULL);
 	}

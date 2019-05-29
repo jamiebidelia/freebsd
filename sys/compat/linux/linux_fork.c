@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2004 Tim J. Robbins
  * Copyright (c) 2002 Doug Rabson
  * Copyright (c) 2000 Marcel Moolenaar
@@ -38,10 +40,12 @@ __FBSDID("$FreeBSD$");
 #include <sys/lock.h>
 #include <sys/mutex.h>
 #include <sys/proc.h>
+#include <sys/ptrace.h>
 #include <sys/racct.h>
 #include <sys/sched.h>
 #include <sys/syscallsubr.h>
 #include <sys/sx.h>
+#include <sys/umtx.h>
 #include <sys/unistd.h>
 #include <sys/wait.h>
 
@@ -61,20 +65,19 @@ __FBSDID("$FreeBSD$");
 #include <compat/linux/linux_misc.h>
 #include <compat/linux/linux_util.h>
 
+#ifdef LINUX_LEGACY_SYSCALLS
 int
 linux_fork(struct thread *td, struct linux_fork_args *args)
 {
+	struct fork_req fr;
 	int error;
 	struct proc *p2;
 	struct thread *td2;
 
-#ifdef DEBUG
-	if (ldebug(fork))
-		printf(ARGS(fork, ""));
-#endif
-
-	if ((error = fork1(td, RFFDG | RFPROC | RFSTOPPED, 0, &p2, NULL, 0))
-	    != 0)
+	bzero(&fr, sizeof(fr));
+	fr.fr_flags = RFFDG | RFPROC | RFSTOPPED;
+	fr.fr_procp = &p2;
+	if ((error = fork1(td, &fr)) != 0)
 		return (error);
 
 	td2 = FIRST_THREAD_IN_PROC(p2);
@@ -97,30 +100,22 @@ linux_fork(struct thread *td, struct linux_fork_args *args)
 int
 linux_vfork(struct thread *td, struct linux_vfork_args *args)
 {
+	struct fork_req fr;
 	int error;
 	struct proc *p2;
 	struct thread *td2;
 
-#ifdef DEBUG
-	if (ldebug(vfork))
-		printf(ARGS(vfork, ""));
-#endif
-
-	/* Exclude RFPPWAIT */
-	if ((error = fork1(td, RFFDG | RFPROC | RFMEM | RFSTOPPED, 0, &p2,
-	    NULL, 0)) != 0)
+	bzero(&fr, sizeof(fr));
+	fr.fr_flags = RFFDG | RFPROC | RFMEM | RFPPWAIT | RFSTOPPED;
+	fr.fr_procp = &p2;
+	if ((error = fork1(td, &fr)) != 0)
 		return (error);
-
 
 	td2 = FIRST_THREAD_IN_PROC(p2);
 
 	linux_proc_init(td, td2, 0);
 
-	PROC_LOCK(p2);
-	p2->p_flag |= P_PPWAIT;
-	PROC_UNLOCK(p2);
-
-   	td->td_retval[0] = p2->p_pid;
+	td->td_retval[0] = p2->p_pid;
 
 	/*
 	 * Make this runnable after we are finished with it.
@@ -130,31 +125,19 @@ linux_vfork(struct thread *td, struct linux_vfork_args *args)
 	sched_add(td2, SRQ_BORING);
 	thread_unlock(td2);
 
-	/* wait for the children to exit, ie. emulate vfork */
-	PROC_LOCK(p2);
-	while (p2->p_flag & P_PPWAIT)
-		cv_wait(&p2->p_pwait, &p2->p_mtx);
-	PROC_UNLOCK(p2);
-
 	return (0);
 }
+#endif
 
 static int
 linux_clone_proc(struct thread *td, struct linux_clone_args *args)
 {
+	struct fork_req fr;
 	int error, ff = RFPROC | RFSTOPPED;
 	struct proc *p2;
 	struct thread *td2;
 	int exit_signal;
 	struct linux_emuldata *em;
-
-#ifdef DEBUG
-	if (ldebug(clone)) {
-		printf(ARGS(clone, "flags %x, stack %p, parent tid: %p, "
-		    "child tid: %p"), (unsigned)args->flags,
-		    args->stack, args->parent_tidptr, args->child_tidptr);
-	}
-#endif
 
 	exit_signal = args->flags & 0x000000ff;
 	if (LINUX_SIG_VALID(exit_signal)) {
@@ -168,7 +151,7 @@ linux_clone_proc(struct thread *td, struct linux_clone_args *args)
 		ff |= RFSIGSHARE;
 	/*
 	 * XXX: In Linux, sharing of fs info (chroot/cwd/umask)
-	 * and open files is independant.  In FreeBSD, its in one
+	 * and open files is independent.  In FreeBSD, its in one
 	 * structure but in reality it does not cause any problems
 	 * because both of these flags are usually set together.
 	 */
@@ -179,7 +162,13 @@ linux_clone_proc(struct thread *td, struct linux_clone_args *args)
 		if (args->parent_tidptr == NULL)
 			return (EINVAL);
 
-	error = fork1(td, ff, 0, &p2, NULL, 0);
+	if (args->flags & LINUX_CLONE_VFORK)
+		ff |= RFPPWAIT;
+
+	bzero(&fr, sizeof(fr));
+	fr.fr_flags = ff;
+	fr.fr_procp = &p2;
+	error = fork1(td, &fr);
 	if (error)
 		return (error);
 
@@ -194,18 +183,18 @@ linux_clone_proc(struct thread *td, struct linux_clone_args *args)
 	if (args->flags & LINUX_CLONE_CHILD_SETTID)
 		em->child_set_tid = args->child_tidptr;
 	else
-	   	em->child_set_tid = NULL;
+		em->child_set_tid = NULL;
 
 	if (args->flags & LINUX_CLONE_CHILD_CLEARTID)
 		em->child_clear_tid = args->child_tidptr;
 	else
-	   	em->child_clear_tid = NULL;
+		em->child_clear_tid = NULL;
 
 	if (args->flags & LINUX_CLONE_PARENT_SETTID) {
 		error = copyout(&p2->p_pid, args->parent_tidptr,
 		    sizeof(p2->p_pid));
 		if (error)
-			printf(LMSG("copyout failed!"));
+			linux_msg(td, "copyout p_pid failed!");
 	}
 
 	PROC_LOCK(p2);
@@ -221,17 +210,16 @@ linux_clone_proc(struct thread *td, struct linux_clone_args *args)
 	if (args->flags & LINUX_CLONE_SETTLS)
 		linux_set_cloned_tls(td2, args->tls);
 
-#ifdef DEBUG
-	if (ldebug(clone))
-		printf(LMSG("clone: successful rfork to %d, "
-		    "stack %p sig = %d"), (int)p2->p_pid, args->stack,
-		    exit_signal);
-#endif
-
-	if (args->flags & LINUX_CLONE_VFORK) {
-	   	PROC_LOCK(p2);
-	   	p2->p_flag |= P_PPWAIT;
-	   	PROC_UNLOCK(p2);
+	/*
+	 * If CLONE_PARENT is set, then the parent of the new process will be
+	 * the same as that of the calling process.
+	 */
+	if (args->flags & LINUX_CLONE_PARENT) {
+		sx_xlock(&proctree_lock);
+		PROC_LOCK(p2);
+		proc_reparent(p2, td->td_proc->p_pptr, true);
+		PROC_UNLOCK(p2);
+		sx_xunlock(&proctree_lock);
 	}
 
 	/*
@@ -244,14 +232,6 @@ linux_clone_proc(struct thread *td, struct linux_clone_args *args)
 
 	td->td_retval[0] = p2->p_pid;
 
-	if (args->flags & LINUX_CLONE_VFORK) {
-		/* wait for the children to exit, ie. emulate vfork */
-		PROC_LOCK(p2);
-		while (p2->p_flag & P_PPWAIT)
-			cv_wait(&p2->p_pwait, &p2->p_mtx);
-		PROC_UNLOCK(p2);
-	}
-
 	return (0);
 }
 
@@ -262,14 +242,6 @@ linux_clone_thread(struct thread *td, struct linux_clone_args *args)
 	struct thread *newtd;
 	struct proc *p;
 	int error;
-
-#ifdef DEBUG
-	if (ldebug(clone)) {
-		printf(ARGS(clone, "thread: flags %x, stack %p, parent tid: %p, "
-		    "child tid: %p"), (unsigned)args->flags,
-		    args->stack, args->parent_tidptr, args->child_tidptr);
-	}
-#endif
 
 	LINUX_CTR4(clone_thread, "thread(%d) flags %x ptid %p ctid %p",
 	    td->td_tid, (unsigned)args->flags,
@@ -285,12 +257,22 @@ linux_clone_thread(struct thread *td, struct linux_clone_args *args)
 
 	p = td->td_proc;
 
+#ifdef RACCT
+	if (racct_enable) {
+		PROC_LOCK(p);
+		error = racct_add(p, RACCT_NTHR, 1);
+		PROC_UNLOCK(p);
+		if (error != 0)
+			return (EPROCLIM);
+	}
+#endif
+
 	/* Initialize our td */
 	error = kern_thr_alloc(p, 0, &newtd);
 	if (error)
-		return (error);
-														
-	cpu_set_upcall(newtd, td);
+		goto fail;
+
+	cpu_copy_thread(newtd, td);
 
 	bzero(&newtd->td_startzero,
 	    __rangeof(struct thread, td_startzero, td_endzero));
@@ -298,7 +280,7 @@ linux_clone_thread(struct thread *td, struct linux_clone_args *args)
 	    __rangeof(struct thread, td_startcopy, td_endcopy));
 
 	newtd->td_proc = p;
-	newtd->td_ucred = crhold(td->td_ucred);
+	thread_cow_get(newtd, td);
 
 	/* create the emuldata */
 	linux_proc_init(td, newtd, args->flags);
@@ -312,15 +294,15 @@ linux_clone_thread(struct thread *td, struct linux_clone_args *args)
 	if (args->flags & LINUX_CLONE_CHILD_SETTID)
 		em->child_set_tid = args->child_tidptr;
 	else
-	   	em->child_set_tid = NULL;
+		em->child_set_tid = NULL;
 
 	if (args->flags & LINUX_CLONE_CHILD_CLEARTID)
 		em->child_clear_tid = args->child_tidptr;
 	else
-	   	em->child_clear_tid = NULL;
+		em->child_clear_tid = NULL;
 
 	cpu_thread_clean(newtd);
-	
+
 	linux_set_upcall_kse(newtd, PTROUT(args->stack));
 
 	PROC_LOCK(p);
@@ -338,15 +320,12 @@ linux_clone_thread(struct thread *td, struct linux_clone_args *args)
 	thread_unlock(td);
 	if (P_SHOULDSTOP(p))
 		newtd->td_flags |= TDF_ASTPENDING | TDF_NEEDSUSPCHK;
+
+	if (p->p_ptevents & PTRACE_LWP)
+		newtd->td_dbgflags |= TDB_BORN;
 	PROC_UNLOCK(p);
 
 	tidhash_add(newtd);
-
-#ifdef DEBUG
-	if (ldebug(clone))
-		printf(ARGS(clone, "successful clone to %d, stack %p"),
-		(int)newtd->td_tid, args->stack);
-#endif
 
 	LINUX_CTR2(clone_thread, "thread(%d) successful clone to %d",
 	    td->td_tid, newtd->td_tid);
@@ -355,7 +334,7 @@ linux_clone_thread(struct thread *td, struct linux_clone_args *args)
 		error = copyout(&newtd->td_tid, args->parent_tidptr,
 		    sizeof(newtd->td_tid));
 		if (error)
-			printf(LMSG("clone_thread: copyout failed!"));
+			linux_msg(td, "clone_thread: copyout td_tid failed!");
 	}
 
 	/*
@@ -369,6 +348,16 @@ linux_clone_thread(struct thread *td, struct linux_clone_args *args)
 	td->td_retval[0] = newtd->td_tid;
 
 	return (0);
+
+fail:
+#ifdef RACCT
+	if (racct_enable) {
+		PROC_LOCK(p);
+		racct_sub(p, RACCT_NTHR, 1);
+		PROC_UNLOCK(p);
+	}
+#endif
+	return (error);
 }
 
 int
@@ -391,6 +380,8 @@ linux_exit(struct thread *td, struct linux_exit_args *args)
 
 	LINUX_CTR2(exit, "thread(%d) (%d)", em->em_tid, args->rval);
 
+	umtx_thread_exit(td);
+
 	linux_thread_detach(td);
 
 	/*
@@ -398,7 +389,7 @@ linux_exit(struct thread *td, struct linux_exit_args *args)
 	 * exit via pthread_exit() try thr_exit() first.
 	 */
 	kern_thr_exit(td);
-	exit1(td, W_EXITCODE(args->rval, 0));
+	exit1(td, args->rval, 0);
 		/* NOTREACHED */
 }
 
@@ -441,7 +432,7 @@ linux_thread_detach(struct thread *td)
 
 		LINUX_CTR2(thread_detach, "thread(%d) %p",
 		    em->em_tid, child_clear_tid);
-	
+
 		error = suword32(child_clear_tid, 0);
 		if (error != 0)
 			return;

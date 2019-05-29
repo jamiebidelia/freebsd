@@ -1,5 +1,7 @@
 /*-
- * Copyright (c) 2010-2015 Solarflare Communications Inc.
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
+ * Copyright (c) 2010-2016 Solarflare Communications Inc.
  * All rights reserved.
  *
  * This software was developed in part by Philip Paeps under contract for
@@ -33,7 +35,7 @@
 
 /* Theory of operation:
  *
- * Tx queues allocation and mapping
+ * Tx queues allocation and mapping on Siena
  *
  * One Tx queue with enabled checksum offload is allocated per Rx channel
  * (event queue).  Also 2 Tx queues (one without checksum offload and one
@@ -44,17 +46,32 @@
  *	if event queue index is 0, TxQ-index = TxQ-label * [0..SFXGE_TXQ_NTYPES)
  *	else TxQ-index = SFXGE_TXQ_NTYPES + EvQ-index - 1
  * See sfxge_get_txq_by_label() sfxge_ev.c
+ *
+ * Tx queue allocation and mapping on EF10
+ *
+ * One Tx queue with enabled checksum offload is allocated per Rx
+ * channel (event queue). Checksum offload on all Tx queues is enabled or
+ * disabled dynamically by inserting option descriptors, so the additional
+ * queues used on Siena are not required.
+ *
+ * TxQ label is always set to zero on EF10 hardware.
+ * So, event queue to Tx queue mapping is simple:
+ * TxQ-index = EvQ-index
  */
 
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
-#include <sys/types.h>
+#include "opt_rss.h"
+
+#include <sys/param.h>
+#include <sys/malloc.h>
 #include <sys/mbuf.h>
 #include <sys/smp.h>
 #include <sys/socket.h>
 #include <sys/sysctl.h>
 #include <sys/syslog.h>
+#include <sys/limits.h>
 
 #include <net/bpf.h>
 #include <net/ethernet.h>
@@ -65,6 +82,10 @@ __FBSDID("$FreeBSD$");
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
 #include <netinet/tcp.h>
+
+#ifdef RSS
+#include <net/rss_config.h>
+#endif
 
 #include "common/efx.h"
 
@@ -96,11 +117,11 @@ SYSCTL_INT(_hw_sfxge, OID_AUTO, tx_dpl_put_max, CTLFLAG_RDTUN,
 	   "Maximum number of any packets in deferred packet put-list");
 
 #define	SFXGE_PARAM_TSO_FW_ASSISTED	SFXGE_PARAM(tso_fw_assisted)
-static int sfxge_tso_fw_assisted = 1;
+static int sfxge_tso_fw_assisted = (SFXGE_FATSOV1 | SFXGE_FATSOV2);
 TUNABLE_INT(SFXGE_PARAM_TSO_FW_ASSISTED, &sfxge_tso_fw_assisted);
 SYSCTL_INT(_hw_sfxge, OID_AUTO, tso_fw_assisted, CTLFLAG_RDTUN,
 	   &sfxge_tso_fw_assisted, 0,
-	   "Use FW-assisted TSO if supported by NIC firmware");
+	   "Bitmask of FW-assisted TSO allowed to use if supported by NIC firmware");
 
 
 static const struct {
@@ -129,25 +150,7 @@ static void sfxge_tx_qlist_post(struct sfxge_txq *txq);
 static void sfxge_tx_qunblock(struct sfxge_txq *txq);
 static int sfxge_tx_queue_tso(struct sfxge_txq *txq, struct mbuf *mbuf,
 			      const bus_dma_segment_t *dma_seg, int n_dma_seg,
-			      int vlan_tagged);
-
-static int
-sfxge_tx_maybe_insert_tag(struct sfxge_txq *txq, struct mbuf *mbuf)
-{
-	uint16_t this_tag = ((mbuf->m_flags & M_VLANTAG) ?
-			     mbuf->m_pkthdr.ether_vtag :
-			     0);
-
-	if (this_tag == txq->hw_vlan_tci)
-		return (0);
-
-	efx_tx_qdesc_vlantci_create(txq->common,
-				    bswap16(this_tag),
-				    &txq->pend_desc[0]);
-	txq->n_pend_desc = 1;
-	txq->hw_vlan_tci = this_tag;
-	return (1);
-}
+			      int n_extra_descs);
 
 static inline void
 sfxge_next_stmp(struct sfxge_txq *txq, struct sfxge_tx_mapping **pstmp)
@@ -160,6 +163,61 @@ sfxge_next_stmp(struct sfxge_txq *txq, struct sfxge_tx_mapping **pstmp)
 		(*pstmp)++;
 }
 
+static int
+sfxge_tx_maybe_toggle_cksum_offload(struct sfxge_txq *txq, struct mbuf *mbuf,
+				    struct sfxge_tx_mapping **pstmp)
+{
+	uint16_t new_hw_cksum_flags;
+	efx_desc_t *desc;
+
+	if (mbuf->m_pkthdr.csum_flags &
+	    (CSUM_DELAY_DATA | CSUM_DELAY_DATA_IPV6 | CSUM_TSO)) {
+		/*
+		 * We always set EFX_TXQ_CKSUM_IPV4 here because this
+		 * configuration is the most useful, and this won't
+		 * cause any trouble in case of IPv6 traffic anyway.
+		 */
+		new_hw_cksum_flags = EFX_TXQ_CKSUM_IPV4 | EFX_TXQ_CKSUM_TCPUDP;
+	} else if (mbuf->m_pkthdr.csum_flags & CSUM_DELAY_IP) {
+		new_hw_cksum_flags = EFX_TXQ_CKSUM_IPV4;
+	} else {
+		new_hw_cksum_flags = 0;
+	}
+
+	if (new_hw_cksum_flags == txq->hw_cksum_flags)
+		return (0);
+
+	desc = &txq->pend_desc[txq->n_pend_desc];
+	efx_tx_qdesc_checksum_create(txq->common, new_hw_cksum_flags, desc);
+	txq->hw_cksum_flags = new_hw_cksum_flags;
+	txq->n_pend_desc++;
+
+	sfxge_next_stmp(txq, pstmp);
+
+	return (1);
+}
+
+static int
+sfxge_tx_maybe_insert_tag(struct sfxge_txq *txq, struct mbuf *mbuf,
+			  struct sfxge_tx_mapping **pstmp)
+{
+	uint16_t this_tag = ((mbuf->m_flags & M_VLANTAG) ?
+			     mbuf->m_pkthdr.ether_vtag :
+			     0);
+	efx_desc_t *desc;
+
+	if (this_tag == txq->hw_vlan_tci)
+		return (0);
+
+	desc = &txq->pend_desc[txq->n_pend_desc];
+	efx_tx_qdesc_vlantci_create(txq->common, bswap16(this_tag), desc);
+	txq->hw_vlan_tci = this_tag;
+	txq->n_pend_desc++;
+
+	sfxge_next_stmp(txq, pstmp);
+
+	return (1);
+}
 
 void
 sfxge_tx_qcomplete(struct sfxge_txq *txq, struct sfxge_evq *evq)
@@ -205,7 +263,7 @@ sfxge_tx_qcomplete(struct sfxge_txq *txq, struct sfxge_evq *evq)
 static unsigned int
 sfxge_is_mbuf_non_tcp(struct mbuf *mbuf)
 {
-	/* Absense of TCP checksum flags does not mean that it is non-TCP
+	/* Absence of TCP checksum flags does not mean that it is non-TCP
 	 * but it should be true if user wants to achieve high throughput.
 	 */
 	return (!(mbuf->m_pkthdr.csum_flags & (CSUM_IP_TCP | CSUM_IP6_TCP)));
@@ -351,12 +409,28 @@ static int sfxge_tx_queue_mbuf(struct sfxge_txq *txq, struct mbuf *mbuf)
 	int rc;
 	int i;
 	int eop;
-	int vlan_tagged;
+	uint16_t hw_cksum_flags_prev;
+	uint16_t hw_vlan_tci_prev;
+	int n_extra_descs;
 
 	KASSERT(!txq->blocked, ("txq->blocked"));
 
+#if SFXGE_TX_PARSE_EARLY
+	/*
+	 * If software TSO is used, we still need to copy packet header,
+	 * even if we have already parsed it early before enqueue.
+	 */
+	if ((mbuf->m_pkthdr.csum_flags & CSUM_TSO) &&
+	    (txq->tso_fw_assisted == 0))
+		prefetch_read_many(mbuf->m_data);
+#else
+	/*
+	 * Prefetch packet header since we need to parse it and extract
+	 * IP ID, TCP sequence number and flags.
+	 */
 	if (mbuf->m_pkthdr.csum_flags & CSUM_TSO)
 		prefetch_read_many(mbuf->m_data);
+#endif
 
 	if (__predict_false(txq->init_state != SFXGE_TXQ_STARTED)) {
 		rc = EINTR;
@@ -388,12 +462,20 @@ static int sfxge_tx_queue_mbuf(struct sfxge_txq *txq, struct mbuf *mbuf)
 
 	used_map = &stmp->map;
 
-	vlan_tagged = sfxge_tx_maybe_insert_tag(txq, mbuf);
-	if (vlan_tagged) {
-		sfxge_next_stmp(txq, &stmp);
-	}
+	hw_cksum_flags_prev = txq->hw_cksum_flags;
+	hw_vlan_tci_prev = txq->hw_vlan_tci;
+
+	/*
+	 * The order of option descriptors, which are used to leverage VLAN tag
+	 * and checksum offloads, might be important. Changing checksum offload
+	 * between VLAN option and packet descriptors probably does not work.
+	 */
+	n_extra_descs = sfxge_tx_maybe_toggle_cksum_offload(txq, mbuf, &stmp);
+	n_extra_descs += sfxge_tx_maybe_insert_tag(txq, mbuf, &stmp);
+
 	if (mbuf->m_pkthdr.csum_flags & CSUM_TSO) {
-		rc = sfxge_tx_queue_tso(txq, mbuf, dma_seg, n_dma_seg, vlan_tagged);
+		rc = sfxge_tx_queue_tso(txq, mbuf, dma_seg, n_dma_seg,
+					n_extra_descs);
 		if (rc < 0)
 			goto reject_mapped;
 		stmp = &txq->stmp[(rc - 1) & txq->ptr_mask];
@@ -404,7 +486,7 @@ static int sfxge_tx_queue_mbuf(struct sfxge_txq *txq, struct mbuf *mbuf)
 
 		i = 0;
 		for (;;) {
-			desc = &txq->pend_desc[i + vlan_tagged];
+			desc = &txq->pend_desc[i + n_extra_descs];
 			eop = (i == n_dma_seg - 1);
 			efx_tx_qdesc_dma_create(txq->common,
 						dma_seg[i].ds_addr,
@@ -416,7 +498,7 @@ static int sfxge_tx_queue_mbuf(struct sfxge_txq *txq, struct mbuf *mbuf)
 			i++;
 			sfxge_next_stmp(txq, &stmp);
 		}
-		txq->n_pend_desc = n_dma_seg + vlan_tagged;
+		txq->n_pend_desc = n_dma_seg + n_extra_descs;
 	}
 
 	/*
@@ -439,6 +521,8 @@ static int sfxge_tx_queue_mbuf(struct sfxge_txq *txq, struct mbuf *mbuf)
 	return (0);
 
 reject_mapped:
+	txq->hw_vlan_tci = hw_vlan_tci_prev;
+	txq->hw_cksum_flags = hw_cksum_flags_prev;
 	bus_dmamap_unload(txq->packet_dma_tag, *used_map);
 reject:
 	/* Drop the packet on the floor. */
@@ -600,7 +684,7 @@ sfxge_tx_qdpl_put_unlocked(struct sfxge_txq *txq, struct mbuf *mbuf)
 	volatile uintptr_t *putp;
 	uintptr_t old;
 	uintptr_t new;
-	unsigned old_len;
+	unsigned int put_count;
 
 	KASSERT(mbuf->m_nextpkt == NULL, ("mbuf->m_nextpkt != NULL"));
 
@@ -614,14 +698,14 @@ sfxge_tx_qdpl_put_unlocked(struct sfxge_txq *txq, struct mbuf *mbuf)
 		old = *putp;
 		if (old != 0) {
 			struct mbuf *mp = (struct mbuf *)old;
-			old_len = mp->m_pkthdr.csum_data;
+			put_count = mp->m_pkthdr.csum_data;
 		} else
-			old_len = 0;
-		if (old_len >= stdp->std_put_max) {
+			put_count = 0;
+		if (put_count >= stdp->std_put_max) {
 			atomic_add_long(&txq->put_overflow, 1);
 			return (ENOBUFS);
 		}
-		mbuf->m_pkthdr.csum_data = old_len + 1;
+		mbuf->m_pkthdr.csum_data = put_count + 1;
 		mbuf->m_nextpkt = (void *)old;
 	} while (atomic_cmpset_ptr(putp, old, new) == 0);
 
@@ -710,6 +794,84 @@ sfxge_if_qflush(struct ifnet *ifp)
 		sfxge_tx_qdpl_flush(sc->txq[i]);
 }
 
+#if SFXGE_TX_PARSE_EARLY
+
+/* There is little space for user data in mbuf pkthdr, so we
+ * use l*hlen fields which are not used by the driver otherwise
+ * to store header offsets.
+ * The fields are 8-bit, but it's ok, no header may be longer than 255 bytes.
+ */
+
+
+#define TSO_MBUF_PROTO(_mbuf)    ((_mbuf)->m_pkthdr.PH_loc.sixteen[0])
+/* We abuse l5hlen here because PH_loc can hold only 64 bits of data */
+#define TSO_MBUF_FLAGS(_mbuf)    ((_mbuf)->m_pkthdr.l5hlen)
+#define TSO_MBUF_PACKETID(_mbuf) ((_mbuf)->m_pkthdr.PH_loc.sixteen[1])
+#define TSO_MBUF_SEQNUM(_mbuf)   ((_mbuf)->m_pkthdr.PH_loc.thirtytwo[1])
+
+static void sfxge_parse_tx_packet(struct mbuf *mbuf)
+{
+	struct ether_header *eh = mtod(mbuf, struct ether_header *);
+	const struct tcphdr *th;
+	struct tcphdr th_copy;
+
+	/* Find network protocol and header */
+	TSO_MBUF_PROTO(mbuf) = eh->ether_type;
+	if (TSO_MBUF_PROTO(mbuf) == htons(ETHERTYPE_VLAN)) {
+		struct ether_vlan_header *veh =
+			mtod(mbuf, struct ether_vlan_header *);
+		TSO_MBUF_PROTO(mbuf) = veh->evl_proto;
+		mbuf->m_pkthdr.l2hlen = sizeof(*veh);
+	} else {
+		mbuf->m_pkthdr.l2hlen = sizeof(*eh);
+	}
+
+	/* Find TCP header */
+	if (TSO_MBUF_PROTO(mbuf) == htons(ETHERTYPE_IP)) {
+		const struct ip *iph = (const struct ip *)mtodo(mbuf, mbuf->m_pkthdr.l2hlen);
+
+		KASSERT(iph->ip_p == IPPROTO_TCP,
+			("TSO required on non-TCP packet"));
+		mbuf->m_pkthdr.l3hlen = mbuf->m_pkthdr.l2hlen + 4 * iph->ip_hl;
+		TSO_MBUF_PACKETID(mbuf) = iph->ip_id;
+	} else {
+		KASSERT(TSO_MBUF_PROTO(mbuf) == htons(ETHERTYPE_IPV6),
+			("TSO required on non-IP packet"));
+		KASSERT(((const struct ip6_hdr *)mtodo(mbuf, mbuf->m_pkthdr.l2hlen))->ip6_nxt ==
+			IPPROTO_TCP,
+			("TSO required on non-TCP packet"));
+		mbuf->m_pkthdr.l3hlen = mbuf->m_pkthdr.l2hlen + sizeof(struct ip6_hdr);
+		TSO_MBUF_PACKETID(mbuf) = 0;
+	}
+
+	KASSERT(mbuf->m_len >= mbuf->m_pkthdr.l3hlen,
+		("network header is fragmented in mbuf"));
+
+	/* We need TCP header including flags (window is the next) */
+	if (mbuf->m_len < mbuf->m_pkthdr.l3hlen + offsetof(struct tcphdr, th_win)) {
+		m_copydata(mbuf, mbuf->m_pkthdr.l3hlen, sizeof(th_copy),
+			   (caddr_t)&th_copy);
+		th = &th_copy;
+	} else {
+		th = (const struct tcphdr *)mtodo(mbuf, mbuf->m_pkthdr.l3hlen);
+	}
+
+	mbuf->m_pkthdr.l4hlen = mbuf->m_pkthdr.l3hlen + 4 * th->th_off;
+	TSO_MBUF_SEQNUM(mbuf) = ntohl(th->th_seq);
+
+	/* These flags must not be duplicated */
+	/*
+	 * RST should not be duplicated as well, but FreeBSD kernel
+	 * generates TSO packets with RST flag. So, do not assert
+	 * its absence.
+	 */
+	KASSERT(!(th->th_flags & (TH_URG | TH_SYN)),
+		("incompatible TCP flag 0x%x on TSO packet",
+		 th->th_flags & (TH_URG | TH_SYN)));
+	TSO_MBUF_FLAGS(mbuf) = th->th_flags;
+}
+#endif
+
 /*
  * TX start -- called by the stack.
  */
@@ -734,17 +896,37 @@ sfxge_if_transmit(struct ifnet *ifp, struct mbuf *m)
 		("interface not up"));
 
 	/* Pick the desired transmit queue. */
-	if (m->m_pkthdr.csum_flags &
-	    (CSUM_DELAY_DATA | CSUM_TCP_IPV6 | CSUM_UDP_IPV6 | CSUM_TSO)) {
+	if (sc->txq_dynamic_cksum_toggle_supported |
+	    (m->m_pkthdr.csum_flags &
+	     (CSUM_DELAY_DATA | CSUM_TCP_IPV6 | CSUM_UDP_IPV6 | CSUM_TSO))) {
 		int index = 0;
 
+#ifdef RSS
+		uint32_t bucket_id;
+
+		/*
+		 * Select a TX queue which matches the corresponding
+		 * RX queue for the hash in order to assign both
+		 * TX and RX parts of the flow to the same CPU
+		 */
+		if (rss_m2bucket(m, &bucket_id) == 0)
+			index = bucket_id % (sc->txq_count - (SFXGE_TXQ_NTYPES - 1));
+#else
 		/* check if flowid is set */
 		if (M_HASHTYPE_GET(m) != M_HASHTYPE_NONE) {
 			uint32_t hash = m->m_pkthdr.flowid;
+			uint32_t idx = hash % nitems(sc->rx_indir_table);
 
-			index = sc->rx_indir_table[hash % SFXGE_RX_SCALE_MAX];
+			index = sc->rx_indir_table[idx];
 		}
-		txq = sc->txq[SFXGE_TXQ_IP_TCP_UDP_CKSUM + index];
+#endif
+#if SFXGE_TX_PARSE_EARLY
+		if (m->m_pkthdr.csum_flags & CSUM_TSO)
+			sfxge_parse_tx_packet(m);
+#endif
+		index += (sc->txq_dynamic_cksum_toggle_supported == B_FALSE) ?
+			 SFXGE_TXQ_IP_TCP_UDP_CKSUM : 0;
+		txq = sc->txq[index];
 	} else if (m->m_pkthdr.csum_flags & CSUM_DELAY_IP) {
 		txq = sc->txq[SFXGE_TXQ_IP_CKSUM];
 	} else {
@@ -768,6 +950,8 @@ struct sfxge_tso_state {
 	unsigned out_len;	/* Remaining length in current segment */
 	unsigned seqnum;	/* Current sequence number */
 	unsigned packet_space;	/* Remaining space in current packet */
+	unsigned segs_space;	/* Remaining number of DMA segments
+				   for the packet (FATSOv2 only) */
 
 	/* Input position */
 	uint64_t dma_addr;	/* DMA address of current position */
@@ -781,26 +965,32 @@ struct sfxge_tso_state {
 	unsigned seg_size;	/* TCP segment size */
 	int fw_assisted;	/* Use FW-assisted TSO */
 	u_short packet_id;	/* IPv4 packet ID from the original packet */
+	uint8_t tcp_flags;	/* TCP flags */
 	efx_desc_t header_desc; /* Precomputed header descriptor for
 				 * FW-assisted TSO */
 };
 
+#if !SFXGE_TX_PARSE_EARLY
 static const struct ip *tso_iph(const struct sfxge_tso_state *tso)
 {
 	KASSERT(tso->protocol == htons(ETHERTYPE_IP),
 		("tso_iph() in non-IPv4 state"));
 	return (const struct ip *)(tso->mbuf->m_data + tso->nh_off);
 }
+
 static __unused const struct ip6_hdr *tso_ip6h(const struct sfxge_tso_state *tso)
 {
 	KASSERT(tso->protocol == htons(ETHERTYPE_IPV6),
 		("tso_ip6h() in non-IPv6 state"));
 	return (const struct ip6_hdr *)(tso->mbuf->m_data + tso->nh_off);
 }
+
 static const struct tcphdr *tso_tcph(const struct sfxge_tso_state *tso)
 {
 	return (const struct tcphdr *)(tso->mbuf->m_data + tso->tcph_off);
 }
+#endif
+
 
 /* Size of preallocated TSO header buffers.  Larger blocks must be
  * allocated from the heap.
@@ -814,7 +1004,7 @@ static const struct tcphdr *tso_tcph(const struct sfxge_tso_state *tso)
 #define	TSOH_COUNT(_txq_entries)	((_txq_entries) / 2u)
 #define	TSOH_PER_PAGE	(PAGE_SIZE / TSOH_STD_SIZE)
 #define	TSOH_PAGE_COUNT(_txq_entries)	\
-	((TSOH_COUNT(_txq_entries) + TSOH_PER_PAGE - 1) / TSOH_PER_PAGE)
+	howmany(TSOH_COUNT(_txq_entries), TSOH_PER_PAGE)
 
 static int tso_init(struct sfxge_txq *txq)
 {
@@ -857,15 +1047,18 @@ static void tso_start(struct sfxge_txq *txq, struct sfxge_tso_state *tso,
 		      const bus_dma_segment_t *hdr_dma_seg,
 		      struct mbuf *mbuf)
 {
-	struct ether_header *eh = mtod(mbuf, struct ether_header *);
 	const efx_nic_cfg_t *encp = efx_nic_cfg_get(txq->sc->enp);
+#if !SFXGE_TX_PARSE_EARLY
+	struct ether_header *eh = mtod(mbuf, struct ether_header *);
 	const struct tcphdr *th;
 	struct tcphdr th_copy;
+#endif
 
-	tso->fw_assisted = txq->sc->tso_fw_assisted;
+	tso->fw_assisted = txq->tso_fw_assisted;
 	tso->mbuf = mbuf;
 
 	/* Find network protocol and header */
+#if !SFXGE_TX_PARSE_EARLY
 	tso->protocol = eh->ether_type;
 	if (tso->protocol == htons(ETHERTYPE_VLAN)) {
 		struct ether_vlan_header *veh =
@@ -875,13 +1068,20 @@ static void tso_start(struct sfxge_txq *txq, struct sfxge_tso_state *tso,
 	} else {
 		tso->nh_off = sizeof(*eh);
 	}
+#else
+	tso->protocol = TSO_MBUF_PROTO(mbuf);
+	tso->nh_off = mbuf->m_pkthdr.l2hlen;
+	tso->tcph_off = mbuf->m_pkthdr.l3hlen;
+	tso->packet_id = ntohs(TSO_MBUF_PACKETID(mbuf));
+#endif
 
+#if !SFXGE_TX_PARSE_EARLY
 	/* Find TCP header */
 	if (tso->protocol == htons(ETHERTYPE_IP)) {
 		KASSERT(tso_iph(tso)->ip_p == IPPROTO_TCP,
 			("TSO required on non-TCP packet"));
 		tso->tcph_off = tso->nh_off + 4 * tso_iph(tso)->ip_hl;
-		tso->packet_id = tso_iph(tso)->ip_id;
+		tso->packet_id = ntohs(tso_iph(tso)->ip_id);
 	} else {
 		KASSERT(tso->protocol == htons(ETHERTYPE_IPV6),
 			("TSO required on non-IP packet"));
@@ -890,12 +1090,17 @@ static void tso_start(struct sfxge_txq *txq, struct sfxge_tso_state *tso,
 		tso->tcph_off = tso->nh_off + sizeof(struct ip6_hdr);
 		tso->packet_id = 0;
 	}
+#endif
+
+
 	if (tso->fw_assisted &&
 	    __predict_false(tso->tcph_off >
 			    encp->enc_tx_tso_tcp_header_offset_limit)) {
 		tso->fw_assisted = 0;
 	}
 
+
+#if !SFXGE_TX_PARSE_EARLY
 	KASSERT(mbuf->m_len >= tso->tcph_off,
 		("network header is fragmented in mbuf"));
 	/* We need TCP header including flags (window is the next) */
@@ -906,10 +1111,13 @@ static void tso_start(struct sfxge_txq *txq, struct sfxge_tso_state *tso,
 	} else {
 		th = tso_tcph(tso);
 	}
-
 	tso->header_len = tso->tcph_off + 4 * th->th_off;
+#else
+	tso->header_len = mbuf->m_pkthdr.l4hlen;
+#endif
 	tso->seg_size = mbuf->m_pkthdr.tso_segsz;
 
+#if !SFXGE_TX_PARSE_EARLY
 	tso->seqnum = ntohl(th->th_seq);
 
 	/* These flags must not be duplicated */
@@ -921,6 +1129,11 @@ static void tso_start(struct sfxge_txq *txq, struct sfxge_tso_state *tso,
 	KASSERT(!(th->th_flags & (TH_URG | TH_SYN)),
 		("incompatible TCP flag 0x%x on TSO packet",
 		 th->th_flags & (TH_URG | TH_SYN)));
+	tso->tcp_flags = th->th_flags;
+#else
+	tso->seqnum = TSO_MBUF_SEQNUM(mbuf);
+	tso->tcp_flags = TSO_MBUF_FLAGS(mbuf);
+#endif
 
 	tso->out_len = mbuf->m_pkthdr.len - tso->header_len;
 
@@ -948,6 +1161,8 @@ static void tso_fill_packet_with_fragment(struct sfxge_txq *txq,
 {
 	efx_desc_t *desc;
 	int n;
+	uint64_t dma_addr = tso->dma_addr;
+	boolean_t eop;
 
 	if (tso->in_len == 0 || tso->packet_space == 0)
 		return;
@@ -955,20 +1170,38 @@ static void tso_fill_packet_with_fragment(struct sfxge_txq *txq,
 	KASSERT(tso->in_len > 0, ("TSO input length went negative"));
 	KASSERT(tso->packet_space > 0, ("TSO packet space went negative"));
 
-	n = min(tso->in_len, tso->packet_space);
+	if (tso->fw_assisted & SFXGE_FATSOV2) {
+		n = tso->in_len;
+		tso->out_len -= n;
+		tso->seqnum += n;
+		tso->in_len = 0;
+		if (n < tso->packet_space) {
+			tso->packet_space -= n;
+			tso->segs_space--;
+		} else {
+			tso->packet_space = tso->seg_size -
+			    (n - tso->packet_space) % tso->seg_size;
+			tso->segs_space =
+			    EFX_TX_FATSOV2_DMA_SEGS_PER_PKT_MAX - 1 -
+			    (tso->packet_space != tso->seg_size);
+		}
+	} else {
+		n = min(tso->in_len, tso->packet_space);
+		tso->packet_space -= n;
+		tso->out_len -= n;
+		tso->dma_addr += n;
+		tso->in_len -= n;
+	}
 
-	tso->packet_space -= n;
-	tso->out_len -= n;
-	tso->in_len -= n;
+	/*
+	 * It is OK to use binary OR below to avoid extra branching
+	 * since all conditions may always be checked.
+	 */
+	eop = (tso->out_len == 0) | (tso->packet_space == 0) |
+	    (tso->segs_space == 0);
 
 	desc = &txq->pend_desc[txq->n_pend_desc++];
-	efx_tx_qdesc_dma_create(txq->common,
-				tso->dma_addr,
-				n,
-				tso->out_len == 0 || tso->packet_space == 0,
-				desc);
-
-	tso->dma_addr += n;
+	efx_tx_qdesc_dma_create(txq->common, dma_addr, n, eop, desc);
 }
 
 /* Callback from bus_dmamap_load() for long TSO headers. */
@@ -1001,28 +1234,48 @@ static int tso_start_new_packet(struct sfxge_txq *txq,
 	int rc;
 
 	if (tso->fw_assisted) {
-		uint8_t tcp_flags = tso_tcph(tso)->th_flags;
+		if (tso->fw_assisted & SFXGE_FATSOV2) {
+			/* Add 2 FATSOv2 option descriptors */
+			desc = &txq->pend_desc[txq->n_pend_desc];
+			efx_tx_qdesc_tso2_create(txq->common,
+						 tso->packet_id,
+						 0,
+						 tso->seqnum,
+						 tso->seg_size,
+						 desc,
+						 EFX_TX_FATSOV2_OPT_NDESCS);
+			desc += EFX_TX_FATSOV2_OPT_NDESCS;
+			txq->n_pend_desc += EFX_TX_FATSOV2_OPT_NDESCS;
+			KASSERT(txq->stmp[id].flags == 0, ("stmp flags are not 0"));
+			id = (id + EFX_TX_FATSOV2_OPT_NDESCS) & txq->ptr_mask;
 
-		if (tso->out_len > tso->seg_size)
-			tcp_flags &= ~(TH_FIN | TH_PUSH);
+			tso->segs_space =
+			    EFX_TX_FATSOV2_DMA_SEGS_PER_PKT_MAX - 1;
+		} else {
+			uint8_t tcp_flags = tso->tcp_flags;
 
-		/* TSO option descriptor */
-		desc = &txq->pend_desc[txq->n_pend_desc++];
-		efx_tx_qdesc_tso_create(txq->common,
-					tso->packet_id,
-					tso->seqnum,
-					tcp_flags,
-					desc++);
-		KASSERT(txq->stmp[id].flags == 0, ("stmp flags are not 0"));
-		id = (id + 1) & txq->ptr_mask;
+			if (tso->out_len > tso->seg_size)
+				tcp_flags &= ~(TH_FIN | TH_PUSH);
+
+			/* Add FATSOv1 option descriptor */
+			desc = &txq->pend_desc[txq->n_pend_desc++];
+			efx_tx_qdesc_tso_create(txq->common,
+						tso->packet_id,
+						tso->seqnum,
+						tcp_flags,
+						desc++);
+			KASSERT(txq->stmp[id].flags == 0, ("stmp flags are not 0"));
+			id = (id + 1) & txq->ptr_mask;
+
+			tso->seqnum += tso->seg_size;
+			tso->segs_space = UINT_MAX;
+		}
 
 		/* Header DMA descriptor */
 		*desc = tso->header_desc;
 		txq->n_pend_desc++;
 		KASSERT(txq->stmp[id].flags == 0, ("stmp flags are not 0"));
 		id = (id + 1) & txq->ptr_mask;
-
-		tso->seqnum += tso->seg_size;
 	} else {
 		/* Allocate a DMA-mapped header buffer. */
 		if (__predict_true(tso->header_len <= TSOH_STD_SIZE)) {
@@ -1104,6 +1357,8 @@ static int tso_start_new_packet(struct sfxge_txq *txq,
 					0,
 					desc);
 		id = (id + 1) & txq->ptr_mask;
+
+		tso->segs_space = UINT_MAX;
 	}
 	tso->packet_space = tso->seg_size;
 	txq->tso_packets++;
@@ -1115,7 +1370,7 @@ static int tso_start_new_packet(struct sfxge_txq *txq,
 static int
 sfxge_tx_queue_tso(struct sfxge_txq *txq, struct mbuf *mbuf,
 		   const bus_dma_segment_t *dma_seg, int n_dma_seg,
-		   int vlan_tagged)
+		   int n_extra_descs)
 {
 	struct sfxge_tso_state tso;
 	unsigned int id;
@@ -1132,7 +1387,7 @@ sfxge_tx_queue_tso(struct sfxge_txq *txq, struct mbuf *mbuf,
 	tso.in_len = dma_seg->ds_len - (tso.header_len - skipped);
 	tso.dma_addr = dma_seg->ds_addr + (tso.header_len - skipped);
 
-	id = (txq->added + vlan_tagged) & txq->ptr_mask;
+	id = (txq->added + n_extra_descs) & txq->ptr_mask;
 	if (__predict_false(tso_start_new_packet(txq, &tso, &id)))
 		return (-1);
 
@@ -1153,15 +1408,19 @@ sfxge_tx_queue_tso(struct sfxge_txq *txq, struct mbuf *mbuf,
 		}
 
 		/* End of packet? */
-		if (tso.packet_space == 0) {
+		if ((tso.packet_space == 0) | (tso.segs_space == 0)) {
+			unsigned int n_fatso_opt_desc =
+			    (tso.fw_assisted & SFXGE_FATSOV2) ?
+			    EFX_TX_FATSOV2_OPT_NDESCS :
+			    (tso.fw_assisted & SFXGE_FATSOV1) ? 1 : 0;
+
 			/* If the queue is now full due to tiny MSS,
 			 * or we can't create another header, discard
 			 * the remainder of the input mbuf but do not
 			 * roll back the work we have done.
 			 */
-			if (txq->n_pend_desc + tso.fw_assisted +
-			    1 /* header */ + n_dma_seg >
-			    txq->max_pkt_desc) {
+			if (txq->n_pend_desc + n_fatso_opt_desc +
+			    1 /* header */ + n_dma_seg > txq->max_pkt_desc) {
 				txq->tso_pdrop_too_many++;
 				break;
 			}
@@ -1292,8 +1551,68 @@ sfxge_tx_qstop(struct sfxge_softc *sc, unsigned int index)
 	efx_sram_buf_tbl_clear(sc->enp, txq->buf_base_id,
 	    EFX_TXQ_NBUFS(sc->txq_entries));
 
+	txq->hw_cksum_flags = 0;
+
 	SFXGE_EVQ_UNLOCK(evq);
 	SFXGE_TXQ_UNLOCK(txq);
+}
+
+/*
+ * Estimate maximum number of Tx descriptors required for TSO packet.
+ * With minimum MSS and maximum mbuf length we might need more (even
+ * than a ring-ful of descriptors), but this should not happen in
+ * practice except due to deliberate attack.  In that case we will
+ * truncate the output at a packet boundary.
+ */
+static unsigned int
+sfxge_tx_max_pkt_desc(const struct sfxge_softc *sc, enum sfxge_txq_type type,
+		      unsigned int tso_fw_assisted)
+{
+	/* One descriptor for every input fragment */
+	unsigned int max_descs = SFXGE_TX_MAPPING_MAX_SEG;
+	unsigned int sw_tso_max_descs;
+	unsigned int fa_tso_v1_max_descs = 0;
+	unsigned int fa_tso_v2_max_descs = 0;
+
+	/* Checksum offload Tx option descriptor may be required */
+	if (sc->txq_dynamic_cksum_toggle_supported)
+		max_descs++;
+
+	/* VLAN tagging Tx option descriptor may be required */
+	if (efx_nic_cfg_get(sc->enp)->enc_hw_tx_insert_vlan_enabled)
+		max_descs++;
+
+	if (type == SFXGE_TXQ_IP_TCP_UDP_CKSUM) {
+		/*
+		 * Plus header and payload descriptor for each output segment.
+		 * Minus one since header fragment is already counted.
+		 * Even if FATSO is used, we should be ready to fallback
+		 * to do it in the driver.
+		 */
+		sw_tso_max_descs = SFXGE_TSO_MAX_SEGS * 2 - 1;
+
+		/* FW assisted TSOv1 requires one more descriptor per segment
+		 * in comparison to SW TSO */
+		if (tso_fw_assisted & SFXGE_FATSOV1)
+			fa_tso_v1_max_descs =
+			    sw_tso_max_descs + SFXGE_TSO_MAX_SEGS;
+
+		/* FW assisted TSOv2 requires 3 (2 FATSO plus header) extra
+		 * descriptors per superframe limited by number of DMA fetches
+		 * per packet. The first packet header is already counted.
+		 */
+		if (tso_fw_assisted & SFXGE_FATSOV2) {
+			fa_tso_v2_max_descs =
+			    howmany(SFXGE_TX_MAPPING_MAX_SEG,
+				    EFX_TX_FATSOV2_DMA_SEGS_PER_PKT_MAX - 1) *
+			    (EFX_TX_FATSOV2_OPT_NDESCS + 1) - 1;
+		}
+
+		max_descs += MAX(sw_tso_max_descs,
+				 MAX(fa_tso_v1_max_descs, fa_tso_v2_max_descs));
+	}
+
+	return (max_descs);
 }
 
 static int
@@ -1302,6 +1621,8 @@ sfxge_tx_qstart(struct sfxge_softc *sc, unsigned int index)
 	struct sfxge_txq *txq;
 	efsys_mem_t *esmp;
 	uint16_t flags;
+	unsigned int tso_fw_assisted;
+	unsigned int label;
 	struct sfxge_evq *evq;
 	unsigned int desc_index;
 	int rc;
@@ -1323,15 +1644,19 @@ sfxge_tx_qstart(struct sfxge_softc *sc, unsigned int index)
 		return (rc);
 
 	/* Determine the kind of queue we are creating. */
+	tso_fw_assisted = 0;
 	switch (txq->type) {
 	case SFXGE_TXQ_NON_CKSUM:
 		flags = 0;
 		break;
 	case SFXGE_TXQ_IP_CKSUM:
-		flags = EFX_CKSUM_IPV4;
+		flags = EFX_TXQ_CKSUM_IPV4;
 		break;
 	case SFXGE_TXQ_IP_TCP_UDP_CKSUM:
-		flags = EFX_CKSUM_IPV4 | EFX_CKSUM_TCPUDP;
+		flags = EFX_TXQ_CKSUM_IPV4 | EFX_TXQ_CKSUM_TCPUDP;
+		tso_fw_assisted = sc->tso_fw_assisted;
+		if (tso_fw_assisted & SFXGE_FATSOV2)
+			flags |= EFX_TXQ_FATSOV2;
 		break;
 	default:
 		KASSERT(0, ("Impossible TX queue"));
@@ -1339,11 +1664,24 @@ sfxge_tx_qstart(struct sfxge_softc *sc, unsigned int index)
 		break;
 	}
 
+	label = (sc->txq_dynamic_cksum_toggle_supported) ? 0 : txq->type;
+
 	/* Create the common code transmit queue. */
-	if ((rc = efx_tx_qcreate(sc->enp, index, txq->type, esmp,
+	if ((rc = efx_tx_qcreate(sc->enp, index, label, esmp,
 	    sc->txq_entries, txq->buf_base_id, flags, evq->common,
-	    &txq->common, &desc_index)) != 0)
-		goto fail;
+	    &txq->common, &desc_index)) != 0) {
+		/* Retry if no FATSOv2 resources, otherwise fail */
+		if ((rc != ENOSPC) || (~flags & EFX_TXQ_FATSOV2))
+			goto fail;
+
+		/* Looks like all FATSOv2 contexts are used */
+		flags &= ~EFX_TXQ_FATSOV2;
+		tso_fw_assisted &= ~SFXGE_FATSOV2;
+		if ((rc = efx_tx_qcreate(sc->enp, index, label, esmp,
+		    sc->txq_entries, txq->buf_base_id, flags, evq->common,
+		    &txq->common, &desc_index)) != 0)
+			goto fail;
+	}
 
 	/* Initialise queue descriptor indexes */
 	txq->added = txq->pending = txq->completed = txq->reaped = desc_index;
@@ -1355,6 +1693,15 @@ sfxge_tx_qstart(struct sfxge_softc *sc, unsigned int index)
 
 	txq->init_state = SFXGE_TXQ_STARTED;
 	txq->flush_state = SFXGE_FLUSH_REQUIRED;
+	txq->tso_fw_assisted = tso_fw_assisted;
+
+	txq->max_pkt_desc = sfxge_tx_max_pkt_desc(sc, txq->type,
+						  tso_fw_assisted);
+
+	txq->hw_vlan_tci = 0;
+
+	txq->hw_cksum_flags = flags &
+			      (EFX_TXQ_CKSUM_IPV4 | EFX_TXQ_CKSUM_TCPUDP);
 
 	SFXGE_TXQ_UNLOCK(txq);
 
@@ -1463,42 +1810,11 @@ sfxge_tx_qfini(struct sfxge_softc *sc, unsigned int index)
 	free(txq, M_SFXGE);
 }
 
-/*
- * Estimate maximum number of Tx descriptors required for TSO packet.
- * With minimum MSS and maximum mbuf length we might need more (even
- * than a ring-ful of descriptors), but this should not happen in
- * practice except due to deliberate attack.  In that case we will
- * truncate the output at a packet boundary.
- */
-static unsigned int
-sfxge_tx_max_pkt_desc(const struct sfxge_softc *sc, enum sfxge_txq_type type)
-{
-	/* One descriptor for every input fragment */
-	unsigned int max_descs = SFXGE_TX_MAPPING_MAX_SEG;
-
-	/* VLAN tagging Tx option descriptor may be required */
-	if (efx_nic_cfg_get(sc->enp)->enc_hw_tx_insert_vlan_enabled)
-		max_descs++;
-
-	if (type == SFXGE_TXQ_IP_TCP_UDP_CKSUM) {
-		/*
-		 * Plus header and payload descriptor for each output segment.
-		 * Minus one since header fragment is already counted.
-		 */
-		max_descs += SFXGE_TSO_MAX_SEGS * 2 - 1;
-
-		/* FW assisted TSO requires one more descriptor per segment */
-		if (sc->tso_fw_assisted)
-			max_descs += SFXGE_TSO_MAX_SEGS;
-	}
-
-	return (max_descs);
-}
-
 static int
 sfxge_tx_qinit(struct sfxge_softc *sc, unsigned int txq_index,
 	       enum sfxge_txq_type type, unsigned int evq_index)
 {
+	const efx_nic_cfg_t *encp = efx_nic_cfg_get(sc->enp);
 	char name[16];
 	struct sysctl_ctx_list *ctx = device_get_sysctl_ctx(sc->dev);
 	struct sysctl_oid *txq_node;
@@ -1529,9 +1845,11 @@ sfxge_tx_qinit(struct sfxge_softc *sc, unsigned int txq_index,
 				 &txq->buf_base_id);
 
 	/* Create a DMA tag for packet mappings. */
-	if (bus_dma_tag_create(sc->parent_dma_tag, 1, 0x1000,
+	if (bus_dma_tag_create(sc->parent_dma_tag, 1,
+	    encp->enc_tx_dma_desc_boundary,
 	    MIN(0x3FFFFFFFFFFFUL, BUS_SPACE_MAXADDR), BUS_SPACE_MAXADDR, NULL,
-	    NULL, 0x11000, SFXGE_TX_MAPPING_MAX_SEG, 0x1000, 0, NULL, NULL,
+	    NULL, 0x11000, SFXGE_TX_MAPPING_MAX_SEG,
+	    encp->enc_tx_dma_desc_size_max, 0, NULL, NULL,
 	    &txq->packet_dma_tag) != 0) {
 		device_printf(sc->dev, "Couldn't allocate txq DMA tag\n");
 		rc = ENOMEM;
@@ -1563,26 +1881,6 @@ sfxge_tx_qinit(struct sfxge_softc *sc, unsigned int txq_index,
 	if (type == SFXGE_TXQ_IP_TCP_UDP_CKSUM &&
 	    (rc = tso_init(txq)) != 0)
 		goto fail3;
-
-	if (sfxge_tx_dpl_get_max <= 0) {
-		log(LOG_ERR, "%s=%d must be greater than 0",
-		    SFXGE_PARAM_TX_DPL_GET_MAX, sfxge_tx_dpl_get_max);
-		rc = EINVAL;
-		goto fail_tx_dpl_get_max;
-	}
-	if (sfxge_tx_dpl_get_non_tcp_max <= 0) {
-		log(LOG_ERR, "%s=%d must be greater than 0",
-		    SFXGE_PARAM_TX_DPL_GET_NON_TCP_MAX,
-		    sfxge_tx_dpl_get_non_tcp_max);
-		rc = EINVAL;
-		goto fail_tx_dpl_get_max;
-	}
-	if (sfxge_tx_dpl_put_max < 0) {
-		log(LOG_ERR, "%s=%d must be greater or equal to 0",
-		    SFXGE_PARAM_TX_DPL_PUT_MAX, sfxge_tx_dpl_put_max);
-		rc = EINVAL;
-		goto fail_tx_dpl_put_max;
-	}
 
 	/* Initialize the deferred packet list. */
 	stdp = &txq->dpl;
@@ -1620,18 +1918,12 @@ sfxge_tx_qinit(struct sfxge_softc *sc, unsigned int txq_index,
 
 	txq->type = type;
 	txq->evq_index = evq_index;
-	txq->txq_index = txq_index;
 	txq->init_state = SFXGE_TXQ_INITIALIZED;
-	txq->hw_vlan_tci = 0;
-
-	txq->max_pkt_desc = sfxge_tx_max_pkt_desc(sc, type);
 
 	return (0);
 
 fail_txq_stat_init:
 fail_dpl_node:
-fail_tx_dpl_put_max:
-fail_tx_dpl_get_max:
 fail3:
 fail_txq_node:
 	free(txq->pend_desc, M_SFXGE);
@@ -1732,13 +2024,35 @@ sfxge_tx_init(struct sfxge_softc *sc)
 	KASSERT(intr->state == SFXGE_INTR_INITIALIZED,
 	    ("intr->state != SFXGE_INTR_INITIALIZED"));
 
-	sc->txq_count = SFXGE_TXQ_NTYPES - 1 + sc->intr.n_alloc;
+	if (sfxge_tx_dpl_get_max <= 0) {
+		log(LOG_ERR, "%s=%d must be greater than 0",
+		    SFXGE_PARAM_TX_DPL_GET_MAX, sfxge_tx_dpl_get_max);
+		rc = EINVAL;
+		goto fail_tx_dpl_get_max;
+	}
+	if (sfxge_tx_dpl_get_non_tcp_max <= 0) {
+		log(LOG_ERR, "%s=%d must be greater than 0",
+		    SFXGE_PARAM_TX_DPL_GET_NON_TCP_MAX,
+		    sfxge_tx_dpl_get_non_tcp_max);
+		rc = EINVAL;
+		goto fail_tx_dpl_get_non_tcp_max;
+	}
+	if (sfxge_tx_dpl_put_max < 0) {
+		log(LOG_ERR, "%s=%d must be greater or equal to 0",
+		    SFXGE_PARAM_TX_DPL_PUT_MAX, sfxge_tx_dpl_put_max);
+		rc = EINVAL;
+		goto fail_tx_dpl_put_max;
+	}
+
+	sc->txq_count = SFXGE_EVQ0_N_TXQ(sc) - 1 + sc->intr.n_alloc;
 
 	sc->tso_fw_assisted = sfxge_tso_fw_assisted;
-	if (sc->tso_fw_assisted)
-		sc->tso_fw_assisted =
-		    (encp->enc_features & EFX_FEATURE_FW_ASSISTED_TSO) &&
-		    (encp->enc_fw_assisted_tso_enabled);
+	if ((~encp->enc_features & EFX_FEATURE_FW_ASSISTED_TSO) ||
+	    (!encp->enc_fw_assisted_tso_enabled))
+		sc->tso_fw_assisted &= ~SFXGE_FATSOV1;
+	if ((~encp->enc_features & EFX_FEATURE_FW_ASSISTED_TSO_V2) ||
+	    (!encp->enc_fw_assisted_tso_v2_enabled))
+		sc->tso_fw_assisted &= ~SFXGE_FATSOV2;
 
 	sc->txqs_node = SYSCTL_ADD_NODE(
 		device_get_sysctl_ctx(sc->dev),
@@ -1750,18 +2064,20 @@ sfxge_tx_init(struct sfxge_softc *sc)
 	}
 
 	/* Initialize the transmit queues */
-	if ((rc = sfxge_tx_qinit(sc, SFXGE_TXQ_NON_CKSUM,
-	    SFXGE_TXQ_NON_CKSUM, 0)) != 0)
-		goto fail;
+	if (sc->txq_dynamic_cksum_toggle_supported == B_FALSE) {
+		if ((rc = sfxge_tx_qinit(sc, SFXGE_TXQ_NON_CKSUM,
+		    SFXGE_TXQ_NON_CKSUM, 0)) != 0)
+			goto fail;
 
-	if ((rc = sfxge_tx_qinit(sc, SFXGE_TXQ_IP_CKSUM,
-	    SFXGE_TXQ_IP_CKSUM, 0)) != 0)
-		goto fail2;
+		if ((rc = sfxge_tx_qinit(sc, SFXGE_TXQ_IP_CKSUM,
+		    SFXGE_TXQ_IP_CKSUM, 0)) != 0)
+			goto fail2;
+	}
 
 	for (index = 0;
-	     index < sc->txq_count - SFXGE_TXQ_NTYPES + 1;
+	     index < sc->txq_count - SFXGE_EVQ0_N_TXQ(sc) + 1;
 	     index++) {
-		if ((rc = sfxge_tx_qinit(sc, SFXGE_TXQ_NTYPES - 1 + index,
+		if ((rc = sfxge_tx_qinit(sc, SFXGE_EVQ0_N_TXQ(sc) - 1 + index,
 		    SFXGE_TXQ_IP_TCP_UDP_CKSUM, index)) != 0)
 			goto fail3;
 	}
@@ -1782,5 +2098,8 @@ fail2:
 fail:
 fail_txq_node:
 	sc->txq_count = 0;
+fail_tx_dpl_put_max:
+fail_tx_dpl_get_non_tcp_max:
+fail_tx_dpl_get_max:
 	return (rc);
 }

@@ -2,29 +2,30 @@
 
 .include <src.opts.mk>
 
-SUBDIR=	doc\
-	libiberty \
+SUBDIR=	libiberty \
 	libbfd \
-	libopcodes \
-	libbinutils \
-	${_addr2line} \
-	as \
-	ld \
-	${_nm} \
-	objcopy \
-	objdump \
-	${_readelf} \
-	${_size} \
-	${_strings} \
-	${_strip}
+	libopcodes
 
-.if ${MK_ELFTOOLCHAIN_TOOLS} == "no"
-_addr2line=	addr2line
-_nm=		nm
-_readelf=	readelf
-_size=		size
-_strings=	strings
-_strip=		strip
+SUBDIR.${MK_BINUTILS}+=	doc
+SUBDIR.${MK_BINUTILS}+=	libbinutils
+SUBDIR.${MK_BINUTILS}+=	as
+SUBDIR.${MK_BINUTILS}+=	objdump
+
+# When we use ld.lld as /usr/bin/ld, do not install the non-ifunc-capable
+# GNU binutils 2.17.50 ld.
+# Except if we are on powerpc, that needs the ld from binutils to link
+# 32-bit binaries.
+.if ${MK_LLD_IS_LD} == "no" || ${TARGET} == "powerpc"
+SUBDIR.${MK_BINUTILS}+=ld
+.endif
+
+SUBDIR_DEPEND_libbinutils=libbfd		# for bfdver.h
+SUBDIR_DEPEND_as=libbfd libiberty libopcodes
+SUBDIR_DEPEND_ld=libbfd libiberty
+SUBDIR_DEPEND_objdump=libbfd libiberty libbinutils libopcodes
+
+.if !make(install)
+SUBDIR_PARALLEL=
 .endif
 
 .include <bsd.subdir.mk>

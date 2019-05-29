@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2012 The FreeBSD Foundation
  * All rights reserved.
  *
@@ -32,7 +34,6 @@
 __FBSDID("$FreeBSD$");
 
 #include <assert.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,7 +45,7 @@ keys_new(void)
 {
 	struct keys *keys;
 
-	keys = calloc(sizeof(*keys), 1);
+	keys = calloc(1, sizeof(*keys));
 	if (keys == NULL)
 		log_err(1, "calloc");
 

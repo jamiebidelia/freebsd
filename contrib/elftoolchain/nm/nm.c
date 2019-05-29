@@ -48,7 +48,7 @@
 
 #include "_elftc.h"
 
-ELFTC_VCSID("$Id: nm.c 3179 2015-03-31 19:38:56Z emaste $");
+ELFTC_VCSID("$Id: nm.c 3504 2016-12-17 15:33:16Z kaiwang27 $");
 
 /* symbol information list */
 STAILQ_HEAD(sym_head, sym_entry);
@@ -790,7 +790,8 @@ is_sec_debug(const char *shname)
 	};
 	const char **p;
 
-	assert(shname != NULL && "shname is NULL");
+	if (shname == NULL)
+		return (false);
 
 	for (p = dbg_sec; *p; p++) {
 		if (!strncmp(shname, *p, strlen(*p)))
@@ -1185,7 +1186,7 @@ read_elf(Elf *elf, const char *filename, Elf_Kind kind)
 	}
 	if (!elf_getshnum(elf, &shnum)) {
 		if ((e_err = elf_errno()) != 0)
-			warnx("%s: %s", OBJNAME, elf_errmsg(e_err));
+			warnx("%s: %s", OBJNAME, "File format not recognized");
 		else
 			warnx("%s: cannot get section number", OBJNAME);
 		rtn = 1;
@@ -1309,14 +1310,17 @@ read_elf(Elf *elf, const char *filename, Elf_Kind kind)
 	line_info = malloc(sizeof(struct line_info_head));
 	func_info = malloc(sizeof(struct func_info_head));
 	var_info = malloc(sizeof(struct var_info_head));
+	if (line_info != NULL)
+		SLIST_INIT(line_info);
+	if (func_info != NULL)
+		SLIST_INIT(func_info);
+	if (var_info != NULL)
+		SLIST_INIT(var_info);
 	if (line_info == NULL || func_info == NULL || var_info == NULL) {
 		warn("malloc");
 		(void) dwarf_finish(dbg, &de);
 		goto process_sym;
 	}
-	SLIST_INIT(line_info);
-	SLIST_INIT(func_info);
-	SLIST_INIT(var_info);
 
 	while ((ret = dwarf_next_cu_header(dbg, NULL, NULL, NULL, NULL, NULL,
 	    &de)) ==  DW_DLV_OK) {
@@ -1716,7 +1720,7 @@ sym_elem_print_all_sysv(char type, const char *sec, const GElf_Sym *sym,
 	case STT_NOTYPE:
 	default:
 		printf("%18s|", "NOTYPE");
-	};
+	}
 
 	if (sym->st_size != 0)
 		nm_opts.size_print_fn(sym);
@@ -1945,7 +1949,7 @@ sym_list_print_each(struct sym_entry *ep, struct sym_print_data *p,
 			return;
 		sec = p->s_table[ep->sym->st_shndx];
 		break;
-	};
+	}
 
 	nm_opts.elem_print_fn(type, sec, ep->sym, ep->name);
 

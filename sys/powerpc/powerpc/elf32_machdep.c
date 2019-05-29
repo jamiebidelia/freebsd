@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright 1996-1998 John D. Polstra.
  * All rights reserved.
  *
@@ -40,6 +42,7 @@
 #include <sys/sysent.h>
 #include <sys/imgact_elf.h>
 #include <sys/syscall.h>
+#include <sys/sysctl.h>
 #include <sys/signalvar.h>
 #include <sys/vnode.h>
 #include <sys/linker.h>
@@ -49,6 +52,7 @@
 
 #include <machine/altivec.h>
 #include <machine/cpu.h>
+#include <machine/fpu.h>
 #include <machine/elf.h>
 #include <machine/reg.h>
 #include <machine/md_var.h>
@@ -58,6 +62,18 @@
 #include <compat/freebsd32/freebsd32_util.h>
 
 extern const char *freebsd32_syscallnames[];
+static void ppc32_fixlimit(struct rlimit *rl, int which);
+
+static SYSCTL_NODE(_compat, OID_AUTO, ppc32, CTLFLAG_RW, 0, "32-bit mode");
+
+#define PPC32_MAXDSIZ (1024*1024*1024)
+static u_long ppc32_maxdsiz = PPC32_MAXDSIZ;
+SYSCTL_ULONG(_compat_ppc32, OID_AUTO, maxdsiz, CTLFLAG_RWTUN, &ppc32_maxdsiz,
+             0, "");
+#define PPC32_MAXSSIZ (64*1024*1024)
+u_long ppc32_maxssiz = PPC32_MAXSSIZ;
+SYSCTL_ULONG(_compat_ppc32, OID_AUTO, maxssiz, CTLFLAG_RWTUN, &ppc32_maxssiz,
+             0, "");
 #endif
 
 struct sysentvec elf32_freebsd_sysvec = {
@@ -67,9 +83,6 @@ struct sysentvec elf32_freebsd_sysvec = {
 #else
 	.sv_table	= sysent,
 #endif
-	.sv_mask	= 0,
-	.sv_sigsize	= 0,
-	.sv_sigtbl	= NULL,
 	.sv_errsize	= 0,
 	.sv_errtbl	= NULL,
 	.sv_transtrap	= NULL,
@@ -77,12 +90,10 @@ struct sysentvec elf32_freebsd_sysvec = {
 	.sv_sendsig	= sendsig,
 	.sv_sigcode	= sigcode32,
 	.sv_szsigcode	= &szsigcode32,
-	.sv_prepsyscall	= NULL,
 	.sv_name	= "FreeBSD ELF32",
 	.sv_coredump	= __elfN(coredump),
 	.sv_imgact_try	= NULL,
 	.sv_minsigstksz	= MINSIGSTKSZ,
-	.sv_pagesize	= PAGE_SIZE,
 	.sv_minuser	= VM_MIN_ADDRESS,
 	.sv_stackprot	= VM_PROT_ALL,
 #ifdef __powerpc64__
@@ -92,6 +103,7 @@ struct sysentvec elf32_freebsd_sysvec = {
 	.sv_copyout_strings = freebsd32_copyout_strings,
 	.sv_setregs	= ppc32_setregs,
 	.sv_syscallnames = freebsd32_syscallnames,
+	.sv_fixlimit	= ppc32_fixlimit,
 #else
 	.sv_maxuser	= VM_MAXUSER_ADDRESS,
 	.sv_usrstack	= USRSTACK,
@@ -99,16 +111,19 @@ struct sysentvec elf32_freebsd_sysvec = {
 	.sv_copyout_strings = exec_copyout_strings,
 	.sv_setregs	= exec_setregs,
 	.sv_syscallnames = syscallnames,
-#endif
 	.sv_fixlimit	= NULL,
+#endif
 	.sv_maxssiz	= NULL,
-	.sv_flags	= SV_ABI_FREEBSD | SV_ILP32 | SV_SHP,
+	.sv_flags	= SV_ABI_FREEBSD | SV_ILP32 | SV_SHP | SV_ASLR,
 	.sv_set_syscall_retval = cpu_set_syscall_retval,
 	.sv_fetch_syscall_args = cpu_fetch_syscall_args,
 	.sv_shared_page_base = FREEBSD32_SHAREDPAGE,
 	.sv_shared_page_len = PAGE_SIZE,
 	.sv_schedtail	= NULL,
 	.sv_thread_detach = NULL,
+	.sv_trap	= NULL,
+	.sv_hwcap	= &cpu_features,
+	.sv_hwcap2	= &cpu_features2,
 };
 INIT_SYSENTVEC(elf32_sysvec, &elf32_freebsd_sysvec);
 
@@ -155,23 +170,55 @@ elf32_dump_thread(struct thread *td, void *dst, size_t *off)
 {
 	size_t len;
 	struct pcb *pcb;
+	uint64_t vshr[32];
+	uint64_t *vsr_dw1;
+	int vsr_idx;
 
 	len = 0;
 	pcb = td->td_pcb;
+
 	if (pcb->pcb_flags & PCB_VEC) {
 		save_vec_nodrop(td);
 		if (dst != NULL) {
 			len += elf32_populate_note(NT_PPC_VMX,
-			    &pcb->pcb_vec, dst,
+			    &pcb->pcb_vec, (char *)dst + len,
 			    sizeof(pcb->pcb_vec), NULL);
 		} else
 			len += elf32_populate_note(NT_PPC_VMX, NULL, NULL,
 			    sizeof(pcb->pcb_vec), NULL);
 	}
+
+	if (pcb->pcb_flags & PCB_VSX) {
+		save_fpu_nodrop(td);
+		if (dst != NULL) {
+			/*
+			 * Doubleword 0 of VSR0-VSR31 overlap with FPR0-FPR31 and
+			 * VSR32-VSR63 overlap with VR0-VR31, so we only copy
+			 * the non-overlapping data, which is doubleword 1 of VSR0-VSR31.
+			 */
+			for (vsr_idx = 0; vsr_idx < nitems(vshr); vsr_idx++) {
+				vsr_dw1 = (uint64_t *)&pcb->pcb_fpu.fpr[vsr_idx].vsr[2];
+				vshr[vsr_idx] = *vsr_dw1;
+			}
+			len += elf32_populate_note(NT_PPC_VSX,
+			    vshr, (char *)dst + len,
+			    sizeof(vshr), NULL);
+		} else
+			len += elf32_populate_note(NT_PPC_VSX, NULL, NULL,
+			    sizeof(vshr), NULL);
+	}
+
 	*off = len;
 }
 
 #ifndef __powerpc64__
+bool
+elf_is_ifunc_reloc(Elf_Size r_info __unused)
+{
+
+	return (false);
+}
+
 /* Process one elf relocation with addend. */
 static int
 elf_reloc_internal(linker_file_t lf, Elf_Addr relocbase, const void *data,
@@ -183,6 +230,7 @@ elf_reloc_internal(linker_file_t lf, Elf_Addr relocbase, const void *data,
 	Elf_Addr addend;
 	Elf_Word rtype, symidx;
 	const Elf_Rela *rela;
+	int error;
 
 	switch (type) {
 	case ELF_RELOC_REL:
@@ -202,19 +250,19 @@ elf_reloc_internal(linker_file_t lf, Elf_Addr relocbase, const void *data,
 
 	switch (rtype) {
 
-       	case R_PPC_NONE:
-	       	break;
+	case R_PPC_NONE:
+		break;
 
 	case R_PPC_ADDR32: /* word32 S + A */
-       		addr = lookup(lf, symidx, 1);
-	       	if (addr == 0)
-	       		return -1;
+		error = lookup(lf, symidx, 1, &addr);
+		if (error != 0)
+			return -1;
 		*where = elf_relocaddr(lf, addr + addend);
-	       	break;
+			break;
 
-       	case R_PPC_ADDR16_LO: /* #lo(S) */
-		addr = lookup(lf, symidx, 1);
-		if (addr == 0)
+	case R_PPC_ADDR16_LO: /* #lo(S) */
+		error = lookup(lf, symidx, 1, &addr);
+		if (error != 0)
 			return -1;
 		/*
 		 * addend values are sometimes relative to sections
@@ -228,8 +276,8 @@ elf_reloc_internal(linker_file_t lf, Elf_Addr relocbase, const void *data,
 		break;
 
 	case R_PPC_ADDR16_HA: /* #ha(S) */
-		addr = lookup(lf, symidx, 1);
-		if (addr == 0)
+		error = lookup(lf, symidx, 1, &addr);
+		if (error != 0)
 			return -1;
 		/*
 		 * addend values are sometimes relative to sections
@@ -239,17 +287,17 @@ elf_reloc_internal(linker_file_t lf, Elf_Addr relocbase, const void *data,
 		if (addr > relocbase && addr <= (relocbase + addend))
 			addr = relocbase;
 		addr = elf_relocaddr(lf, addr + addend);
-	       	*hwhere = ((addr >> 16) + ((addr & 0x8000) ? 1 : 0))
+		*hwhere = ((addr >> 16) + ((addr & 0x8000) ? 1 : 0))
 		    & 0xffff;
 		break;
 
 	case R_PPC_RELATIVE: /* word32 B + A */
-       		*where = elf_relocaddr(lf, relocbase + addend);
-	       	break;
+		*where = elf_relocaddr(lf, relocbase + addend);
+		break;
 
 	default:
-       		printf("kldload: unexpected relocation type %d\n",
-	       	    (int) rtype);
+		printf("kldload: unexpected relocation type %d\n",
+		    (int) rtype);
 		return -1;
 	}
 	return(0);
@@ -258,7 +306,7 @@ elf_reloc_internal(linker_file_t lf, Elf_Addr relocbase, const void *data,
 void
 elf_reloc_self(Elf_Dyn *dynp, Elf_Addr relocbase)
 {
-	Elf_Rela *rela = 0, *relalim;
+	Elf_Rela *rela = NULL, *relalim;
 	Elf_Addr relasz = 0;
 	Elf_Addr *where;
 
@@ -318,5 +366,30 @@ elf_cpu_unload_file(linker_file_t lf __unused)
 {
 
 	return (0);
+}
+#endif
+
+#ifdef __powerpc64__
+static void
+ppc32_fixlimit(struct rlimit *rl, int which)
+{
+	switch (which) {
+	case RLIMIT_DATA:
+		if (ppc32_maxdsiz != 0) {
+			if (rl->rlim_cur > ppc32_maxdsiz)
+				rl->rlim_cur = ppc32_maxdsiz;
+			if (rl->rlim_max > ppc32_maxdsiz)
+				rl->rlim_max = ppc32_maxdsiz;
+		}
+		break;
+	case RLIMIT_STACK:
+		if (ppc32_maxssiz != 0) {
+			if (rl->rlim_cur > ppc32_maxssiz)
+				rl->rlim_cur = ppc32_maxssiz;
+			if (rl->rlim_max > ppc32_maxssiz)
+				rl->rlim_max = ppc32_maxssiz;
+		}
+		break;
+	}
 }
 #endif

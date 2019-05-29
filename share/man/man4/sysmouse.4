@@ -55,7 +55,6 @@ Make sure that
 .Xr moused 8
 is running, otherwise the user process will not see any data coming from
 the mouse.
-.Pp
 .Ss Operation Levels
 The
 .Nm
@@ -264,12 +263,6 @@ Only
 may be modifiable.
 Setting values in the other field does not generate
 error and has no effect.
-.\" .Pp
-.\" .It Dv MOUSE_GETVARS Ar mousevar_t *vars
-.\" .It Dv MOUSE_SETVARS Ar mousevar_t *vars
-.\" These commands are not supported by the
-.\" .Nm
-.\" driver.
 .Pp
 .It Dv MOUSE_READDATA Ar mousedata_t *data
 .It Dv MOUSE_READSTATE Ar mousedata_t *state

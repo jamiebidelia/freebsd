@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright 2004 by Peter Grehan. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -70,17 +72,16 @@ _tcb_set(struct tcb *tcb)
 static __inline struct tcb *
 _tcb_get(void)
 {
-	register uint8_t *_tp;
+        register struct tcb *tcb;
+
 #ifdef __powerpc64__
-	__asm __volatile("mr %0,13" : "=r"(_tp));
+	__asm __volatile("addi %0,13,%1" : "=r"(tcb) : "i"(-TP_OFFSET));
 #else
-	__asm __volatile("mr %0,2" : "=r"(_tp));
+	__asm __volatile("addi %0,2,%1" : "=r"(tcb) : "i"(-TP_OFFSET));
 #endif
 
-	return ((struct tcb *)(_tp - TP_OFFSET));
+	return (tcb);
 }
-
-extern struct pthread *_thr_initial;
 
 static __inline struct pthread *
 _get_curthread(void)

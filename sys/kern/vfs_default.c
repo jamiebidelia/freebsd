@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1989, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -15,7 +17,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 4. Neither the name of the University nor the names of its contributors
+ * 3. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -79,10 +81,9 @@ static int	dirent_exists(struct vnode *vp, const char *dirname,
 #define DIRENT_MINSIZE (sizeof(struct dirent) - (MAXNAMLEN+1) + 4)
 
 static int vop_stdis_text(struct vop_is_text_args *ap);
-static int vop_stdset_text(struct vop_set_text_args *ap);
 static int vop_stdunset_text(struct vop_unset_text_args *ap);
-static int vop_stdget_writecount(struct vop_get_writecount_args *ap);
 static int vop_stdadd_writecount(struct vop_add_writecount_args *ap);
+static int vop_stdfdatasync(struct vop_fdatasync_args *ap);
 static int vop_stdgetpages_async(struct vop_getpages_async_args *ap);
 
 /*
@@ -111,6 +112,7 @@ struct vop_vector default_vnodeops = {
 	.vop_bmap =		vop_stdbmap,
 	.vop_close =		VOP_NULL,
 	.vop_fsync =		VOP_NULL,
+	.vop_fdatasync =	vop_stdfdatasync,
 	.vop_getpages =		vop_stdgetpages,
 	.vop_getpages_async =	vop_stdgetpages_async,
 	.vop_getwritemount = 	vop_stdgetwritemount,
@@ -137,7 +139,6 @@ struct vop_vector default_vnodeops = {
 	.vop_is_text =		vop_stdis_text,
 	.vop_set_text =		vop_stdset_text,
 	.vop_unset_text =	vop_stdunset_text,
-	.vop_get_writecount =	vop_stdget_writecount,
 	.vop_add_writecount =	vop_stdadd_writecount,
 };
 
@@ -256,7 +257,7 @@ static int
 vop_nostrategy (struct vop_strategy_args *ap)
 {
 	printf("No strategy for buffer at %p\n", ap->a_bp);
-	vprint("vnode", ap->a_vp);
+	vn_printf(ap->a_vp, "vnode ");
 	ap->a_bp->b_ioflags |= BIO_ERROR;
 	ap->a_bp->b_error = EOPNOTSUPP;
 	bufdone(ap->a_bp);
@@ -472,29 +473,18 @@ vop_stdpathconf(ap)
 {
 
 	switch (ap->a_name) {
-		case _PC_NAME_MAX:
-			*ap->a_retval = NAME_MAX;
+		case _PC_ASYNC_IO:
+			*ap->a_retval = _POSIX_ASYNCHRONOUS_IO;
 			return (0);
 		case _PC_PATH_MAX:
 			*ap->a_retval = PATH_MAX;
 			return (0);
-		case _PC_LINK_MAX:
-			*ap->a_retval = LINK_MAX;
-			return (0);
-		case _PC_MAX_CANON:
-			*ap->a_retval = MAX_CANON;
-			return (0);
-		case _PC_MAX_INPUT:
-			*ap->a_retval = MAX_INPUT;
-			return (0);
-		case _PC_PIPE_BUF:
-			*ap->a_retval = PIPE_BUF;
-			return (0);
-		case _PC_CHOWN_RESTRICTED:
-			*ap->a_retval = 1;
-			return (0);
-		case _PC_VDISABLE:
-			*ap->a_retval = _POSIX_VDISABLE;
+		case _PC_ACL_EXTENDED:
+		case _PC_ACL_NFS4:
+		case _PC_CAP_PRESENT:
+		case _PC_INF_PRESENT:
+		case _PC_MAC_PRESENT:
+			*ap->a_retval = 0;
 			return (0);
 		default:
 			return (EINVAL);
@@ -515,10 +505,11 @@ vop_stdlock(ap)
 	} */ *ap;
 {
 	struct vnode *vp = ap->a_vp;
+	struct mtx *ilk;
 
-	return (_lockmgr_args(vp->v_vnlock, ap->a_flags, VI_MTX(vp),
-	    LK_WMESG_DEFAULT, LK_PRIO_DEFAULT, LK_TIMO_DEFAULT, ap->a_file,
-	    ap->a_line));
+	ilk = VI_MTX(vp);
+	return (lockmgr_lock_fast_path(vp->v_vnlock, ap->a_flags,
+	    &ilk->lock_object, ap->a_file, ap->a_line));
 }
 
 /* See above. */
@@ -530,8 +521,11 @@ vop_stdunlock(ap)
 	} */ *ap;
 {
 	struct vnode *vp = ap->a_vp;
+	struct mtx *ilk;
 
-	return (lockmgr(vp->v_vnlock, ap->a_flags | LK_RELEASE, VI_MTX(vp)));
+	ilk = VI_MTX(vp);
+	return (lockmgr_unlock_fast_path(vp->v_vnlock, ap->a_flags,
+	    &ilk->lock_object));
 }
 
 /* See above. */
@@ -637,91 +631,26 @@ int
 vop_stdfsync(ap)
 	struct vop_fsync_args /* {
 		struct vnode *a_vp;
-		struct ucred *a_cred;
 		int a_waitfor;
 		struct thread *a_td;
 	} */ *ap;
 {
-	struct vnode *vp = ap->a_vp;
-	struct buf *bp;
-	struct bufobj *bo;
-	struct buf *nbp;
-	int error = 0;
-	int maxretry = 1000;     /* large, arbitrarily chosen */
 
-	bo = &vp->v_bufobj;
-	BO_LOCK(bo);
-loop1:
-	/*
-	 * MARK/SCAN initialization to avoid infinite loops.
-	 */
-        TAILQ_FOREACH(bp, &bo->bo_dirty.bv_hd, b_bobufs) {
-                bp->b_vflags &= ~BV_SCANNED;
-		bp->b_error = 0;
-	}
+	return (vn_fsync_buf(ap->a_vp, ap->a_waitfor));
+}
 
-	/*
-	 * Flush all dirty buffers associated with a vnode.
-	 */
-loop2:
-	TAILQ_FOREACH_SAFE(bp, &bo->bo_dirty.bv_hd, b_bobufs, nbp) {
-		if ((bp->b_vflags & BV_SCANNED) != 0)
-			continue;
-		bp->b_vflags |= BV_SCANNED;
-		if (BUF_LOCK(bp, LK_EXCLUSIVE | LK_NOWAIT, NULL)) {
-			if (ap->a_waitfor != MNT_WAIT)
-				continue;
-			if (BUF_LOCK(bp,
-			    LK_EXCLUSIVE | LK_INTERLOCK | LK_SLEEPFAIL,
-			    BO_LOCKPTR(bo)) != 0) {
-				BO_LOCK(bo);
-				goto loop1;
-			}
-			BO_LOCK(bo);
-		}
-		BO_UNLOCK(bo);
-		KASSERT(bp->b_bufobj == bo,
-		    ("bp %p wrong b_bufobj %p should be %p",
-		    bp, bp->b_bufobj, bo));
-		if ((bp->b_flags & B_DELWRI) == 0)
-			panic("fsync: not dirty");
-		if ((vp->v_object != NULL) && (bp->b_flags & B_CLUSTEROK)) {
-			vfs_bio_awrite(bp);
-		} else {
-			bremfree(bp);
-			bawrite(bp);
-		}
-		BO_LOCK(bo);
-		goto loop2;
-	}
+static int
+vop_stdfdatasync(struct vop_fdatasync_args *ap)
+{
 
-	/*
-	 * If synchronous the caller expects us to completely resolve all
-	 * dirty buffers in the system.  Wait for in-progress I/O to
-	 * complete (which could include background bitmap writes), then
-	 * retry if dirty blocks still exist.
-	 */
-	if (ap->a_waitfor == MNT_WAIT) {
-		bufobj_wwait(bo, 0, 0);
-		if (bo->bo_dirty.bv_cnt > 0) {
-			/*
-			 * If we are unable to write any of these buffers
-			 * then we fail now rather than trying endlessly
-			 * to write them out.
-			 */
-			TAILQ_FOREACH(bp, &bo->bo_dirty.bv_hd, b_bobufs)
-				if ((error = bp->b_error) == 0)
-					continue;
-			if (error == 0 && --maxretry >= 0)
-				goto loop1;
-			error = EAGAIN;
-		}
-	}
-	BO_UNLOCK(bo);
-	if (error == EAGAIN)
-		vprint("fsync: giving up on dirty", vp);
+	return (VOP_FSYNC(ap->a_vp, MNT_WAIT, ap->a_td));
+}
 
-	return (error);
+int
+vop_stdfdatasync_buf(struct vop_fdatasync_args *ap)
+{
+
+	return (vn_fsync_buf(ap->a_vp, MNT_WAIT));
 }
 
 /* XXX Needs good comment and more info in the manpage (VOP_GETPAGES(9)). */
@@ -731,12 +660,13 @@ vop_stdgetpages(ap)
 		struct vnode *a_vp;
 		vm_page_t *a_m;
 		int a_count;
-		int a_reqpage;
+		int *a_rbehind;
+		int *a_rahead;
 	} */ *ap;
 {
 
 	return vnode_pager_generic_getpages(ap->a_vp, ap->a_m,
-	    ap->a_count, ap->a_reqpage, NULL, NULL);
+	    ap->a_count, ap->a_rbehind, ap->a_rahead, NULL, NULL);
 }
 
 static int
@@ -744,8 +674,9 @@ vop_stdgetpages_async(struct vop_getpages_async_args *ap)
 {
 	int error;
 
-	error = VOP_GETPAGES(ap->a_vp, ap->a_m, ap->a_count, ap->a_reqpage);
-	ap->a_iodone(ap->a_arg, ap->a_m, ap->a_reqpage, error);
+	error = VOP_GETPAGES(ap->a_vp, ap->a_m, ap->a_count, ap->a_rbehind,
+	    ap->a_rahead);
+	ap->a_iodone(ap->a_arg, ap->a_m, ap->a_count, error);
 	return (error);
 }
 
@@ -810,7 +741,7 @@ vop_stdvptocnp(struct vop_vptocnp_args *ap)
 	VREF(vp);
 	locked = VOP_ISLOCKED(vp);
 	VOP_UNLOCK(vp, 0);
-	NDINIT_ATVP(&nd, LOOKUP, FOLLOW | LOCKLEAF, UIO_SYSSPACE,
+	NDINIT_ATVP(&nd, LOOKUP, FOLLOW | LOCKSHARED | LOCKLEAF, UIO_SYSSPACE,
 	    "..", vp, td);
 	flags = FREAD;
 	error = vn_open_cred(&nd, &flags, 0, VN_OPEN_NOAUDIT, cred, NULL);
@@ -830,7 +761,7 @@ vop_stdvptocnp(struct vop_vptocnp_args *ap)
 		VOP_UNLOCK(mvp, 0);
 		vn_close(mvp, FREAD, cred, td);
 		VREF(*dvp);
-		vn_lock(*dvp, LK_EXCLUSIVE | LK_RETRY);
+		vn_lock(*dvp, LK_SHARED | LK_RETRY);
 		covered = 1;
 	}
 
@@ -859,15 +790,15 @@ vop_stdvptocnp(struct vop_vptocnp_args *ap)
 		    (dp->d_fileno == fileno)) {
 			if (covered) {
 				VOP_UNLOCK(*dvp, 0);
-				vn_lock(mvp, LK_EXCLUSIVE | LK_RETRY);
+				vn_lock(mvp, LK_SHARED | LK_RETRY);
 				if (dirent_exists(mvp, dp->d_name, td)) {
 					error = ENOENT;
 					VOP_UNLOCK(mvp, 0);
-					vn_lock(*dvp, LK_EXCLUSIVE | LK_RETRY);
+					vn_lock(*dvp, LK_SHARED | LK_RETRY);
 					goto out;
 				}
 				VOP_UNLOCK(mvp, 0);
-				vn_lock(*dvp, LK_EXCLUSIVE | LK_RETRY);
+				vn_lock(*dvp, LK_SHARED | LK_RETRY);
 			}
 			i -= dp->d_namlen;
 
@@ -907,7 +838,8 @@ int
 vop_stdallocate(struct vop_allocate_args *ap)
 {
 #ifdef __notyet__
-	struct statfs sfs;
+	struct statfs *sfs;
+	off_t maxfilesize = 0;
 #endif
 	struct iovec aiov;
 	struct vattr vattr, *vap;
@@ -943,12 +875,16 @@ vop_stdallocate(struct vop_allocate_args *ap)
 	 * Check if the filesystem sets f_maxfilesize; if not use
 	 * VOP_SETATTR to perform the check.
 	 */
-	error = VFS_STATFS(vp->v_mount, &sfs, td);
+	sfs = malloc(sizeof(struct statfs), M_STATFS, M_WAITOK);
+	error = VFS_STATFS(vp->v_mount, sfs, td);
+	if (error == 0)
+		maxfilesize = sfs->f_maxfilesize;
+	free(sfs, M_STATFS);
 	if (error != 0)
 		goto out;
-	if (sfs.f_maxfilesize) {
-		if (offset > sfs.f_maxfilesize || len > sfs.f_maxfilesize ||
-		    offset + len > sfs.f_maxfilesize) {
+	if (maxfilesize) {
+		if (offset > maxfilesize || len > maxfilesize ||
+		    offset + len > maxfilesize) {
 			error = EFBIG;
 			goto out;
 		}
@@ -1035,8 +971,10 @@ int
 vop_stdadvise(struct vop_advise_args *ap)
 {
 	struct vnode *vp;
-	off_t start, end;
-	int error;
+	struct bufobj *bo;
+	daddr_t startn, endn;
+	off_t bstart, bend, start, end;
+	int bsize, error;
 
 	vp = ap->a_vp;
 	switch (ap->a_advice) {
@@ -1049,28 +987,49 @@ vop_stdadvise(struct vop_advise_args *ap)
 		error = 0;
 		break;
 	case POSIX_FADV_DONTNEED:
-		/*
-		 * Flush any open FS buffers and then remove pages
-		 * from the backing VM object.  Using vinvalbuf() here
-		 * is a bit heavy-handed as it flushes all buffers for
-		 * the given vnode, not just the buffers covering the
-		 * requested range.
-		 */
 		error = 0;
 		vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
 		if (vp->v_iflag & VI_DOOMED) {
 			VOP_UNLOCK(vp, 0);
 			break;
 		}
-		vinvalbuf(vp, V_CLEANONLY, 0, 0);
+
+		/*
+		 * Round to block boundaries (and later possibly further to
+		 * page boundaries).  Applications cannot reasonably be aware  
+		 * of the boundaries, and the rounding must be to expand at
+		 * both extremities to cover enough.  It still doesn't cover
+		 * read-ahead.  For partial blocks, this gives unnecessary
+		 * discarding of buffers but is efficient enough since the
+		 * pages usually remain in VMIO for some time.
+		 */
+		bsize = vp->v_bufobj.bo_bsize;
+		bstart = rounddown(ap->a_start, bsize);
+		bend = roundup(ap->a_end, bsize);
+
+		/*
+		 * Deactivate pages in the specified range from the backing VM
+		 * object.  Pages that are resident in the buffer cache will
+		 * remain wired until their corresponding buffers are released
+		 * below.
+		 */
 		if (vp->v_object != NULL) {
-			start = trunc_page(ap->a_start);
-			end = round_page(ap->a_end);
-			VM_OBJECT_WLOCK(vp->v_object);
-			vm_object_page_cache(vp->v_object, OFF_TO_IDX(start),
+			start = trunc_page(bstart);
+			end = round_page(bend);
+			VM_OBJECT_RLOCK(vp->v_object);
+			vm_object_page_noreuse(vp->v_object, OFF_TO_IDX(start),
 			    OFF_TO_IDX(end));
-			VM_OBJECT_WUNLOCK(vp->v_object);
+			VM_OBJECT_RUNLOCK(vp->v_object);
 		}
+
+		bo = &vp->v_bufobj;
+		BO_RLOCK(bo);
+		startn = bstart / bsize;
+		endn = bend / bsize;
+		error = bnoreuselist(&bo->bo_clean, bo, startn, endn);
+		if (error == 0)
+			error = bnoreuselist(&bo->bo_dirty, bo, startn, endn);
+		BO_RUNLOCK(bo);
 		VOP_UNLOCK(vp, 0);
 		break;
 	default:
@@ -1084,7 +1043,7 @@ int
 vop_stdunp_bind(struct vop_unp_bind_args *ap)
 {
 
-	ap->a_vp->v_socket = ap->a_socket;
+	ap->a_vp->v_unpcb = ap->a_unpcb;
 	return (0);
 }
 
@@ -1092,7 +1051,7 @@ int
 vop_stdunp_connect(struct vop_unp_connect_args *ap)
 {
 
-	*ap->a_socket = ap->a_vp->v_socket;
+	*ap->a_unpcb = ap->a_vp->v_unpcb;
 	return (0);
 }
 
@@ -1100,7 +1059,7 @@ int
 vop_stdunp_detach(struct vop_unp_detach_args *ap)
 {
 
-	ap->a_vp->v_socket = NULL;
+	ap->a_vp->v_unpcb = NULL;
 	return (0);
 }
 
@@ -1108,39 +1067,63 @@ static int
 vop_stdis_text(struct vop_is_text_args *ap)
 {
 
-	return ((ap->a_vp->v_vflag & VV_TEXT) != 0);
+	return (ap->a_vp->v_writecount < 0);
 }
 
-static int
+int
 vop_stdset_text(struct vop_set_text_args *ap)
 {
+	struct vnode *vp;
+	int error;
 
-	ap->a_vp->v_vflag |= VV_TEXT;
-	return (0);
+	vp = ap->a_vp;
+	VI_LOCK(vp);
+	if (vp->v_writecount > 0) {
+		error = ETXTBSY;
+	} else {
+		vp->v_writecount--;
+		error = 0;
+	}
+	VI_UNLOCK(vp);
+	return (error);
 }
 
 static int
 vop_stdunset_text(struct vop_unset_text_args *ap)
 {
+	struct vnode *vp;
+	int error;
 
-	ap->a_vp->v_vflag &= ~VV_TEXT;
-	return (0);
-}
-
-static int
-vop_stdget_writecount(struct vop_get_writecount_args *ap)
-{
-
-	*ap->a_writecount = ap->a_vp->v_writecount;
-	return (0);
+	vp = ap->a_vp;
+	VI_LOCK(vp);
+	if (vp->v_writecount < 0) {
+		vp->v_writecount++;
+		error = 0;
+	} else {
+		error = EINVAL;
+	}
+	VI_UNLOCK(vp);
+	return (error);
 }
 
 static int
 vop_stdadd_writecount(struct vop_add_writecount_args *ap)
 {
+	struct vnode *vp;
+	int error;
 
-	ap->a_vp->v_writecount += ap->a_inc;
-	return (0);
+	vp = ap->a_vp;
+	VI_LOCK(vp);
+	if (vp->v_writecount < 0) {
+		error = ETXTBSY;
+	} else {
+		VNASSERT(vp->v_writecount + ap->a_inc >= 0, vp,
+		    ("neg writecount increment %d", ap->a_inc));
+		vp->v_writecount += ap->a_inc;
+		error = 0;
+	}
+	VI_UNLOCK(vp);
+	return (error);
 }
 
 /*
@@ -1285,4 +1268,37 @@ vfs_stdsysctl(mp, op, req)
 	return (EOPNOTSUPP);
 }
 
-/* end of vfs default ops */
+static vop_bypass_t *
+bp_by_off(struct vop_vector *vop, struct vop_generic_args *a)
+{
+
+	return (*(vop_bypass_t **)((char *)vop + a->a_desc->vdesc_vop_offset));
+}
+
+int
+vop_sigdefer(struct vop_vector *vop, struct vop_generic_args *a)
+{
+	vop_bypass_t *bp;
+	int prev_stops, rc;
+
+	for (; vop != NULL; vop = vop->vop_default) {
+		bp = bp_by_off(vop, a);
+		if (bp != NULL)
+			break;
+
+		/*
+		 * Bypass is not really supported.  It is done for
+		 * fallback to unimplemented vops in the default
+		 * vector.
+		 */
+		bp = vop->vop_bypass;
+		if (bp != NULL)
+			break;
+	}
+	MPASS(bp != NULL);
+
+	prev_stops = sigdeferstop(SIGDEFERSTOP_SILENT);
+	rc = bp(a);
+	sigallowstop(prev_stops);
+	return (rc);
+}

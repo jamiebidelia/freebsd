@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2005 Antoine Brodin
  * All rights reserved.
  *
@@ -34,7 +36,7 @@
 struct sbuf;
 
 /* MI Routines. */
-struct stack	*stack_create(void);
+struct stack	*stack_create(int);
 void		 stack_destroy(struct stack *);
 int		 stack_put(struct stack *, vm_offset_t);
 void		 stack_copy(const struct stack *, struct stack *);
@@ -45,20 +47,23 @@ void		 stack_print_short(const struct stack *);
 void		 stack_print_short_ddb(const struct stack *);
 void		 stack_sbuf_print(struct sbuf *, const struct stack *);
 void		 stack_sbuf_print_ddb(struct sbuf *, const struct stack *);
+int		 stack_sbuf_print_flags(struct sbuf *, const struct stack *,
+		 int);
 #ifdef KTR
 void		 stack_ktr(u_int, const char *, int, const struct stack *,
-		    u_int, int);
-#define	CTRSTACK(m, st, depth, cheap) do {				\
+		    u_int);
+#define	CTRSTACK(m, st, depth) do {					\
 	if (KTR_COMPILE & (m))						\
-		stack_ktr((m), __FILE__, __LINE__, st, depth, cheap);	\
+		stack_ktr((m), __FILE__, __LINE__, st, depth);		\
 	} while(0)
 #else
-#define	CTRSTACK(m, st, depth, cheap)
+#define	CTRSTACK(m, st, depth)
 #endif
 
-/* MD Routine. */
+/* MD Routines. */
 struct thread;
 void		 stack_save(struct stack *);
 void		 stack_save_td(struct stack *, struct thread *);
+int		 stack_save_td_running(struct stack *, struct thread *);
 
 #endif

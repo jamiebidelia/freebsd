@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2008-2010 Edward Tomasz Napierała <trasz@FreeBSD.org>
  * All rights reserved.
  *
@@ -257,8 +259,7 @@ vaccess_acl_nfs4(enum vtype type, uid_t file_uid, gid_t file_gid,
 	 * No match.  Try to use privileges, if there are any.
 	 */
 	if (is_directory) {
-		if ((accmode & VEXEC) && !priv_check_cred(cred,
-		    PRIV_VFS_LOOKUP, 0))
+		if ((accmode & VEXEC) && !priv_check_cred(cred, PRIV_VFS_LOOKUP))
 			priv_granted |= VEXEC;
 	} else {
 		/*
@@ -268,23 +269,23 @@ vaccess_acl_nfs4(enum vtype type, uid_t file_uid, gid_t file_gid,
 		 */
 		if ((accmode & VEXEC) && (file_mode &
 		    (S_IXUSR | S_IXGRP | S_IXOTH)) != 0 &&
-		    !priv_check_cred(cred, PRIV_VFS_EXEC, 0))
+		    !priv_check_cred(cred, PRIV_VFS_EXEC))
 			priv_granted |= VEXEC;
 	}
 
-	if ((accmode & VREAD) && !priv_check_cred(cred, PRIV_VFS_READ, 0))
+	if ((accmode & VREAD) && !priv_check_cred(cred, PRIV_VFS_READ))
 		priv_granted |= VREAD;
 
 	if ((accmode & (VWRITE | VAPPEND | VDELETE_CHILD)) &&
-	    !priv_check_cred(cred, PRIV_VFS_WRITE, 0))
+	    !priv_check_cred(cred, PRIV_VFS_WRITE))
 		priv_granted |= (VWRITE | VAPPEND | VDELETE_CHILD);
 
 	if ((accmode & VADMIN_PERMS) &&
-	    !priv_check_cred(cred, PRIV_VFS_ADMIN, 0))
+	    !priv_check_cred(cred, PRIV_VFS_ADMIN))
 		priv_granted |= VADMIN_PERMS;
 
 	if ((accmode & VSTAT_PERMS) &&
-	    !priv_check_cred(cred, PRIV_VFS_STAT, 0))
+	    !priv_check_cred(cred, PRIV_VFS_STAT))
 		priv_granted |= VSTAT_PERMS;
 
 	if ((accmode & priv_granted) == accmode) {
@@ -1068,6 +1069,7 @@ acl_nfs4_inherit_entries(const struct acl *parent_aclp,
 		child_aclp->acl_cnt++;
 
 		entry->ae_flags &= ~ACL_ENTRY_INHERIT_ONLY;
+		entry->ae_flags |= ACL_ENTRY_INHERITED;
 
 		/*
 		 * If the type of the ACE is neither ALLOW nor DENY,

@@ -14,7 +14,7 @@
 .\" 2. Redistributions in binary form must reproduce the above copyright
 .\"    notice, this list of conditions and the following disclaimer in the
 .\"    documentation and/or other materials provided with the distribution.
-.\" 4. Neither the name of the University nor the names of its contributors
+.\" 3. Neither the name of the University nor the names of its contributors
 .\"    may be used to endorse or promote products derived from this software
 .\"    without specific prior written permission.
 .\"
@@ -33,7 +33,7 @@
 .\"	@(#)pax.1	8.4 (Berkeley) 4/18/94
 .\" $FreeBSD$
 .\"
-.Dd March 17, 2015
+.Dd December 29, 2018
 .Dt PAX 1
 .Os
 .Sh NAME
@@ -595,7 +595,7 @@ are not understood by
 however
 .Xr tar 1
 and
-.Xr dump 1
+.Xr dump 8
 will preserve these.
 .It Fl s Ar replstr
 Modify the file or archive member names specified by the
@@ -793,6 +793,16 @@ limits can be separated by
 .Li x
 to indicate a product.
 .Pp
+Note that the specified size is for the uncompressed pax image itself.
+If the
+.Fl z
+option is also used, the resulting file may contain fewer
+.Ar bytes ,
+according to the compressibility of the archive contents.
+See
+.Xr zip 1
+if compressed volumes of predictable size are required.
+.Pp
 .Em Warning :
 Only use this option when writing an archive to a device which supports
 an end of file read condition based on last (or largest) write offset
@@ -804,7 +814,7 @@ This option is the same as the
 option, except that the file inode change time is checked instead of the
 file modification time.
 The file inode change time can be used to select files whose inode information
-(e.g.\& uid, gid, etc.) is newer than a copy of the file in the destination
+(e.g., uid, gid, etc.) is newer than a copy of the file in the destination
 .Ar directory .
 .It Fl E Ar limit
 Limit the number of consecutive read faults while trying to read a flawed
@@ -903,7 +913,7 @@ the file was last written).
 The
 .Ar c
 specifies the comparison of inode change time (the time when the file
-inode was last changed; e.g.\& a change of owner, group, mode, etc).
+inode was last changed; e.g., a change of owner, group, mode, etc).
 When
 .Ar c
 and

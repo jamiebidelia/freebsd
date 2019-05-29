@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2010 Alexander Motin <mav@FreeBSD.org>
  * All rights reserved.
  *
@@ -82,10 +84,6 @@ static u_int g_raid_idle_threshold = 1000000;
 SYSCTL_UINT(_kern_geom_raid, OID_AUTO, idle_threshold, CTLFLAG_RWTUN,
     &g_raid_idle_threshold, 1000000,
     "Time in microseconds to consider a volume idle.");
-static u_int ar_legacy_aliases = 1;
-SYSCTL_INT(_kern_geom_raid, OID_AUTO, legacy_aliases, CTLFLAG_RWTUN,
-           &ar_legacy_aliases, 0, "Create aliases named as the legacy ataraid style.");
-
 
 #define	MSLEEP(rv, ident, mtx, priority, wmesg, timeout)	do {	\
 	G_RAID_DEBUG(4, "%s: Sleeping %p.", __func__, (ident));		\
@@ -957,7 +955,6 @@ g_raid_dirty(struct g_raid_volume *vol)
 void
 g_raid_tr_flush_common(struct g_raid_tr_object *tr, struct bio *bp)
 {
-	struct g_raid_softc *sc;
 	struct g_raid_volume *vol;
 	struct g_raid_subdisk *sd;
 	struct bio_queue_head queue;
@@ -965,7 +962,6 @@ g_raid_tr_flush_common(struct g_raid_tr_object *tr, struct bio *bp)
 	int i;
 
 	vol = tr->tro_volume;
-	sc = vol->v_softc;
 
 	/*
 	 * Allocate all bios before sending any request, so we can return
@@ -1015,7 +1011,7 @@ g_raid_tr_kerneldump_common(struct g_raid_tr_object *tr,
 	vol = tr->tro_volume;
 	sc = vol->v_softc;
 
-	bzero(&bp, sizeof(bp));
+	g_reset_bio(&bp);
 	bp.bio_cmd = BIO_WRITE;
 	bp.bio_done = g_raid_tr_kerneldump_common_done;
 	bp.bio_attribute = NULL;
@@ -1079,23 +1075,19 @@ g_raid_candelete(struct g_raid_softc *sc, struct bio *bp)
 	struct g_provider *pp;
 	struct g_raid_volume *vol;
 	struct g_raid_subdisk *sd;
-	int *val;
-	int i;
+	int i, val;
 
-	val = (int *)bp->bio_data;
 	pp = bp->bio_to;
 	vol = pp->private;
-	*val = 0;
 	for (i = 0; i < vol->v_disks_count; i++) {
 		sd = &vol->v_subdisks[i];
 		if (sd->sd_state == G_RAID_SUBDISK_S_NONE)
 			continue;
-		if (sd->sd_disk->d_candelete) {
-			*val = 1;
+		if (sd->sd_disk->d_candelete)
 			break;
-		}
 	}
-	g_io_deliver(bp, 0);
+	val = i < vol->v_disks_count;
+	g_handleattr(bp, "GEOM::candelete", &val, sizeof(val));
 }
 
 static void
@@ -1628,7 +1620,6 @@ g_raid_launch_provider(struct g_raid_volume *vol)
 	struct g_raid_softc *sc;
 	struct g_provider *pp;
 	char name[G_RAID_MAX_VOLUMENAME];
-	char   announce_buf[80], buf1[32];
 	off_t off;
 	int i;
 
@@ -1643,21 +1634,6 @@ g_raid_launch_provider(struct g_raid_volume *vol)
 		/* Otherwise use sequential volume number. */
 		snprintf(name, sizeof(name), "raid/r%d", vol->v_global_id);
 	}
-
-	/*
-	 * Create a /dev/ar%d that the old ataraid(4) stack once
-	 * created as an alias for /dev/raid/r%d if requested.
-	 * This helps going from stable/7 ataraid devices to newer
-	 * FreeBSD releases. sbruno 07 MAY 2013
-	 */
-
-        if (ar_legacy_aliases) {
-		snprintf(announce_buf, sizeof(announce_buf),
-                        "kern.devalias.%s", name);
-                snprintf(buf1, sizeof(buf1),
-                        "ar%d", vol->v_global_id);
-                kern_setenv(announce_buf, buf1);
-        }
 
 	pp = g_new_providerf(sc->sc_geom, "%s", name);
 	pp->flags |= G_PF_DIRECT_RECEIVE;
@@ -2443,7 +2419,7 @@ g_raid_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 			sbuf_printf(sb, "r%d(%s):%d@%ju",
 			    sd->sd_volume->v_global_id,
 			    sd->sd_volume->v_name,
-			    sd->sd_pos, sd->sd_offset);
+			    sd->sd_pos, (uintmax_t)sd->sd_offset);
 			if (TAILQ_NEXT(sd, sd_next))
 				sbuf_printf(sb, ", ");
 		}
@@ -2482,7 +2458,6 @@ g_raid_shutdown_post_sync(void *arg, int howto)
 	struct g_raid_volume *vol;
 
 	mp = arg;
-	DROP_GIANT();
 	g_topology_lock();
 	g_raid_shutdown = 1;
 	LIST_FOREACH_SAFE(gp, &mp->geom, geom, gp2) {
@@ -2497,7 +2472,6 @@ g_raid_shutdown_post_sync(void *arg, int howto)
 		g_topology_lock();
 	}
 	g_topology_unlock();
-	PICKUP_GIANT();
 }
 
 static void

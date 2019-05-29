@@ -14,10 +14,13 @@
 #include "llvm-c/ExecutionEngine.h"
 #include "llvm/ExecutionEngine/ExecutionEngine.h"
 #include "llvm/ExecutionEngine/GenericValue.h"
+#include "llvm/ExecutionEngine/JITEventListener.h"
 #include "llvm/ExecutionEngine/RTDyldMemoryManager.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Target/CodeGenCWrappers.h"
+#include "llvm/Target/TargetOptions.h"
 #include <cstring>
 
 using namespace llvm;
@@ -28,7 +31,7 @@ using namespace llvm;
 DEFINE_SIMPLE_CONVERSION_FUNCTIONS(GenericValue, LLVMGenericValueRef)
 
 
-inline LLVMTargetMachineRef wrap(const TargetMachine *P) {
+static LLVMTargetMachineRef wrap(const TargetMachine *P) {
   return
   reinterpret_cast<LLVMTargetMachineRef>(const_cast<TargetMachine*>(P));
 }
@@ -150,7 +153,7 @@ void LLVMInitializeMCJITCompilerOptions(LLVMMCJITCompilerOptions *PassedOptions,
   LLVMMCJITCompilerOptions options;
   memset(&options, 0, sizeof(options)); // Most fields are zero by default.
   options.CodeModel = LLVMCodeModelJITDefault;
-  
+
   memcpy(PassedOptions, &options,
          std::min(sizeof(options), SizeOfPassedOptions));
 }
@@ -168,25 +171,38 @@ LLVMBool LLVMCreateMCJITCompilerForModule(
       "LLVM library mismatch.");
     return 1;
   }
-  
+
   // Defend against the user having an old version of the API by ensuring that
   // any fields they didn't see are cleared. We must defend against fields being
   // set to the bitwise equivalent of zero, and assume that this means "do the
   // default" as if that option hadn't been available.
   LLVMInitializeMCJITCompilerOptions(&options, sizeof(options));
   memcpy(&options, PassedOptions, SizeOfPassedOptions);
-  
+
   TargetOptions targetOptions;
-  targetOptions.NoFramePointerElim = options.NoFramePointerElim;
   targetOptions.EnableFastISel = options.EnableFastISel;
+  std::unique_ptr<Module> Mod(unwrap(M));
+
+  if (Mod)
+    // Set function attribute "no-frame-pointer-elim" based on
+    // NoFramePointerElim.
+    for (auto &F : *Mod) {
+      auto Attrs = F.getAttributes();
+      StringRef Value(options.NoFramePointerElim ? "true" : "false");
+      Attrs = Attrs.addAttribute(F.getContext(), AttributeList::FunctionIndex,
+                                 "no-frame-pointer-elim", Value);
+      F.setAttributes(Attrs);
+    }
 
   std::string Error;
-  EngineBuilder builder(std::unique_ptr<Module>(unwrap(M)));
+  EngineBuilder builder(std::move(Mod));
   builder.setEngineKind(EngineKind::JIT)
          .setErrorStr(&Error)
          .setOptLevel((CodeGenOpt::Level)options.OptLevel)
-         .setCodeModel(unwrap(options.CodeModel))
          .setTargetOptions(targetOptions);
+  bool JIT;
+  if (Optional<CodeModel::Model> CM = unwrap(options.CodeModel, JIT))
+    builder.setCodeModel(*CM);
   if (options.MCJMM)
     builder.setMCJITMemoryManager(
       std::unique_ptr<RTDyldMemoryManager>(unwrap(options.MCJMM)));
@@ -198,44 +214,17 @@ LLVMBool LLVMCreateMCJITCompilerForModule(
   return 1;
 }
 
-LLVMBool LLVMCreateExecutionEngine(LLVMExecutionEngineRef *OutEE,
-                                   LLVMModuleProviderRef MP,
-                                   char **OutError) {
-  /* The module provider is now actually a module. */
-  return LLVMCreateExecutionEngineForModule(OutEE,
-                                            reinterpret_cast<LLVMModuleRef>(MP),
-                                            OutError);
-}
-
-LLVMBool LLVMCreateInterpreter(LLVMExecutionEngineRef *OutInterp,
-                               LLVMModuleProviderRef MP,
-                               char **OutError) {
-  /* The module provider is now actually a module. */
-  return LLVMCreateInterpreterForModule(OutInterp,
-                                        reinterpret_cast<LLVMModuleRef>(MP),
-                                        OutError);
-}
-
-LLVMBool LLVMCreateJITCompiler(LLVMExecutionEngineRef *OutJIT,
-                               LLVMModuleProviderRef MP,
-                               unsigned OptLevel,
-                               char **OutError) {
-  /* The module provider is now actually a module. */
-  return LLVMCreateJITCompilerForModule(OutJIT,
-                                        reinterpret_cast<LLVMModuleRef>(MP),
-                                        OptLevel, OutError);
-}
-
-
 void LLVMDisposeExecutionEngine(LLVMExecutionEngineRef EE) {
   delete unwrap(EE);
 }
 
 void LLVMRunStaticConstructors(LLVMExecutionEngineRef EE) {
+  unwrap(EE)->finalizeObject();
   unwrap(EE)->runStaticConstructorsDestructors(false);
 }
 
 void LLVMRunStaticDestructors(LLVMExecutionEngineRef EE) {
+  unwrap(EE)->finalizeObject();
   unwrap(EE)->runStaticConstructorsDestructors(true);
 }
 
@@ -243,11 +232,8 @@ int LLVMRunFunctionAsMain(LLVMExecutionEngineRef EE, LLVMValueRef F,
                           unsigned ArgC, const char * const *ArgV,
                           const char * const *EnvP) {
   unwrap(EE)->finalizeObject();
-  
-  std::vector<std::string> ArgVec;
-  for (unsigned I = 0; I != ArgC; ++I)
-    ArgVec.push_back(ArgV[I]);
-  
+
+  std::vector<std::string> ArgVec(ArgV, ArgV + ArgC);
   return unwrap(EE)->runFunctionAsMain(unwrap<Function>(F), ArgVec, EnvP);
 }
 
@@ -255,12 +241,12 @@ LLVMGenericValueRef LLVMRunFunction(LLVMExecutionEngineRef EE, LLVMValueRef F,
                                     unsigned NumArgs,
                                     LLVMGenericValueRef *Args) {
   unwrap(EE)->finalizeObject();
-  
+
   std::vector<GenericValue> ArgVec;
   ArgVec.reserve(NumArgs);
   for (unsigned I = 0; I != NumArgs; ++I)
     ArgVec.push_back(*unwrap(Args[I]));
-  
+
   GenericValue *Result = new GenericValue();
   *Result = unwrap(EE)->runFunction(unwrap<Function>(F), ArgVec);
   return wrap(Result);
@@ -273,25 +259,12 @@ void LLVMAddModule(LLVMExecutionEngineRef EE, LLVMModuleRef M){
   unwrap(EE)->addModule(std::unique_ptr<Module>(unwrap(M)));
 }
 
-void LLVMAddModuleProvider(LLVMExecutionEngineRef EE, LLVMModuleProviderRef MP){
-  /* The module provider is now actually a module. */
-  LLVMAddModule(EE, reinterpret_cast<LLVMModuleRef>(MP));
-}
-
 LLVMBool LLVMRemoveModule(LLVMExecutionEngineRef EE, LLVMModuleRef M,
                           LLVMModuleRef *OutMod, char **OutError) {
   Module *Mod = unwrap(M);
   unwrap(EE)->removeModule(Mod);
   *OutMod = wrap(Mod);
   return 0;
-}
-
-LLVMBool LLVMRemoveModuleProvider(LLVMExecutionEngineRef EE,
-                                  LLVMModuleProviderRef MP,
-                                  LLVMModuleRef *OutMod, char **OutError) {
-  /* The module provider is now actually a module. */
-  return LLVMRemoveModule(EE, reinterpret_cast<LLVMModuleRef>(MP), OutMod,
-                          OutError);
 }
 
 LLVMBool LLVMFindFunction(LLVMExecutionEngineRef EE, const char *Name,
@@ -309,7 +282,7 @@ void *LLVMRecompileAndRelinkFunction(LLVMExecutionEngineRef EE,
 }
 
 LLVMTargetDataRef LLVMGetExecutionEngineTargetData(LLVMExecutionEngineRef EE) {
-  return wrap(unwrap(EE)->getDataLayout());
+  return wrap(&unwrap(EE)->getDataLayout());
 }
 
 LLVMTargetMachineRef
@@ -324,7 +297,7 @@ void LLVMAddGlobalMapping(LLVMExecutionEngineRef EE, LLVMValueRef Global,
 
 void *LLVMGetPointerToGlobal(LLVMExecutionEngineRef EE, LLVMValueRef Global) {
   unwrap(EE)->finalizeObject();
-  
+
   return unwrap(EE)->getPointerToGlobal(unwrap<GlobalValue>(Global));
 }
 
@@ -351,7 +324,7 @@ class SimpleBindingMemoryManager : public RTDyldMemoryManager {
 public:
   SimpleBindingMemoryManager(const SimpleBindingMMFunctions& Functions,
                              void *Opaque);
-  virtual ~SimpleBindingMemoryManager();
+  ~SimpleBindingMemoryManager() override;
 
   uint8_t *allocateCodeSection(uintptr_t Size, unsigned Alignment,
                                unsigned SectionID,
@@ -422,11 +395,11 @@ LLVMMCJITMemoryManagerRef LLVMCreateSimpleMCJITMemoryManager(
   LLVMMemoryManagerAllocateDataSectionCallback AllocateDataSection,
   LLVMMemoryManagerFinalizeMemoryCallback FinalizeMemory,
   LLVMMemoryManagerDestroyCallback Destroy) {
-  
+
   if (!AllocateCodeSection || !AllocateDataSection || !FinalizeMemory ||
       !Destroy)
     return nullptr;
-  
+
   SimpleBindingMMFunctions functions;
   functions.AllocateCodeSection = AllocateCodeSection;
   functions.AllocateDataSection = AllocateDataSection;
@@ -439,3 +412,26 @@ void LLVMDisposeMCJITMemoryManager(LLVMMCJITMemoryManagerRef MM) {
   delete unwrap(MM);
 }
 
+/*===-- JIT Event Listener functions -------------------------------------===*/
+
+
+#if !LLVM_USE_INTEL_JITEVENTS
+LLVMJITEventListenerRef LLVMCreateIntelJITEventListener(void)
+{
+  return nullptr;
+}
+#endif
+
+#if !LLVM_USE_OPROFILE
+LLVMJITEventListenerRef LLVMCreateOProfileJITEventListener(void)
+{
+  return nullptr;
+}
+#endif
+
+#if !LLVM_USE_PERF
+LLVMJITEventListenerRef LLVMCreatePerfJITEventListener(void)
+{
+  return nullptr;
+}
+#endif

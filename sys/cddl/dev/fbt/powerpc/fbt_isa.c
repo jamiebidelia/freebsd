@@ -37,7 +37,7 @@
 
 #include "fbt.h"
 
-#define FBT_PATCHVAL		0x7c810808
+#define FBT_PATCHVAL		0x7ffff808
 #define FBT_MFLR_R0		0x7c0802a6
 #define FBT_MTLR_R0		0x7c0803a6
 #define FBT_BLR			0x4e800020
@@ -51,16 +51,14 @@
 #define	FBT_AFRAMES	7
 
 int
-fbt_invop(uintptr_t addr, uintptr_t *stack, uintptr_t rval)
+fbt_invop(uintptr_t addr, struct trapframe *frame, uintptr_t rval)
 {
-	struct trapframe *frame = (struct trapframe *)stack;
 	solaris_cpu_t *cpu = &solaris_cpu[curcpu];
 	fbt_probe_t *fbt = fbt_probetab[FBT_ADDR2NDX(addr)];
 	uintptr_t tmp;
 
 	for (; fbt != NULL; fbt = fbt->fbtp_hashnext) {
 		if ((uintptr_t)fbt->fbtp_patchpoint == addr) {
-			fbt->fbtp_invop_cnt++;
 			if (fbt->fbtp_roffset == 0) {
 				cpu->cpu_dtrace_caller = addr;
 
@@ -118,6 +116,7 @@ fbt_provide_module_function(linker_file_t lf, int symindx,
 	uint32_t *instr, *limit;
 
 #ifdef __powerpc64__
+#if !defined(_CALL_ELF) || _CALL_ELF == 1
 	/*
 	 * PowerPC64 uses '.' prefixes on symbol names, ignore it, but only
 	 * allow symbols with the '.' prefix, so that we don't get the function
@@ -128,19 +127,9 @@ fbt_provide_module_function(linker_file_t lf, int symindx,
 	else
 		return (0);
 #endif
+#endif
 
-	if (strncmp(name, "dtrace_", 7) == 0 &&
-	    strncmp(name, "dtrace_safe_", 12) != 0) {
-		/*
-		 * Anything beginning with "dtrace_" may be called
-		 * from probe context unless it explicitly indicates
-		 * that it won't be called from probe context by
-		 * using the prefix "dtrace_safe_".
-		 */
-		return (0);
-	}
-
-	if (name[0] == '_' && name[1] == '_')
+	if (fbt_excluded(name))
 		return (0);
 
 	instr = (uint32_t *) symval->value;
@@ -221,7 +210,7 @@ again:
 		fbt->fbtp_id = dtrace_probe_create(fbt_id, modname,
 		    name, FBT_RETURN, FBT_AFRAMES, fbt);
 	} else {
-		retfbt->fbtp_next = fbt;
+		retfbt->fbtp_probenext = fbt;
 		fbt->fbtp_id = retfbt->fbtp_id;
 	}
 
@@ -234,7 +223,7 @@ again:
 	if (*instr == FBT_BCTR)
 		fbt->fbtp_rval = DTRACE_INVOP_BCTR;
 	else if (*instr == FBT_BLR)
-		fbt->fbtp_rval = DTRACE_INVOP_RET;
+		fbt->fbtp_rval = DTRACE_INVOP_BLR;
 	else
 		fbt->fbtp_rval = DTRACE_INVOP_JUMP;
 

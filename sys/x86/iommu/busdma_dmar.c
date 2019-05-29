@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2013 The FreeBSD Foundation
  * All rights reserved.
  *
@@ -32,6 +34,7 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/domainset.h>
 #include <sys/malloc.h>
 #include <sys/bus.h>
 #include <sys/conf.h>
@@ -74,14 +77,34 @@ static bool
 dmar_bus_dma_is_dev_disabled(int domain, int bus, int slot, int func)
 {
 	char str[128], *env;
+	int default_bounce;
+	bool ret;
+	static const char bounce_str[] = "bounce";
+	static const char dmar_str[] = "dmar";
 
-	snprintf(str, sizeof(str), "hw.busdma.pci%d.%d.%d.%d.bounce",
+	default_bounce = 0;
+	env = kern_getenv("hw.busdma.default");
+	if (env != NULL) {
+		if (strcmp(env, bounce_str) == 0)
+			default_bounce = 1;
+		else if (strcmp(env, dmar_str) == 0)
+			default_bounce = 0;
+		freeenv(env);
+	}
+
+	snprintf(str, sizeof(str), "hw.busdma.pci%d.%d.%d.%d",
 	    domain, bus, slot, func);
 	env = kern_getenv(str);
 	if (env == NULL)
-		return (false);
+		return (default_bounce != 0);
+	if (strcmp(env, bounce_str) == 0)
+		ret = true;
+	else if (strcmp(env, dmar_str) == 0)
+		ret = false;
+	else
+		ret = default_bounce != 0;
 	freeenv(env);
-	return (true);
+	return (ret);
 }
 
 /*
@@ -225,7 +248,7 @@ dmar_instantiate_ctx(struct dmar_unit *dmar, device_t dev, bool rmrr)
 	disabled = dmar_bus_dma_is_dev_disabled(pci_get_domain(requester), 
 	    pci_get_bus(requester), pci_get_slot(requester), 
 	    pci_get_function(requester));
-	ctx = dmar_get_ctx(dmar, requester, rid, disabled, rmrr);
+	ctx = dmar_get_ctx_for_dev(dmar, requester, rid, disabled, rmrr);
 	if (ctx == NULL)
 		return (NULL);
 	if (disabled) {
@@ -252,7 +275,7 @@ dmar_get_dma_tag(device_t dev, device_t child)
 	struct dmar_ctx *ctx;
 	bus_dma_tag_t res;
 
-	dmar = dmar_find(child);
+	dmar = dmar_find(child, bootverbose);
 	/* Not in scope of any DMAR ? */
 	if (dmar == NULL)
 		return (NULL);
@@ -304,6 +327,13 @@ out:
 }
 
 static int
+dmar_bus_dma_tag_set_domain(bus_dma_tag_t dmat)
+{
+
+	return (0);
+}
+
+static int
 dmar_bus_dma_tag_destroy(bus_dma_tag_t dmat1)
 {
 	struct bus_dma_tag_dmar *dmat, *dmat_copy, *parent;
@@ -323,7 +353,7 @@ dmar_bus_dma_tag_destroy(bus_dma_tag_t dmat1)
 			    1) {
 				if (dmat == &dmat->ctx->ctx_tag)
 					dmar_free_ctx(dmat->ctx);
-				free(dmat->segments, M_DMAR_DMAMAP);
+				free_domain(dmat->segments, M_DMAR_DMAMAP);
 				free(dmat, M_DEVBUF);
 				dmat = parent;
 			} else
@@ -335,6 +365,13 @@ out:
 	return (error);
 }
 
+static bool
+dmar_bus_dma_id_mapped(bus_dma_tag_t dmat, vm_paddr_t buf, bus_size_t buflen)
+{
+
+	return (false);
+}
+
 static int
 dmar_bus_dmamap_create(bus_dma_tag_t dmat, int flags, bus_dmamap_t *mapp)
 {
@@ -342,16 +379,18 @@ dmar_bus_dmamap_create(bus_dma_tag_t dmat, int flags, bus_dmamap_t *mapp)
 	struct bus_dmamap_dmar *map;
 
 	tag = (struct bus_dma_tag_dmar *)dmat;
-	map = malloc(sizeof(*map), M_DMAR_DMAMAP, M_NOWAIT | M_ZERO);
+	map = malloc_domainset(sizeof(*map), M_DMAR_DMAMAP,
+	    DOMAINSET_PREF(tag->common.domain), M_NOWAIT | M_ZERO);
 	if (map == NULL) {
 		*mapp = NULL;
 		return (ENOMEM);
 	}
 	if (tag->segments == NULL) {
-		tag->segments = malloc(sizeof(bus_dma_segment_t) *
-		    tag->common.nsegments, M_DMAR_DMAMAP, M_NOWAIT);
+		tag->segments = malloc_domainset(sizeof(bus_dma_segment_t) *
+		    tag->common.nsegments, M_DMAR_DMAMAP,
+		    DOMAINSET_PREF(tag->common.domain), M_NOWAIT);
 		if (tag->segments == NULL) {
-			free(map, M_DMAR_DMAMAP);
+			free_domain(map, M_DMAR_DMAMAP);
 			*mapp = NULL;
 			return (ENOMEM);
 		}
@@ -371,17 +410,19 @@ dmar_bus_dmamap_destroy(bus_dma_tag_t dmat, bus_dmamap_t map1)
 {
 	struct bus_dma_tag_dmar *tag;
 	struct bus_dmamap_dmar *map;
+	struct dmar_domain *domain;
 
 	tag = (struct bus_dma_tag_dmar *)dmat;
 	map = (struct bus_dmamap_dmar *)map1;
 	if (map != NULL) {
-		DMAR_CTX_LOCK(tag->ctx);
+		domain = tag->ctx->domain;
+		DMAR_DOMAIN_LOCK(domain);
 		if (!TAILQ_EMPTY(&map->map_entries)) {
-			DMAR_CTX_UNLOCK(tag->ctx);
+			DMAR_DOMAIN_UNLOCK(domain);
 			return (EBUSY);
 		}
-		DMAR_CTX_UNLOCK(tag->ctx);
-		free(map, M_DMAR_DMAMAP);
+		DMAR_DOMAIN_UNLOCK(domain);
+		free_domain(map, M_DMAR_DMAMAP);
 	}
 	tag->map_count--;
 	return (0);
@@ -412,12 +453,13 @@ dmar_bus_dmamem_alloc(bus_dma_tag_t dmat, void** vaddr, int flags,
 	if (tag->common.maxsize < PAGE_SIZE &&
 	    tag->common.alignment <= tag->common.maxsize &&
 	    attr == VM_MEMATTR_DEFAULT) {
-		*vaddr = malloc(tag->common.maxsize, M_DEVBUF, mflags);
+		*vaddr = malloc_domainset(tag->common.maxsize, M_DEVBUF,
+		    DOMAINSET_PREF(tag->common.domain), mflags);
 		map->flags |= BUS_DMAMAP_DMAR_MALLOC;
 	} else {
-		*vaddr = (void *)kmem_alloc_attr(kernel_arena,
-		    tag->common.maxsize, mflags, 0ul, BUS_SPACE_MAXADDR,
-		    attr);
+		*vaddr = (void *)kmem_alloc_attr_domainset(
+		    DOMAINSET_PREF(tag->common.domain), tag->common.maxsize,
+		    mflags, 0ul, BUS_SPACE_MAXADDR, attr);
 		map->flags |= BUS_DMAMAP_DMAR_KMEM_ALLOC;
 	}
 	if (*vaddr == NULL) {
@@ -438,12 +480,12 @@ dmar_bus_dmamem_free(bus_dma_tag_t dmat, void *vaddr, bus_dmamap_t map1)
 	map = (struct bus_dmamap_dmar *)map1;
 
 	if ((map->flags & BUS_DMAMAP_DMAR_MALLOC) != 0) {
-		free(vaddr, M_DEVBUF);
+		free_domain(vaddr, M_DEVBUF);
 		map->flags &= ~BUS_DMAMAP_DMAR_MALLOC;
 	} else {
 		KASSERT((map->flags & BUS_DMAMAP_DMAR_KMEM_ALLOC) != 0,
 		    ("dmar_bus_dmamem_free for non alloced map %p", map));
-		kmem_free(kernel_arena, (vm_offset_t)vaddr, tag->common.maxsize);
+		kmem_free((vm_offset_t)vaddr, tag->common.maxsize);
 		map->flags &= ~BUS_DMAMAP_DMAR_KMEM_ALLOC;
 	}
 
@@ -457,6 +499,7 @@ dmar_bus_dmamap_load_something1(struct bus_dma_tag_dmar *tag,
     struct dmar_map_entries_tailq *unroll_list)
 {
 	struct dmar_ctx *ctx;
+	struct dmar_domain *domain;
 	struct dmar_map_entry *entry;
 	dmar_gaddr_t size;
 	bus_size_t buflen1;
@@ -466,6 +509,7 @@ dmar_bus_dmamap_load_something1(struct bus_dma_tag_dmar *tag,
 	if (segs == NULL)
 		segs = tag->segments;
 	ctx = tag->ctx;
+	domain = ctx->domain;
 	seg = *segp;
 	error = 0;
 	idx = 0;
@@ -487,8 +531,9 @@ dmar_bus_dmamap_load_something1(struct bus_dma_tag_dmar *tag,
 		if (seg + 1 < tag->common.nsegments)
 			gas_flags |= DMAR_GM_CANSPLIT;
 
-		error = dmar_gas_map(ctx, &tag->common, size, offset,
-		    DMAR_MAP_ENTRY_READ | DMAR_MAP_ENTRY_WRITE,
+		error = dmar_gas_map(domain, &tag->common, size, offset,
+		    DMAR_MAP_ENTRY_READ |
+		    ((flags & BUS_DMA_NOWRITE) == 0 ? DMAR_MAP_ENTRY_WRITE : 0),
 		    gas_flags, ma + idx, &entry);
 		if (error != 0)
 			break;
@@ -534,10 +579,10 @@ dmar_bus_dmamap_load_something1(struct bus_dma_tag_dmar *tag,
 		    (uintmax_t)entry->start, (uintmax_t)entry->end,
 		    (uintmax_t)buflen1, (uintmax_t)tag->common.maxsegsz));
 
-		DMAR_CTX_LOCK(ctx);
+		DMAR_DOMAIN_LOCK(domain);
 		TAILQ_INSERT_TAIL(&map->map_entries, entry, dmamap_link);
 		entry->flags |= DMAR_MAP_ENTRY_MAP;
-		DMAR_CTX_UNLOCK(ctx);
+		DMAR_DOMAIN_UNLOCK(domain);
 		TAILQ_INSERT_TAIL(unroll_list, entry, unroll_link);
 
 		segs[seg].ds_addr = entry->start + offset;
@@ -559,11 +604,13 @@ dmar_bus_dmamap_load_something(struct bus_dma_tag_dmar *tag,
     int flags, bus_dma_segment_t *segs, int *segp)
 {
 	struct dmar_ctx *ctx;
+	struct dmar_domain *domain;
 	struct dmar_map_entry *entry, *entry1;
 	struct dmar_map_entries_tailq unroll_list;
 	int error;
 
 	ctx = tag->ctx;
+	domain = ctx->domain;
 	atomic_add_long(&ctx->loads, 1);
 
 	TAILQ_INIT(&unroll_list);
@@ -575,7 +622,7 @@ dmar_bus_dmamap_load_something(struct bus_dma_tag_dmar *tag,
 		 * partial buffer load, so unfortunately we have to
 		 * revert all work done.
 		 */
-		DMAR_CTX_LOCK(ctx);
+		DMAR_DOMAIN_LOCK(domain);
 		TAILQ_FOREACH_SAFE(entry, &unroll_list, unroll_link,
 		    entry1) {
 			/*
@@ -586,19 +633,19 @@ dmar_bus_dmamap_load_something(struct bus_dma_tag_dmar *tag,
 			 */
 			TAILQ_REMOVE(&map->map_entries, entry, dmamap_link);
 			TAILQ_REMOVE(&unroll_list, entry, unroll_link);
-			TAILQ_INSERT_TAIL(&ctx->unload_entries, entry,
+			TAILQ_INSERT_TAIL(&domain->unload_entries, entry,
 			    dmamap_link);
 		}
-		DMAR_CTX_UNLOCK(ctx);
-		taskqueue_enqueue(ctx->dmar->delayed_taskqueue,
-		    &ctx->unload_task);
+		DMAR_DOMAIN_UNLOCK(domain);
+		taskqueue_enqueue(domain->dmar->delayed_taskqueue,
+		    &domain->unload_task);
 	}
 
 	if (error == ENOMEM && (flags & BUS_DMA_NOWAIT) == 0 &&
 	    !map->cansleep)
 		error = EINPROGRESS;
 	if (error == EINPROGRESS)
-		dmar_bus_schedule_dmamap(ctx->dmar, map);
+		dmar_bus_schedule_dmamap(domain->dmar, map);
 	return (error);
 }
 
@@ -623,9 +670,9 @@ dmar_bus_dmamap_load_phys(bus_dma_tag_t dmat, bus_dmamap_t map1,
 {
 	struct bus_dma_tag_dmar *tag;
 	struct bus_dmamap_dmar *map;
-	vm_page_t *ma;
-	vm_paddr_t pstart, pend;
-	int error, i, ma_cnt, offset;
+	vm_page_t *ma, fma;
+	vm_paddr_t pstart, pend, paddr;
+	int error, i, ma_cnt, mflags, offset;
 
 	tag = (struct bus_dma_tag_dmar *)dmat;
 	map = (struct bus_dmamap_dmar *)map1;
@@ -633,14 +680,36 @@ dmar_bus_dmamap_load_phys(bus_dma_tag_t dmat, bus_dmamap_t map1,
 	pend = round_page(buf + buflen);
 	offset = buf & PAGE_MASK;
 	ma_cnt = OFF_TO_IDX(pend - pstart);
-	ma = malloc(sizeof(vm_page_t) * ma_cnt, M_DEVBUF, map->cansleep ?
-	    M_WAITOK : M_NOWAIT);
+	mflags = map->cansleep ? M_WAITOK : M_NOWAIT;
+	ma = malloc(sizeof(vm_page_t) * ma_cnt, M_DEVBUF, mflags);
 	if (ma == NULL)
 		return (ENOMEM);
-	for (i = 0; i < ma_cnt; i++)
-		ma[i] = PHYS_TO_VM_PAGE(pstart + i * PAGE_SIZE);
+	fma = NULL;
+	for (i = 0; i < ma_cnt; i++) {
+		paddr = pstart + i * PAGE_SIZE;
+		ma[i] = PHYS_TO_VM_PAGE(paddr);
+		if (ma[i] == NULL || VM_PAGE_TO_PHYS(ma[i]) != paddr) {
+			/*
+			 * If PHYS_TO_VM_PAGE() returned NULL or the
+			 * vm_page was not initialized we'll use a
+			 * fake page.
+			 */
+			if (fma == NULL) {
+				fma = malloc(sizeof(struct vm_page) * ma_cnt,
+				    M_DEVBUF, M_ZERO | mflags);
+				if (fma == NULL) {
+					free(ma, M_DEVBUF);
+					return (ENOMEM);
+				}
+			}
+			vm_page_initfake(&fma[i], pstart + i * PAGE_SIZE,
+			    VM_MEMATTR_DEFAULT);
+			ma[i] = &fma[i];
+		}
+	}
 	error = dmar_bus_dmamap_load_something(tag, map, ma, offset, buflen,
 	    flags, segs, segp);
+	free(fma, M_DEVBUF);
 	free(ma, M_DEVBUF);
 	return (error);
 }
@@ -654,7 +723,7 @@ dmar_bus_dmamap_load_buffer(bus_dma_tag_t dmat, bus_dmamap_t map1, void *buf,
 	struct bus_dmamap_dmar *map;
 	vm_page_t *ma, fma;
 	vm_paddr_t pstart, pend, paddr;
-	int error, i, ma_cnt, offset;
+	int error, i, ma_cnt, mflags, offset;
 
 	tag = (struct bus_dma_tag_dmar *)dmat;
 	map = (struct bus_dmamap_dmar *)map1;
@@ -662,41 +731,33 @@ dmar_bus_dmamap_load_buffer(bus_dma_tag_t dmat, bus_dmamap_t map1, void *buf,
 	pend = round_page((vm_offset_t)buf + buflen);
 	offset = (vm_offset_t)buf & PAGE_MASK;
 	ma_cnt = OFF_TO_IDX(pend - pstart);
-	ma = malloc(sizeof(vm_page_t) * ma_cnt, M_DEVBUF, map->cansleep ?
-	    M_WAITOK : M_NOWAIT);
+	mflags = map->cansleep ? M_WAITOK : M_NOWAIT;
+	ma = malloc(sizeof(vm_page_t) * ma_cnt, M_DEVBUF, mflags);
 	if (ma == NULL)
 		return (ENOMEM);
-	if (dumping) {
-		/*
-		 * If dumping, do not attempt to call
-		 * PHYS_TO_VM_PAGE() at all.  It may return non-NULL
-		 * but the vm_page returned might be not initialized,
-		 * e.g. for the kernel itself.
-		 */
-		KASSERT(pmap == kernel_pmap, ("non-kernel address write"));
-		fma = malloc(sizeof(struct vm_page) * ma_cnt, M_DEVBUF,
-		    M_ZERO | (map->cansleep ? M_WAITOK : M_NOWAIT));
-		if (fma == NULL) {
-			free(ma, M_DEVBUF);
-			return (ENOMEM);
-		}
-		for (i = 0; i < ma_cnt; i++, pstart += PAGE_SIZE) {
+	fma = NULL;
+	for (i = 0; i < ma_cnt; i++, pstart += PAGE_SIZE) {
+		if (pmap == kernel_pmap)
 			paddr = pmap_kextract(pstart);
+		else
+			paddr = pmap_extract(pmap, pstart);
+		ma[i] = PHYS_TO_VM_PAGE(paddr);
+		if (ma[i] == NULL || VM_PAGE_TO_PHYS(ma[i]) != paddr) {
+			/*
+			 * If PHYS_TO_VM_PAGE() returned NULL or the
+			 * vm_page was not initialized we'll use a
+			 * fake page.
+			 */
+			if (fma == NULL) {
+				fma = malloc(sizeof(struct vm_page) * ma_cnt,
+				    M_DEVBUF, M_ZERO | mflags);
+				if (fma == NULL) {
+					free(ma, M_DEVBUF);
+					return (ENOMEM);
+				}
+			}
 			vm_page_initfake(&fma[i], paddr, VM_MEMATTR_DEFAULT);
 			ma[i] = &fma[i];
-		}
-	} else {
-		fma = NULL;
-		for (i = 0; i < ma_cnt; i++, pstart += PAGE_SIZE) {
-			if (pmap == kernel_pmap)
-				paddr = pmap_kextract(pstart);
-			else
-				paddr = pmap_extract(pmap, pstart);
-			ma[i] = PHYS_TO_VM_PAGE(paddr);
-			KASSERT(VM_PAGE_TO_PHYS(ma[i]) == paddr,
-			    ("PHYS_TO_VM_PAGE failed %jx %jx m %p",
-			    (uintmax_t)paddr, (uintmax_t)VM_PAGE_TO_PHYS(ma[i]),
-			    ma[i]));
 		}
 	}
 	error = dmar_bus_dmamap_load_something(tag, map, ma, offset, buflen,
@@ -764,6 +825,7 @@ dmar_bus_dmamap_unload(bus_dma_tag_t dmat, bus_dmamap_t map1)
 	struct bus_dma_tag_dmar *tag;
 	struct bus_dmamap_dmar *map;
 	struct dmar_ctx *ctx;
+	struct dmar_domain *domain;
 #if defined(__amd64__)
 	struct dmar_map_entries_tailq entries;
 #endif
@@ -771,20 +833,22 @@ dmar_bus_dmamap_unload(bus_dma_tag_t dmat, bus_dmamap_t map1)
 	tag = (struct bus_dma_tag_dmar *)dmat;
 	map = (struct bus_dmamap_dmar *)map1;
 	ctx = tag->ctx;
+	domain = ctx->domain;
 	atomic_add_long(&ctx->unloads, 1);
 
 #if defined(__i386__)
-	DMAR_CTX_LOCK(ctx);
-	TAILQ_CONCAT(&ctx->unload_entries, &map->map_entries, dmamap_link);
-	DMAR_CTX_UNLOCK(ctx);
-	taskqueue_enqueue(ctx->dmar->delayed_taskqueue, &ctx->unload_task);
+	DMAR_DOMAIN_LOCK(domain);
+	TAILQ_CONCAT(&domain->unload_entries, &map->map_entries, dmamap_link);
+	DMAR_DOMAIN_UNLOCK(domain);
+	taskqueue_enqueue(domain->dmar->delayed_taskqueue,
+	    &domain->unload_task);
 #else /* defined(__amd64__) */
 	TAILQ_INIT(&entries);
-	DMAR_CTX_LOCK(ctx);
+	DMAR_DOMAIN_LOCK(domain);
 	TAILQ_CONCAT(&entries, &map->map_entries, dmamap_link);
-	DMAR_CTX_UNLOCK(ctx);
+	DMAR_DOMAIN_UNLOCK(domain);
 	THREAD_NO_SLEEPING();
-	dmar_ctx_unload(ctx, &entries, false);
+	dmar_domain_unload(domain, &entries, false);
 	THREAD_SLEEPING_OK();
 	KASSERT(TAILQ_EMPTY(&entries), ("lazy dmar_ctx_unload %p", ctx));
 #endif
@@ -799,6 +863,8 @@ dmar_bus_dmamap_sync(bus_dma_tag_t dmat, bus_dmamap_t map,
 struct bus_dma_impl bus_dma_dmar_impl = {
 	.tag_create = dmar_bus_dma_tag_create,
 	.tag_destroy = dmar_bus_dma_tag_destroy,
+	.tag_set_domain = dmar_bus_dma_tag_set_domain,
+	.id_mapped = dmar_bus_dma_id_mapped,
 	.map_create = dmar_bus_dmamap_create,
 	.map_destroy = dmar_bus_dmamap_destroy,
 	.mem_alloc = dmar_bus_dmamem_alloc,
@@ -809,7 +875,7 @@ struct bus_dma_impl bus_dma_dmar_impl = {
 	.map_waitok = dmar_bus_dmamap_waitok,
 	.map_complete = dmar_bus_dmamap_complete,
 	.map_unload = dmar_bus_dmamap_unload,
-	.map_sync = dmar_bus_dmamap_sync
+	.map_sync = dmar_bus_dmamap_sync,
 };
 
 static void

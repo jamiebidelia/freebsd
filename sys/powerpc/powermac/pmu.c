@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2006 Michael Lorenz
  * Copyright 2008 by Nathan Whitehorn
  * All rights reserved.
@@ -34,8 +36,11 @@ __FBSDID("$FreeBSD$");
 #include <sys/module.h>
 #include <sys/bus.h>
 #include <sys/conf.h>
+#include <sys/eventhandler.h>
 #include <sys/kernel.h>
 #include <sys/kthread.h>
+#include <sys/lock.h>
+#include <sys/mutex.h>
 #include <sys/clock.h>
 #include <sys/proc.h>
 #include <sys/reboot.h>
@@ -151,7 +156,8 @@ static driver_t pmu_driver = {
 
 static devclass_t pmu_devclass;
 
-DRIVER_MODULE(pmu, macio, pmu_driver, pmu_devclass, 0, 0);
+EARLY_DRIVER_MODULE(pmu, macio, pmu_driver, pmu_devclass, 0, 0,
+    BUS_PASS_RESOURCE);
 DRIVER_MODULE(adb, pmu, adb_driver, adb_devclass, 0, 0);
 
 static int	pmuextint_probe(device_t);
@@ -173,7 +179,8 @@ static driver_t pmuextint_driver = {
 
 static devclass_t pmuextint_devclass;
 
-DRIVER_MODULE(pmuextint, macgpio, pmuextint_driver, pmuextint_devclass, 0, 0);
+EARLY_DRIVER_MODULE(pmuextint, macgpio, pmuextint_driver, pmuextint_devclass,
+    0, 0, BUS_PASS_RESOURCE);
 
 /* Make sure uhid is loaded, as it turns off some of the ADB emulation */
 MODULE_DEPEND(pmu, usb, 1, 1, 1);
@@ -1064,7 +1071,7 @@ pmu_battquery_sysctl(SYSCTL_HANDLER_ARGS)
 	default:
 		/* This should never happen */
 		result = -1;
-	};
+	}
 
 	error = sysctl_handle_int(oidp, &result, 0, req);
 

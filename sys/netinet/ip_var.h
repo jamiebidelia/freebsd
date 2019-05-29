@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1982, 1986, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -10,7 +12,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 4. Neither the name of the University nor the names of its contributors
+ * 3. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -34,6 +36,7 @@
 #define	_NETINET_IP_VAR_H_
 
 #include <sys/queue.h>
+#include <sys/epoch.h>
 
 /*
  * Overlay for ip header used by other protocols (tcp, udp).
@@ -58,6 +61,7 @@ struct ipq {
 	u_char	ipq_ttl;		/* time for reass q to live */
 	u_char	ipq_p;			/* protocol of this fragment */
 	u_short	ipq_id;			/* sequence id for reassembly */
+	int	ipq_maxoff;		/* total length of packet */
 	struct mbuf *ipq_frags;		/* to ip headers of fragments */
 	struct	in_addr ipq_src,ipq_dst;
 	u_char	ipq_nfrags;		/* # frags in this packet */
@@ -93,7 +97,7 @@ struct ip_moptions {
 	u_short	imo_max_memberships;	/* max memberships this socket */
 	struct	in_multi **imo_membership;	/* group memberships */
 	struct	in_mfilter *imo_mfilters;	/* source filters */
-	STAILQ_ENTRY(ip_moptions) imo_link;
+	struct	epoch_context imo_epoch_ctx;
 };
 
 struct	ipstat {
@@ -173,6 +177,7 @@ struct ip;
 struct inpcb;
 struct route;
 struct sockopt;
+struct inpcbinfo;
 
 VNET_DECLARE(int, ip_defttl);			/* default IP ttl */
 VNET_DECLARE(int, ipforwarding);		/* ip forwarding */
@@ -209,9 +214,6 @@ int	ip_fragment(struct ip *ip, struct mbuf **m_frag, int mtu,
 	    u_long if_hwassist_flags);
 void	ip_forward(struct mbuf *m, int srcrt);
 void	ip_init(void);
-#ifdef VIMAGE
-void	ip_destroy(void);
-#endif
 extern int
 	(*ip_mforward)(struct ip *, struct ifnet *, struct mbuf *,
 	    struct ip_moptions *);
@@ -222,8 +224,6 @@ int	ipproto_register(short);
 int	ipproto_unregister(short);
 struct mbuf *
 	ip_reass(struct mbuf *);
-struct in_ifaddr *
-	ip_rtaddr(struct in_addr, u_int fibnum);
 void	ip_savecontrol(struct inpcb *, struct mbuf **, struct ip *,
 	    struct mbuf *);
 void	ip_slowtimo(void);
@@ -231,9 +231,6 @@ void	ip_fillid(struct ip *);
 int	rip_ctloutput(struct socket *, struct sockopt *);
 void	rip_ctlinput(int, struct sockaddr *, void *);
 void	rip_init(void);
-#ifdef VIMAGE
-void	rip_destroy(void);
-#endif
 int	rip_input(struct mbuf **, int *, int);
 int	rip_output(struct mbuf *, struct socket *, ...);
 int	ipip_input(struct mbuf **, int *, int);
@@ -244,8 +241,9 @@ extern int	(*ip_rsvp_vif)(struct socket *, struct sockopt *);
 extern void	(*ip_rsvp_force_done)(struct socket *);
 extern int	(*rsvp_input_p)(struct mbuf **, int *, int);
 
-VNET_DECLARE(struct pfil_head, inet_pfil_hook);	/* packet filter hooks */
-#define	V_inet_pfil_hook	VNET(inet_pfil_hook)
+VNET_DECLARE(struct pfil_head *, inet_pfil_head);
+#define	V_inet_pfil_head	VNET(inet_pfil_head)
+#define	PFIL_INET_NAME		"inet"
 
 void	in_delayed_cksum(struct mbuf *m);
 
@@ -281,7 +279,7 @@ enum {
 	IPFW_IS_MASK	= 0x30000000,	/* which source ? */
 	IPFW_IS_DIVERT	= 0x20000000,
 	IPFW_IS_DUMMYNET =0x10000000,
-	IPFW_IS_PIPE	= 0x08000000,	/* pip1=1, queue = 0 */
+	IPFW_IS_PIPE	= 0x08000000,	/* pipe=1, queue = 0 */
 };
 #define MTAG_IPFW	1148380143	/* IPFW-tagged cookie */
 #define MTAG_IPFW_RULE	1262273568	/* rule reference */
@@ -294,13 +292,11 @@ VNET_DECLARE(ip_fw_ctl_ptr_t, ip_fw_ctl_ptr);
 #define	V_ip_fw_ctl_ptr		VNET(ip_fw_ctl_ptr)
 
 /* Divert hooks. */
-extern void	(*ip_divert_ptr)(struct mbuf *m, int incoming);
+extern void	(*ip_divert_ptr)(struct mbuf *m, bool incoming);
 /* ng_ipfw hooks -- XXX make it the same as divert and dummynet */
-extern int	(*ng_ipfw_input_p)(struct mbuf **, int,
-			struct ip_fw_args *, int);
-
+extern int	(*ng_ipfw_input_p)(struct mbuf **, struct ip_fw_args *, bool);
 extern int	(*ip_dn_ctl_ptr)(struct sockopt *);
-extern int	(*ip_dn_io_ptr)(struct mbuf **, int, struct ip_fw_args *);
+extern int	(*ip_dn_io_ptr)(struct mbuf **, struct ip_fw_args *);
 #endif /* _KERNEL */
 
 #endif /* !_NETINET_IP_VAR_H_ */

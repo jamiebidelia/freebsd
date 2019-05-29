@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) 1983, 1993
  *	The Regents of the University of California.  All rights reserved.
  * (c) UNIX System Laboratories, Inc.
@@ -60,7 +62,7 @@ __FBSDID("$FreeBSD$");
 /*
  * Routines and data used in processing the printcap file.
  */
-static char *printcapdb[2] = { _PATH_PRINTCAP, 0 };  /* list for cget* */
+static char	*printcapdb[] = { __DECONST(char *, _PATH_PRINTCAP), NULL };
 
 static char 	*capdb_canonical_name(const char *_bp);
 static int	 capdb_getaltlog(char *_bp, const char *_shrt,
@@ -97,15 +99,9 @@ int
 getprintcap(const char *printer, struct printer *pp)
 {
 	int status;
-	char *XXX;
 	char *bp;
 
-	/*
-	 * A bug in the declaration of cgetent(3) means that we have
-	 * to hide the constness of its third argument.
-	 */
-	XXX = (char *)printer;
-	if ((status = cgetent(&bp, printcapdb, XXX)) < 0)
+	if ((status = cgetent(&bp, printcapdb, printer)) < 0)
 		return status;
 	status = getprintcap_int(bp, pp);
 	free(bp);
@@ -220,7 +216,7 @@ getprintcap_int(char *bp, struct printer *pp)
 	char *rp_name;
 	int error;
 
-	if ((pp->printer = capdb_canonical_name(bp)) == 0)
+	if ((pp->printer = capdb_canonical_name(bp)) == NULL)
 		return PCAPERR_OSERR;
 
 #define CHK(x) do {if ((x) == PCAPERR_OSERR) return PCAPERR_OSERR;}while(0)
@@ -378,15 +374,15 @@ capdb_getaltstr(char *bp, const char *shrt, const char *lng,
 {
 	int status;
 
-	status = cgetstr(bp, (char *)/*XXX*/lng, result);
+	status = cgetstr(bp, lng, result);
 	if (status >= 0 || status == PCAPERR_OSERR)
 		return status;
-	status = cgetstr(bp, (char *)/*XXX*/shrt, result);
+	status = cgetstr(bp, shrt, result);
 	if (status >= 0 || status == PCAPERR_OSERR)
 		return status;
 	if (dflt) {
 		*result = strdup(dflt);
-		if (*result == 0)
+		if (*result == NULL)
 			return PCAPERR_OSERR;
 		return strlen(*result);
 	}
@@ -402,10 +398,10 @@ capdb_getaltnum(char *bp, const char *shrt, const char *lng, long dflt,
 {
 	int status;
 
-	status = cgetnum(bp, (char *)/*XXX*/lng, result);
+	status = cgetnum(bp, lng, result);
 	if (status >= 0)
 		return status;
-	status = cgetnum(bp, (char *)/*XXX*/shrt, result);
+	status = cgetnum(bp, shrt, result);
 	if (status >= 0)
 		return status;
 	*result = dflt;
@@ -419,9 +415,9 @@ capdb_getaltnum(char *bp, const char *shrt, const char *lng, long dflt,
 static int
 capdb_getaltlog(char *bp, const char *shrt, const char *lng)
 {
-	if (cgetcap(bp, (char *)/*XXX*/lng, ':'))
+	if (cgetcap(bp, lng, ':'))
 		return 1;
-	if (cgetcap(bp, (char *)/*XXX*/shrt, ':'))
+	if (cgetcap(bp, shrt, ':'))
 		return 1;
 	return 0;
 }
@@ -439,9 +435,9 @@ capdb_canonical_name(const char *bp)
 	const char *nameend;
 
 	nameend = strpbrk(bp, "|:");
-	if (nameend == 0)
+	if (nameend == NULL)
 		nameend = bp + 1;
-	if ((retval = malloc(nameend - bp + 1)) != 0) {
+	if ((retval = malloc(nameend - bp + 1)) != NULL) {
 		retval[0] = '\0';
 		strncat(retval, bp, nameend - bp);
 	}

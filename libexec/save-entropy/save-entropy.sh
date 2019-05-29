@@ -1,5 +1,7 @@
 #!/bin/sh
 #
+# SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+#
 # Copyright (c) 2001-2006,2012 Douglas Barton, dougb@FreeBSD.org
 # All rights reserved.
 #
@@ -88,5 +90,7 @@ while [ ${n} -ge 1 ]; do
 done
 
 dd if=/dev/random of=saved-entropy.1 bs=${entropy_save_sz} count=1 2>/dev/null
+chflags nodump saved-entropy.1 2>/dev/null || :
+fsync saved-entropy.1 "."
 
 exit 0

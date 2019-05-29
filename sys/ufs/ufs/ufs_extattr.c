@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 1999-2002 Robert N. M. Watson
  * Copyright (c) 2002-2003 Networks Associates Technology, Inc.
  * All rights reserved.
@@ -45,6 +47,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
+#include <sys/ktr.h>
 #include <sys/namei.h>
 #include <sys/malloc.h>
 #include <sys/fcntl.h>
@@ -68,6 +71,8 @@ __FBSDID("$FreeBSD$");
 #include <ufs/ufs/ufs_extern.h>
 
 #ifdef UFS_EXTATTR
+
+FEATURE(ufs_extattr, "ufs extended attribute support");
 
 static MALLOC_DEFINE(M_UFS_EXTATTR, "ufs_extattr", "ufs extended attribute");
 
@@ -334,7 +339,12 @@ ufs_extattr_enable_with_open(struct ufsmount *ump, struct vnode *vp,
 		return (error);
 	}
 
-	VOP_ADD_WRITECOUNT(vp, 1);
+	error = VOP_ADD_WRITECOUNT(vp, 1);
+	if (error != 0) {
+		VOP_CLOSE(vp, FREAD | FWRITE, td->td_ucred, td);
+		VOP_UNLOCK(vp, 0);
+		return (error);
+	}
 	CTR3(KTR_VFS, "%s: vp %p v_writecount increased to %d", __func__, vp,
 	    vp->v_writecount);
 
@@ -597,8 +607,6 @@ ufs_extattr_enable(struct ufsmount *ump, int attrnamespace,
 
 	attribute = malloc(sizeof(struct ufs_extattr_list_entry),
 	    M_UFS_EXTATTR, M_WAITOK);
-	if (attribute == NULL)
-		return (ENOMEM);
 
 	if (!(ump->um_extattr.uepm_flags & UFS_EXTATTR_UEPM_STARTED)) {
 		error = EOPNOTSUPP;

@@ -10,10 +10,6 @@
 #ifndef LLDB_SBDefines_h_
 #define LLDB_SBDefines_h_
 
-// C Includes
-// C++ Includes
-// Other libraries and framework includes
-// Project includes
 
 #include "lldb/lldb-defines.h"
 #include "lldb/lldb-enumerations.h"
@@ -32,6 +28,8 @@ class LLDB_API SBAddress;
 class LLDB_API SBBlock;
 class LLDB_API SBBreakpoint;
 class LLDB_API SBBreakpointLocation;
+class LLDB_API SBBreakpointName;
+class LLDB_API SBBreakpointNameImpl;
 class LLDB_API SBBroadcaster;
 class LLDB_API SBCommand;
 class LLDB_API SBCommandInterpreter;
@@ -53,20 +51,27 @@ class LLDB_API SBFileSpecList;
 class LLDB_API SBFrame;
 class LLDB_API SBFunction;
 class LLDB_API SBHostOS;
+class LLDB_API SBInitializerOptions;
 class LLDB_API SBInstruction;
 class LLDB_API SBInstructionList;
+class LLDB_API SBLanguageRuntime;
+class LLDB_API SBLaunchInfo;
 class LLDB_API SBLineEntry;
 class LLDB_API SBListener;
+class LLDB_API SBMemoryRegionInfo;
+class LLDB_API SBMemoryRegionInfoList;
 class LLDB_API SBModule;
 class LLDB_API SBModuleSpec;
 class LLDB_API SBModuleSpecList;
 class LLDB_API SBProcess;
+class LLDB_API SBProcessInfo;
 class LLDB_API SBQueue;
 class LLDB_API SBQueueItem;
 class LLDB_API SBSection;
 class LLDB_API SBSourceManager;
 class LLDB_API SBStream;
 class LLDB_API SBStringList;
+class LLDB_API SBStructuredData;
 class LLDB_API SBSymbol;
 class LLDB_API SBSymbolContext;
 class LLDB_API SBSymbolContextList;
@@ -74,6 +79,8 @@ class LLDB_API SBTarget;
 class LLDB_API SBThread;
 class LLDB_API SBThreadCollection;
 class LLDB_API SBThreadPlan;
+class LLDB_API SBTrace;
+class LLDB_API SBTraceOptions;
 class LLDB_API SBType;
 class LLDB_API SBTypeCategory;
 class LLDB_API SBTypeEnumMember;
@@ -84,15 +91,17 @@ class LLDB_API SBTypeMemberFunction;
 class LLDB_API SBTypeNameSpecifier;
 class LLDB_API SBTypeSummary;
 class LLDB_API SBTypeSummaryOptions;
-#ifndef LLDB_DISABLE_PYTHON
 class LLDB_API SBTypeSynthetic;
-#endif
 class LLDB_API SBTypeList;
 class LLDB_API SBValue;
 class LLDB_API SBValueList;
+class LLDB_API SBVariablesOptions;
 class LLDB_API SBWatchpoint;
 class LLDB_API SBUnixSignals;
 
+typedef bool (*SBBreakpointHitCallback)(void *baton, SBProcess &process,
+                                        SBThread &thread,
+                                        lldb::SBBreakpointLocation &location);
 }
 
-#endif  // LLDB_SBDefines_h_
+#endif // LLDB_SBDefines_h_

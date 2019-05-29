@@ -1,5 +1,7 @@
 #! /bin/sh
 #
+# SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+#
 #  Copyright (c) 2010 Gordon Tetlow
 #  All rights reserved.
 #
@@ -68,7 +70,23 @@ build_manpath() {
 
 	# If the user has set a manpath, who are we to argue.
 	if [ -n "$MANPATH" ]; then
-		return
+		case "$MANPATH" in
+		*:) PREPEND_MANPATH=${MANPATH} ;;
+		:*) APPEND_MANPATH=${MANPATH} ;;
+		*::*)
+			PREPEND_MANPATH=${MANPATH%%::*}
+			APPEND_MANPATH=${MANPATH#*::}
+			;;
+		*) return ;;
+		esac
+	fi
+
+	if [ -n "$PREPEND_MANPATH" ]; then
+		IFS=:
+		for path in $PREPEND_MANPATH; do
+			add_to_manpath "$path"
+		done
+		unset IFS
 	fi
 
 	search_path
@@ -82,6 +100,13 @@ build_manpath() {
 
 	parse_configs
 
+	if [ -n "$APPEND_MANPATH" ]; then
+		IFS=:
+		for path in $APPEND_MANPATH; do
+			add_to_manpath "$path"
+		done
+		unset IFS
+	fi
 	# Trim leading colon
 	MANPATH=${manpath#:}
 
@@ -176,7 +201,7 @@ find_file() {
 		catroot="$catroot/$3"
 	fi
 
-	if [ ! -d "$manroot" ]; then
+	if [ ! -d "$manroot" -a ! -d "$catroot" ]; then
 		return 1
 	fi
 	decho "  Searching directory $manroot" 2
@@ -238,10 +263,6 @@ manpath_usage() {
 # Usage: manpath_warnings
 # Display some warnings to stderr.
 manpath_warnings() {
-	if [ -z "$Lflag" -a -n "$MANPATH" ]; then
-		echo "(Warning: MANPATH environment variable set)" >&2
-	fi
-
 	if [ -n "$Lflag" -a -n "$MANLOCALES" ]; then
 		echo "(Warning: MANLOCALES environment variable set)" >&2
 	fi
@@ -255,6 +276,9 @@ man_check_for_so() {
 	local IFS line tstr
 
 	unset IFS
+	if [ -n "$catpage" ]; then
+		return 0
+	fi
 
 	# We need to loop to accommodate multiple .so directives.
 	while true
@@ -314,8 +338,12 @@ man_display_page() {
 	if [ -n "$use_width" ]; then
 		mandoc_args="-O width=${use_width}"
 	fi
-	testline="mandoc -Tlint -Wunsupp 2>/dev/null"
-	pipeline="mandoc $mandoc_args | $MANPAGER"
+	testline="mandoc -Tlint -Wunsupp >/dev/null 2>&1"
+	if [ -n "$tflag" ]; then
+		pipeline="mandoc -Tps $mandoc_args"
+	else
+		pipeline="mandoc $mandoc_args | $MANPAGER"
+	fi
 
 	if ! eval "$cattool $manpage | $testline" ;then
 		if which -s groff; then
@@ -634,6 +662,7 @@ man_setup_width() {
 # Setup necessary locale variables.
 man_setup_locale() {
 	local lang_cc
+	local locstr
 
 	locpaths='.'
 	man_charset='US-ASCII'
@@ -642,18 +671,25 @@ man_setup_locale() {
 	if [ -n "$oflag" ]; then
 		decho 'Using non-localized manpages'
 	else
-		# Use the locale tool to give us the proper LC_CTYPE
+		# Use the locale tool to give us proper locale information
 		eval $( $LOCALE )
 
-		case "$LC_CTYPE" in
+		if [ -n "$LANG" ]; then
+			locstr=$LANG
+		else
+			locstr=$LC_CTYPE
+		fi
+
+		case "$locstr" in
 		C)		;;
+		C.UTF-8)	;;
 		POSIX)		;;
 		[a-z][a-z]_[A-Z][A-Z]\.*)
-				lang_cc="${LC_CTYPE%.*}"
-				man_lang="${LC_CTYPE%_*}"
+				lang_cc="${locstr%.*}"
+				man_lang="${locstr%_*}"
 				man_country="${lang_cc#*_}"
-				man_charset="${LC_CTYPE#*.}"
-				locpaths="$LC_CTYPE"
+				man_charset="${locstr#*.}"
+				locpaths="$locstr"
 				locpaths="$locpaths:$man_lang.$man_charset"
 				if [ "$man_lang" != "en" ]; then
 					locpaths="$locpaths:en.$man_charset"
@@ -755,24 +791,19 @@ search_path() {
 
 	IFS=:
 	for path in $PATH; do
-		# Do a little special casing since the base manpages
-		# are in /usr/share/man instead of /usr/man or /man.
-		case "$path" in
-		/bin|/usr/bin)	add_to_manpath "/usr/share/man" ;;
-		*)	if add_to_manpath "$path/man"; then
-				:
-			elif add_to_manpath "$path/MAN"; then
-				:
-			else
-				case "$path" in
-				*/bin)	p="${path%/bin}/man"
-					add_to_manpath "$p"
-					;;
-				*)	;;
-				esac
-			fi
-			;;
-		esac
+		if add_to_manpath "$path/man"; then
+			:
+		elif add_to_manpath "$path/MAN"; then
+			:
+		else
+			case "$path" in
+			*/bin)	p="${path%/bin}/share/man"
+				add_to_manpath "$p"
+				p="${path%/bin}/man"
+				add_to_manpath "$p"
+				;;
+			esac
+		fi
 	done
 	unset IFS
 
@@ -878,7 +909,7 @@ setup_pager() {
 			if [ -n "$PAGER" ]; then
 				MANPAGER="$PAGER"
 			else
-				MANPAGER="more -s"
+				MANPAGER="less -s"
 			fi
 		fi
 	fi
@@ -925,6 +956,8 @@ whatis_usage() {
 
 # Supported commands
 do_apropos() {
+	[ $(stat -f %i /usr/bin/man) -ne $(stat -f %i /usr/bin/apropos) ] && \
+		exec apropos "$@"
 	search_whatis apropos "$@"
 }
 
@@ -960,6 +993,8 @@ do_manpath() {
 }
 
 do_whatis() {
+	[ $(stat -f %i /usr/bin/man) -ne $(stat -f %i /usr/bin/whatis) ] && \
+		exec whatis "$@"
 	search_whatis whatis "$@"
 }
 
@@ -978,7 +1013,7 @@ SYSCTL=/sbin/sysctl
 
 debug=0
 man_default_sections='1:8:2:3:n:4:5:6:7:9:l'
-man_default_path='/usr/share/man:/usr/share/openssl/man:/usr/local/man'
+man_default_path='/usr/share/man:/usr/share/openssl/man:/usr/local/share/man:/usr/local/man'
 cattool='/usr/bin/zcat -f'
 
 config_global='/etc/man.conf'

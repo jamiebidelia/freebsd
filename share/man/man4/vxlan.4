@@ -24,7 +24,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd December 16, 2014
+.Dd December 31, 2017
 .Dt VXLAN 4
 .Os
 .Sh NAME
@@ -108,7 +108,7 @@ forwarding table entry.
 When the
 .Nm
 interface is brought up, a
-.Xr UDP 4
+.Xr udp 4
 .Xr socket 9
 is created based on the configuration,
 such as the local address for unicast mode or
@@ -214,12 +214,23 @@ Once created, the
 .Nm
 interface can be configured with
 .Xr ifconfig 8 .
+.Pp
+The following when placed in the file
+.Pa /etc/rc.conf
+will cause a vxlan interface called
+.Dq Li vxlan0
+to be created, and will configure the interface in unicast mode.
+.Bd -literal -offset indent
+cloned_interfaces="vxlan0"
+create_args_vxlan0="vxlanid 108 vxlanlocal 192.168.100.1 vxlanremote 192.168.100.2"
+.Ed
 .Sh SEE ALSO
 .Xr inet 4 ,
 .Xr inet6 4 ,
+.Xr vlan 4 ,
+.Xr rc.conf 5 ,
 .Xr ifconfig 8 ,
-.Xr sysctl 8 ,
-.Xr vlan 8
+.Xr sysctl 8
 .Rs
 .%A "M. Mahalingam"
 .%A "et al"
@@ -227,7 +238,7 @@ interface can be configured with
 .%D August 2014
 .%O "RFC 7348"
 .Re
-.Sh AUTHOR
+.Sh AUTHORS
 .An -nosplit
 The
 .Nm

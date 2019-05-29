@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2007, Juniper Networks, Inc.
  * Copyright (c) 2012-2013, SRI International
  * All rights reserved.
@@ -113,6 +115,7 @@ struct cfi_qry {
 #define	CFI_BCS_CONFIRM		0xd0
 #define	CFI_BCS_BUF_PROG_SETUP	0xe8
 #define	CFI_BCS_READ_ARRAY	0xff
+#define	CFI_BCS_READ_ARRAY2	0xf0
 
 /* Intel commands. */
 #define	CFI_INTEL_LB		0x01	/* Lock Block */
@@ -143,10 +146,13 @@ struct cfi_qry {
 #define	CFI_AMD_BLOCK_ERASE	0x30
 #define	CFI_AMD_UNLOCK_ACK	0x55
 #define	CFI_AMD_ERASE_SECTOR	0x80
+#define	CFI_AMD_AUTO_SELECT	0x90
 #define	CFI_AMD_PROGRAM		0xa0
 #define	CFI_AMD_UNLOCK		0xaa
 
 #define	AMD_ADDR_START		0xaaa
 #define	AMD_ADDR_ACK		0x555
+
+#define	CFI_AMD_MAXCHK		0x10000
 
 #endif /* _DEV_CFI_REG_H_ */

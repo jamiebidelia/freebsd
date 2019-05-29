@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2010 Adrian Chadd
  * All rights reserved.
  *
@@ -46,6 +48,8 @@ enum ar71xx_soc_type {
 	AR71XX_SOC_AR9344,
 	AR71XX_SOC_QCA9556,
 	AR71XX_SOC_QCA9558,
+	AR71XX_SOC_QCA9533,
+	AR71XX_SOC_QCA9533_V2,
 };
 extern enum ar71xx_soc_type ar71xx_soc;
 

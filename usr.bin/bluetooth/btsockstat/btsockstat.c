@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * btsockstat.c
  *
  * Copyright (c) 2001-2002 Maksim Yevmenkin <m_evmenkin@yahoo.com>
@@ -35,6 +37,7 @@
 #include <sys/protosw.h>
 #include <sys/queue.h>
 #include <sys/socket.h>
+#define	_WANT_SOCKET
 #include <sys/socketvar.h>
 
 #include <net/if.h>
@@ -154,9 +157,9 @@ main(int argc, char *argv[])
 	 * Discard setgid privileges if not the running kernel so that
 	 * bad guys can't print interesting stuff from kernel memory.
 	 */
-
 	if (memf != NULL)
-		setgid(getgid());
+		if (setgid(getgid()) != 0)
+			err(1, "setgid");
 
 	kvmd = kopen(memf);
 	if (kvmd == NULL)
@@ -583,15 +586,9 @@ kopen(char const *memf)
 	kvm_t	*kvmd = NULL;
 	char	 errbuf[_POSIX2_LINE_MAX];
 
-	/*
-	 * Discard setgid privileges if not the running kernel so that 
-	 * bad guys can't print interesting stuff from kernel memory.
-	 */
-
-	if (memf != NULL)
-		setgid(getgid());   
-
 	kvmd = kvm_openfiles(NULL, memf, NULL, O_RDONLY, errbuf);
+	if (setgid(getgid()) != 0)
+		err(1, "setgid");
 	if (kvmd == NULL) {
 		warnx("kvm_openfiles: %s", errbuf);
 		return (NULL);

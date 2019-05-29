@@ -35,6 +35,7 @@ h_fail()
 {
 	echo "Executing command [ $2$1 ]"
 	# Begin FreeBSD
+	ulimit -c 0
 	if true; then
 		eval $2 atf_check -s signal -o ignore -e ignore $1
 	else
@@ -385,12 +386,14 @@ read_body()
 {
 	prog="$(atf_get_srcdir)/h_read"
 
-	h_pass "$prog 1024" "echo foo |"
 	# Begin FreeBSD
 	if true; then
-		h_fail "$prog 1027" "echo bar |"
+	MAX_PATH=$(getconf _XOPEN_PATH_MAX) || atf_fail "getconf failed"
+	h_pass "$prog $MAX_PATH" "echo foo |"
+	h_fail "$prog $(( $MAX_PATH + 3 ))" "echo bar |"
 	else
 	# End FreeBSD
+	h_pass "$prog 1024" "echo foo |"
 	h_fail "$prog 1025" "echo bar |"
 	# Begin FreeBSD
 	fi

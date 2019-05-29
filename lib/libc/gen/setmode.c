@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1989, 1993, 1994
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -13,7 +15,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 4. Neither the name of the University nor the names of its contributors
+ * 3. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -30,10 +32,8 @@
  * SUCH DAMAGE.
  */
 
-#if defined(LIBC_SCCS) && !defined(lint)
-static char sccsid[] = "@(#)setmode.c	8.2 (Berkeley) 3/25/94";
-#endif /* LIBC_SCCS and not lint */
 #include <sys/cdefs.h>
+__SCCSID("@(#)setmode.c	8.2 (Berkeley) 3/25/94");
 __FBSDID("$FreeBSD$");
 
 #include "namespace.h"
@@ -53,6 +53,7 @@ __FBSDID("$FreeBSD$");
 #include <stdio.h>
 #endif
 #include "un-namespace.h"
+#include "libc_private.h"
 
 #define	SET_LEN	6		/* initial # of bitcmd struct to malloc */
 #define	SET_LEN_INCR 4		/* # of bitcmd structs to add as needed */
@@ -154,7 +155,7 @@ common:			if (set->cmd2 & CMD2_CLR) {
 	if (set >= endset) {						\
 		BITCMD *newset;						\
 		setlen += SET_LEN_INCR;					\
-		newset = realloc(saveset, sizeof(BITCMD) * setlen);	\
+		newset = reallocarray(saveset, setlen, sizeof(BITCMD));	\
 		if (newset == NULL)					\
 			goto out;					\
 		set = newset + (set - saveset);				\
@@ -174,7 +175,7 @@ setmode(const char *p)
 	mode_t mask, perm, permXbits, who;
 	long perml;
 	int equalopdone;
-	int setlen;
+	u_int setlen;
 
 	if (!*p) {
 		errno = EINVAL;
@@ -189,7 +190,7 @@ setmode(const char *p)
 
 	setlen = SET_LEN + 2;
 
-	if ((set = malloc((u_int)(sizeof(BITCMD) * setlen))) == NULL)
+	if ((set = malloc(setlen * sizeof(BITCMD))) == NULL)
 		return (NULL);
 	saveset = set;
 	endset = set + (setlen - 2);
@@ -355,7 +356,7 @@ getumask(void)
 	 * security.bsd.unprivileged_proc_debug is set to 0.
 	 */
 	len = sizeof(smask);
-	if (sysctl((int[4]){ CTL_KERN, KERN_PROC, KERN_PROC_UMASK, getpid() },
+	if (sysctl((int[4]){ CTL_KERN, KERN_PROC, KERN_PROC_UMASK, 0 },
 	    4, &smask, &len, NULL, 0) == 0)
 		return (smask);
 
@@ -364,9 +365,9 @@ getumask(void)
 	 * handler, protect them as best we can.
 	 */
 	sigfillset(&sigset);
-	(void)_sigprocmask(SIG_BLOCK, &sigset, &sigoset);
+	(void)__libc_sigprocmask(SIG_BLOCK, &sigset, &sigoset);
 	(void)umask(mask = umask(0));
-	(void)_sigprocmask(SIG_SETMASK, &sigoset, NULL);
+	(void)__libc_sigprocmask(SIG_SETMASK, &sigoset, NULL);
 	return (mask);
 }
 

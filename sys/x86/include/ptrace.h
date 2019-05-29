@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1992, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -10,7 +12,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 4. Neither the name of the University nor the names of its contributors
+ * 3. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -51,6 +53,10 @@
 #define	PT_GETXSTATE_INFO (PT_FIRSTMACH + 4)
 #define	PT_GETXSTATE	(PT_FIRSTMACH + 5)
 #define	PT_SETXSTATE	(PT_FIRSTMACH + 6)
+#define	PT_GETFSBASE	(PT_FIRSTMACH + 7)
+#define	PT_SETFSBASE	(PT_FIRSTMACH + 8)
+#define	PT_GETGSBASE	(PT_FIRSTMACH + 9)
+#define	PT_SETGSBASE	(PT_FIRSTMACH + 10)
 
 /* Argument structure for PT_GETXSTATE_INFO. */
 struct ptrace_xstate_info {

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2009, Oleksandr Tymoshenko <gonzo@FreeBSD.org>
  * Copyright (c) 2009, Luiz Otavio O Souza. 
  * All rights reserved.
@@ -54,6 +56,7 @@ __FBSDID("$FreeBSD$");
 #include <dev/gpio/gpiobusvar.h>
 #include <mips/atheros/ar933xreg.h>
 #include <mips/atheros/ar934xreg.h>
+#include <mips/atheros/qca953xreg.h>
 #include <mips/atheros/qca955xreg.h>
 
 #include "gpio_if.h"
@@ -102,9 +105,15 @@ static int ar71xx_gpio_pin_toggle(device_t dev, uint32_t pin);
 static void
 ar71xx_gpio_function_enable(struct ar71xx_gpio_softc *sc, uint32_t mask)
 {
+
+	/*
+	 * XXX TODO: refactor this out into a per-chipset method.
+	 */
 	if (ar71xx_soc == AR71XX_SOC_AR9341 ||
 	    ar71xx_soc == AR71XX_SOC_AR9342 ||
 	    ar71xx_soc == AR71XX_SOC_AR9344 ||
+	    ar71xx_soc == AR71XX_SOC_QCA9533 ||
+	    ar71xx_soc == AR71XX_SOC_QCA9533_V2 ||
 	    ar71xx_soc == AR71XX_SOC_QCA9556 ||
 	    ar71xx_soc == AR71XX_SOC_QCA9558)
 		GPIO_SET_BITS(sc, AR934X_GPIO_REG_FUNC, mask);
@@ -115,9 +124,15 @@ ar71xx_gpio_function_enable(struct ar71xx_gpio_softc *sc, uint32_t mask)
 static void
 ar71xx_gpio_function_disable(struct ar71xx_gpio_softc *sc, uint32_t mask)
 {
+
+	/*
+	 * XXX TODO: refactor this out into a per-chipset method.
+	 */
 	if (ar71xx_soc == AR71XX_SOC_AR9341 ||
 	    ar71xx_soc == AR71XX_SOC_AR9342 ||
 	    ar71xx_soc == AR71XX_SOC_AR9344 ||
+	    ar71xx_soc == AR71XX_SOC_QCA9533 ||
+	    ar71xx_soc == AR71XX_SOC_QCA9533_V2 ||
 	    ar71xx_soc == AR71XX_SOC_QCA9556 ||
 	    ar71xx_soc == AR71XX_SOC_QCA9558)
 		GPIO_CLEAR_BITS(sc, AR934X_GPIO_REG_FUNC, mask);
@@ -125,13 +140,58 @@ ar71xx_gpio_function_disable(struct ar71xx_gpio_softc *sc, uint32_t mask)
 		GPIO_CLEAR_BITS(sc, AR71XX_GPIO_FUNCTION, mask);
 }
 
+/*
+ * On most platforms, GPIO_OE is a bitmap where the bit set
+ * means "enable output."
+ *
+ * On AR934x and QCA953x, it's the opposite - the bit set means
+ * "input enable".
+ */
+static int
+ar71xx_gpio_oe_is_high(void)
+{
+	switch (ar71xx_soc) {
+	case AR71XX_SOC_AR9341:
+	case AR71XX_SOC_AR9342:
+	case AR71XX_SOC_AR9344:
+	case AR71XX_SOC_QCA9533:
+	case AR71XX_SOC_QCA9533_V2:
+		return 0;
+	default:
+		return 1;
+	}
+}
+
+static void
+ar71xx_gpio_oe_set_output(struct ar71xx_gpio_softc *sc, int b)
+{
+	uint32_t mask;
+
+	mask = 1 << b;
+
+	if (ar71xx_gpio_oe_is_high())
+		GPIO_SET_BITS(sc, AR71XX_GPIO_OE, mask);
+	else
+		GPIO_CLEAR_BITS(sc, AR71XX_GPIO_OE, mask);
+}
+
+static void
+ar71xx_gpio_oe_set_input(struct ar71xx_gpio_softc *sc, int b)
+{
+	uint32_t mask;
+
+	mask = 1 << b;
+
+	if (ar71xx_gpio_oe_is_high())
+		GPIO_CLEAR_BITS(sc, AR71XX_GPIO_OE, mask);
+	else
+		GPIO_SET_BITS(sc, AR71XX_GPIO_OE, mask);
+}
+
 static void
 ar71xx_gpio_pin_configure(struct ar71xx_gpio_softc *sc, struct gpio_pin *pin,
     unsigned int flags)
 {
-	uint32_t mask;
-
-	mask = 1 << pin->gp_pin;
 
 	/*
 	 * Manage input/output
@@ -140,11 +200,10 @@ ar71xx_gpio_pin_configure(struct ar71xx_gpio_softc *sc, struct gpio_pin *pin,
 		pin->gp_flags &= ~(GPIO_PIN_INPUT|GPIO_PIN_OUTPUT);
 		if (flags & GPIO_PIN_OUTPUT) {
 			pin->gp_flags |= GPIO_PIN_OUTPUT;
-			GPIO_SET_BITS(sc, AR71XX_GPIO_OE, mask);
-		}
-		else {
+			ar71xx_gpio_oe_set_output(sc, pin->gp_pin);
+		} else {
 			pin->gp_flags |= GPIO_PIN_INPUT;
-			GPIO_CLEAR_BITS(sc, AR71XX_GPIO_OE, mask);
+			ar71xx_gpio_oe_set_input(sc, pin->gp_pin);
 		}
 	}
 }
@@ -169,9 +228,11 @@ ar71xx_gpio_pin_max(device_t dev, int *maxpin)
 			*maxpin = AR91XX_GPIO_PINS - 1;
 			break;
 		case AR71XX_SOC_AR7240:
-		case AR71XX_SOC_AR7241:
 		case AR71XX_SOC_AR7242:
 			*maxpin = AR724X_GPIO_PINS - 1;
+			break;
+		case AR71XX_SOC_AR7241:
+			*maxpin = AR7241_GPIO_PINS - 1;
 			break;
 		case AR71XX_SOC_AR9330:
 		case AR71XX_SOC_AR9331:
@@ -181,6 +242,10 @@ ar71xx_gpio_pin_max(device_t dev, int *maxpin)
 		case AR71XX_SOC_AR9342:
 		case AR71XX_SOC_AR9344:
 			*maxpin = AR934X_GPIO_COUNT - 1;
+			break;
+		case AR71XX_SOC_QCA9533:
+		case AR71XX_SOC_QCA9533_V2:
+			*maxpin = QCA953X_GPIO_COUNT - 1;
 			break;
 		case AR71XX_SOC_QCA9556:
 		case AR71XX_SOC_QCA9558:
@@ -438,6 +503,14 @@ ar71xx_gpio_attach(device_t dev)
 	}
 	/* Iniatilize the GPIO pins, keep the loader settings. */
 	oe = GPIO_READ(sc, AR71XX_GPIO_OE);
+	/*
+	 * For AR934x and QCA953x, the meaning of oe is inverted;
+	 * so flip it the right way around so we can parse the GPIO
+	 * state.
+	 */
+	if (!ar71xx_gpio_oe_is_high())
+		oe = ~oe;
+
 	sc->gpio_pins = malloc(sizeof(*sc->gpio_pins) * sc->gpio_npins,
 	    M_DEVBUF, M_WAITOK | M_ZERO);
 	for (i = 0, j = 0; j <= maxpin; j++) {
@@ -488,7 +561,7 @@ ar71xx_gpio_attach(device_t dev)
 		    &gpiomode) != 0)
 			continue;
 
-		/* We only handle mode=1 for now */
+		/* We only handle mode=1 (output) for now */
 		if (gpiomode != 1)
 			continue;
 
@@ -498,15 +571,13 @@ ar71xx_gpio_attach(device_t dev)
 		    gpiofunc,
 		    gpiomode);
 
-		/* Set output (bit == 0) */
-		oe = GPIO_READ(sc, AR71XX_GPIO_OE);
-		oe &= ~ (1 << i);
-		GPIO_WRITE(sc, AR71XX_GPIO_OE, oe);
-
 		/* Set pin value = 0, so it stays low by default */
 		oe = GPIO_READ(sc, AR71XX_GPIO_OUT);
 		oe &= ~ (1 << i);
 		GPIO_WRITE(sc, AR71XX_GPIO_OUT, oe);
+
+		/* Set output */
+		ar71xx_gpio_oe_set_output(sc, i);
 
 		/* Finally: Set the output config */
 		ar71xx_gpio_ouput_configure(i, gpiofunc);

@@ -113,12 +113,18 @@ public:
   const char *getText() const { return Text; }
 };
 
-/// \brief A mangled C++ name. Really just a strong typedef for 'const char*'.
-class MangledName {
+/// \brief A C++ type name. Really just a strong typedef for 'const char*'.
+class TypeName {
   const char *Name;
 public:
-  MangledName(const char *Name) : Name(Name) {}
+  TypeName(const char *Name) : Name(Name) {}
   const char *getName() const { return Name; }
+};
+
+enum class ErrorType {
+#define UBSAN_CHECK(Name, SummaryKind, FSanitizeFlagName) Name,
+#include "ubsan_checks.inc"
+#undef UBSAN_CHECK
 };
 
 /// \brief Representation of an in-flight diagnostic.
@@ -133,6 +139,9 @@ class Diag {
   /// The diagnostic level.
   DiagLevel Level;
 
+  /// The error type.
+  ErrorType ET;
+
   /// The message which will be emitted, with %0, %1, ... placeholders for
   /// arguments.
   const char *Message;
@@ -141,7 +150,7 @@ public:
   /// Kinds of arguments, corresponding to members of \c Arg's union.
   enum ArgKind {
     AK_String, ///< A string argument, displayed as-is.
-    AK_Mangled,///< A C++ mangled name, demangled before display.
+    AK_TypeName,///< A C++ type name, possibly demangled before display.
     AK_UInt,   ///< An unsigned integer argument.
     AK_SInt,   ///< A signed integer argument.
     AK_Float,  ///< A floating-point argument.
@@ -152,7 +161,7 @@ public:
   struct Arg {
     Arg() {}
     Arg(const char *String) : Kind(AK_String), String(String) {}
-    Arg(MangledName MN) : Kind(AK_Mangled), String(MN.getName()) {}
+    Arg(TypeName TN) : Kind(AK_TypeName), String(TN.getName()) {}
     Arg(UIntMax UInt) : Kind(AK_UInt), UInt(UInt) {}
     Arg(SIntMax SInt) : Kind(AK_SInt), SInt(SInt) {}
     Arg(FloatMax Float) : Kind(AK_Float), Float(Float) {}
@@ -169,7 +178,7 @@ public:
   };
 
 private:
-  static const unsigned MaxArgs = 5;
+  static const unsigned MaxArgs = 8;
   static const unsigned MaxRanges = 1;
 
   /// The arguments which have been added to this diagnostic so far.
@@ -197,12 +206,13 @@ private:
   Diag &operator=(const Diag &);
 
 public:
-  Diag(Location Loc, DiagLevel Level, const char *Message)
-    : Loc(Loc), Level(Level), Message(Message), NumArgs(0), NumRanges(0) {}
+  Diag(Location Loc, DiagLevel Level, ErrorType ET, const char *Message)
+      : Loc(Loc), Level(Level), ET(ET), Message(Message), NumArgs(0),
+        NumRanges(0) {}
   ~Diag();
 
   Diag &operator<<(const char *Str) { return AddArg(Str); }
-  Diag &operator<<(MangledName MN) { return AddArg(MN); }
+  Diag &operator<<(TypeName TN) { return AddArg(TN); }
   Diag &operator<<(unsigned long long V) { return AddArg(UIntMax(V)); }
   Diag &operator<<(const void *V) { return AddArg(V); }
   Diag &operator<<(const TypeDescriptor &V);
@@ -211,32 +221,49 @@ public:
 };
 
 struct ReportOptions {
-  /// If DieAfterReport is specified, UBSan will terminate the program after the
-  /// report is printed.
-  bool DieAfterReport;
+  // If FromUnrecoverableHandler is specified, UBSan runtime handler is not
+  // expected to return.
+  bool FromUnrecoverableHandler;
   /// pc/bp are used to unwind the stack trace.
   uptr pc;
   uptr bp;
 };
 
-#define GET_REPORT_OPTIONS(die_after_report) \
+bool ignoreReport(SourceLocation SLoc, ReportOptions Opts, ErrorType ET);
+
+#define GET_REPORT_OPTIONS(unrecoverable_handler) \
     GET_CALLER_PC_BP; \
-    ReportOptions Opts = {die_after_report, pc, bp}
+    ReportOptions Opts = {unrecoverable_handler, pc, bp}
+
+void GetStackTrace(BufferedStackTrace *stack, uptr max_depth, uptr pc, uptr bp,
+                   void *context, bool fast);
 
 /// \brief Instantiate this class before printing diagnostics in the error
 /// report. This class ensures that reports from different threads and from
 /// different sanitizers won't be mixed.
 class ScopedReport {
+  struct Initializer {
+    Initializer();
+  };
+  Initializer initializer_;
+  ScopedErrorReportLock report_lock_;
+
   ReportOptions Opts;
   Location SummaryLoc;
+  ErrorType Type;
 
 public:
-  ScopedReport(ReportOptions Opts, Location SummaryLoc);
+  ScopedReport(ReportOptions Opts, Location SummaryLoc, ErrorType Type);
   ~ScopedReport();
+
+  static void CheckLocked() { ScopedErrorReportLock::CheckLocked(); }
 };
 
 void InitializeSuppressions();
 bool IsVptrCheckSuppressed(const char *TypeName);
+// Sometimes UBSan runtime can know filename from handlers arguments, even if
+// debug info is missing.
+bool IsPCSuppressed(ErrorType ET, uptr PC, const char *Filename);
 
 } // namespace __ubsan
 

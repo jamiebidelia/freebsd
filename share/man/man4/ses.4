@@ -25,7 +25,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd January 29, 2000
+.Dd September 5, 2015
 .Dt SES 4
 .Os
 .Sh NAME
@@ -107,7 +107,7 @@ Initialize the enclosure.
 .El
 .Sh EXAMPLE USAGE
 The files contained in
-.In usr/share/examples/ses
+.In /usr/share/examples/ses
 show simple mechanisms for how to use these interfaces, as well as a
 very stupid simple monitoring daemon.
 .Sh FILES
@@ -123,6 +123,8 @@ When the kernel is configured with
 .Tn DEBUG
 enabled, the first open to an SES device will spit out overall enclosure
 parameters to the console.
+.Sh SEE ALSO
+.Xr sesutil 8
 .Sh HISTORY
 The
 .Nm

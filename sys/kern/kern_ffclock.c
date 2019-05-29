@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2011 The University of Melbourne
  * All rights reserved.
  *
@@ -160,7 +162,7 @@ SYSCTL_NODE(_kern_sysclock, OID_AUTO, ffclock, CTLFLAG_RW, 0,
 
 static char *sysclocks[] = {"feedback", "feed-forward"};
 #define	MAX_SYSCLOCK_NAME_LEN 16
-#define	NUM_SYSCLOCKS (sizeof(sysclocks) / sizeof(*sysclocks))
+#define	NUM_SYSCLOCKS nitems(sysclocks)
 
 static int ffclock_version = 2;
 SYSCTL_INT(_kern_sysclock_ffclock, OID_AUTO, version, CTLFLAG_RD,

@@ -47,7 +47,7 @@ class PropertiesRewriter {
   MigrationContext &MigrateCtx;
   MigrationPass &Pass;
   ObjCImplementationDecl *CurImplD;
-  
+
   enum PropActionKind {
     PropAction_None,
     PropAction_RetainReplacedWithStrong,
@@ -76,7 +76,7 @@ public:
 
   static void collectProperties(ObjCContainerDecl *D, AtPropDeclsTy &AtProps,
                                 AtPropDeclsTy *PrevAtProps = nullptr) {
-    for (auto *Prop : D->properties()) {
+    for (auto *Prop : D->instance_properties()) {
       if (Prop->getAtLoc().isInvalid())
         continue;
       unsigned RawLoc = Prop->getAtLoc().getRawEncoding();
@@ -96,6 +96,10 @@ public:
 
     collectProperties(iface, AtProps);
 
+    // Look through extensions.
+    for (auto *Ext : iface->visible_extensions())
+      collectProperties(Ext, AtProps);
+
     typedef DeclContext::specific_decl_iterator<ObjCPropertyImplDecl>
         prop_impl_iterator;
     for (prop_impl_iterator
@@ -114,7 +118,7 @@ public:
       AtPropDeclsTy::iterator findAtLoc = AtProps.find(rawAtLoc);
       if (findAtLoc == AtProps.end())
         continue;
-      
+
       PropsTy &props = findAtLoc->second;
       for (PropsTy::iterator I = props.begin(), E = props.end(); I != E; ++I) {
         if (I->PropD == propD) {
@@ -133,22 +137,9 @@ public:
         continue;
       if (hasIvarWithExplicitARCOwnership(props))
         continue;
-      
+
       Transaction Trans(Pass.TA);
       rewriteProperty(props, atLoc);
-    }
-
-    AtPropDeclsTy AtExtProps;
-    // Look through extensions.
-    for (auto *Ext : iface->visible_extensions())
-      collectProperties(Ext, AtExtProps, &AtProps);
-
-    for (AtPropDeclsTy::iterator
-           I = AtExtProps.begin(), E = AtExtProps.end(); I != E; ++I) {
-      SourceLocation atLoc = SourceLocation::getFromRawEncoding(I->first);
-      PropsTy &props = I->second;
-      Transaction Trans(Pass.TA);
-      doActionForExtensionProp(props, atLoc);
     }
   }
 
@@ -177,18 +168,9 @@ private:
     }
   }
 
-  void doActionForExtensionProp(PropsTy &props, SourceLocation atLoc) {
-    llvm::DenseMap<IdentifierInfo *, PropActionKind>::iterator I;
-    I = ActionOnProp.find(props[0].PropD->getIdentifier());
-    if (I == ActionOnProp.end())
-      return;
-
-    doPropAction(I->second, props, atLoc, false);
-  }
-
   void rewriteProperty(PropsTy &props, SourceLocation atLoc) {
     ObjCPropertyDecl::PropertyAttributeKind propAttrs = getPropertyAttrs(props);
-    
+
     if (propAttrs & (ObjCPropertyDecl::OBJC_PR_copy |
                      ObjCPropertyDecl::OBJC_PR_unsafe_unretained |
                      ObjCPropertyDecl::OBJC_PR_strong |
@@ -233,7 +215,7 @@ private:
   void rewriteAssign(PropsTy &props, SourceLocation atLoc) const {
     bool canUseWeak = canApplyWeak(Pass.Ctx, getPropertyType(props),
                                   /*AllowOnUnknownClass=*/Pass.isGCMigration());
-    const char *toWhich = 
+    const char *toWhich =
       (Pass.isGCMigration() && !hasGCWeak(props, atLoc)) ? "strong" :
       (canUseWeak ? "weak" : "unsafe_unretained");
 
@@ -245,7 +227,7 @@ private:
       if (isUserDeclared(I->IvarD)) {
         if (I->IvarD &&
             I->IvarD->getType().getObjCLifetime() != Qualifiers::OCL_Weak) {
-          const char *toWhich = 
+          const char *toWhich =
             (Pass.isGCMigration() && !hasGCWeak(props, atLoc)) ? "__strong " :
               (canUseWeak ? "__weak " : "__unsafe_unretained ");
           Pass.TA.insert(I->IvarD->getLocation(), toWhich);
@@ -345,10 +327,10 @@ private:
       }
     }
 
-    return false;    
+    return false;
   }
 
-  // \brief Returns true if all declarations in the @property have GC __weak.
+  // Returns true if all declarations in the @property have GC __weak.
   bool hasGCWeak(PropsTy &props, SourceLocation atLoc) const {
     if (!Pass.isGCMigration())
       return false;

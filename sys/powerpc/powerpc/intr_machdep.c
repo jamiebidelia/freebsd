@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1991 The Regents of the University of California.
  * All rights reserved.
  *
@@ -13,7 +15,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 4. Neither the name of the University nor the names of its contributors
+ * 3. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -94,16 +96,18 @@ static MALLOC_DEFINE(M_INTR, "intr", "interrupt handler data");
 struct powerpc_intr {
 	struct intr_event *event;
 	long	*cntp;
-	u_int	irq;
+	void	*priv;		/* PIC-private data */
 	device_t pic;
+	u_int	irq;
 	u_int	intline;
 	u_int	vector;
 	u_int	cntindex;
-	cpuset_t cpu;
-	enum intr_trigger trig;
-	enum intr_polarity pol;
 	int	fwcode;
 	int	ipi;
+	int	pi_domain;
+	enum intr_trigger trig;
+	enum intr_polarity pol;
+	cpuset_t pi_cpuset;
 };
 
 struct pic {
@@ -116,7 +120,7 @@ struct pic {
 
 static u_int intrcnt_index = 0;
 static struct mtx intr_table_lock;
-static struct powerpc_intr *powerpc_intrs[INTR_VECTORS];
+static struct powerpc_intr **powerpc_intrs;
 static struct pic piclist[MAX_PICS];
 static u_int nvectors;		/* Allocated vectors */
 static u_int npics;		/* PICs registered */
@@ -127,39 +131,25 @@ static u_int nirqs = 0;		/* Allocated IRQs. */
 #endif
 static u_int stray_count;
 
-u_long intrcnt[INTR_VECTORS];
-char intrnames[INTR_VECTORS * MAXCOMLEN];
+u_long *intrcnt;
+char *intrnames;
 size_t sintrcnt = sizeof(intrcnt);
 size_t sintrnames = sizeof(intrnames);
+int nintrcnt;
+
+/*
+ * Just to start
+ */
+#ifdef __powerpc64__
+u_int num_io_irqs = 768;
+#else
+u_int num_io_irqs = 256;
+#endif
 
 device_t root_pic;
 
 #ifdef SMP
 static void *ipi_cookie;
-#endif
-
-static void
-intr_init(void *dummy __unused)
-{
-
-	mtx_init(&intr_table_lock, "intr sources lock", NULL, MTX_DEF);
-}
-SYSINIT(intr_init, SI_SUB_INTR, SI_ORDER_FIRST, intr_init, NULL);
-
-#ifdef SMP
-static void
-smp_intr_init(void *dummy __unused)
-{
-	struct powerpc_intr *i;
-	int vector;
-
-	for (vector = 0; vector < nvectors; vector++) {
-		i = powerpc_intrs[vector];
-		if (i != NULL && i->pic == root_pic)
-			PIC_BIND(i->pic, i->intline, i->cpu);
-	}
-}
-SYSINIT(smp_intr_init, SI_SUB_SMP, SI_ORDER_ANY, smp_intr_init, NULL);
 #endif
 
 static void
@@ -170,16 +160,69 @@ intrcnt_setname(const char *name, int index)
 	    MAXCOMLEN, name);
 }
 
+static void
+intr_init(void *dummy __unused)
+{
+
+	mtx_init(&intr_table_lock, "intr sources lock", NULL, MTX_DEF);
+}
+SYSINIT(intr_init, SI_SUB_INTR, SI_ORDER_FIRST, intr_init, NULL);
+
+static void
+intr_init_sources(void *arg __unused)
+{
+
+	powerpc_intrs = mallocarray(num_io_irqs, sizeof(*powerpc_intrs),
+	    M_INTR, M_WAITOK | M_ZERO);
+	nintrcnt = 1 + num_io_irqs * 2 + mp_ncpus * 2;
+#ifdef COUNT_IPIS
+	if (mp_ncpus > 1)
+		nintrcnt += 8 * mp_ncpus;
+#endif
+	intrcnt = mallocarray(nintrcnt, sizeof(u_long), M_INTR, M_WAITOK |
+	    M_ZERO);
+	intrnames = mallocarray(nintrcnt, MAXCOMLEN + 1, M_INTR, M_WAITOK |
+	    M_ZERO);
+	sintrcnt = nintrcnt * sizeof(u_long);
+	sintrnames = nintrcnt * (MAXCOMLEN + 1);
+
+	intrcnt_setname("???", 0);
+	intrcnt_index = 1;
+}
+/*
+ * This needs to happen before SI_SUB_CPU
+ */
+SYSINIT(intr_init_sources, SI_SUB_KLD, SI_ORDER_ANY, intr_init_sources, NULL);
+
+#ifdef SMP
+static void
+smp_intr_init(void *dummy __unused)
+{
+	struct powerpc_intr *i;
+	int vector;
+
+	for (vector = 0; vector < nvectors; vector++) {
+		i = powerpc_intrs[vector];
+		if (i != NULL && i->event != NULL && i->pic == root_pic)
+			PIC_BIND(i->pic, i->intline, i->pi_cpuset, &i->priv);
+	}
+}
+SYSINIT(smp_intr_init, SI_SUB_SMP, SI_ORDER_ANY, smp_intr_init, NULL);
+#endif
+
 void
 intrcnt_add(const char *name, u_long **countp)
 {
 	int idx;
 
 	idx = atomic_fetchadd_int(&intrcnt_index, 1);
+	KASSERT(idx < nintrcnt, ("intrcnt_add: Interrupt counter index %d/%d"
+		"reached nintrcnt : %d", intrcnt_index, idx, nintrcnt));
 	*countp = &intrcnt[idx];
 	intrcnt_setname(name, idx);
 }
 
+extern void kdb_backtrace(void);
 static struct powerpc_intr *
 intr_lookup(u_int irq)
 {
@@ -204,6 +247,7 @@ intr_lookup(u_int irq)
 
 	i->event = NULL;
 	i->cntp = NULL;
+	i->priv = NULL;
 	i->trig = INTR_TRIGGER_CONFORM;
 	i->pol = INTR_POLARITY_CONFORM;
 	i->irq = irq;
@@ -213,12 +257,12 @@ intr_lookup(u_int irq)
 	i->ipi = 0;
 
 #ifdef SMP
-	i->cpu = all_cpus;
+	i->pi_cpuset = all_cpus;
 #else
-	CPU_SETOF(0, &i->cpu);
+	CPU_SETOF(0, &i->pi_cpuset);
 #endif
 
-	for (vector = 0; vector < INTR_VECTORS && vector <= nvectors;
+	for (vector = 0; vector < num_io_irqs && vector <= nvectors;
 	    vector++) {
 		iscan = powerpc_intrs[vector];
 		if (iscan != NULL && iscan->irq == irq)
@@ -277,7 +321,7 @@ powerpc_intr_eoi(void *arg)
 {
 	struct powerpc_intr *i = arg;
 
-	PIC_EOI(i->pic, i->intline);
+	PIC_EOI(i->pic, i->intline, i->priv);
 }
 
 static void
@@ -285,8 +329,8 @@ powerpc_intr_pre_ithread(void *arg)
 {
 	struct powerpc_intr *i = arg;
 
-	PIC_MASK(i->pic, i->intline);
-	PIC_EOI(i->pic, i->intline);
+	PIC_MASK(i->pic, i->intline, i->priv);
+	PIC_EOI(i->pic, i->intline, i->priv);
 }
 
 static void
@@ -294,7 +338,7 @@ powerpc_intr_post_ithread(void *arg)
 {
 	struct powerpc_intr *i = arg;
 
-	PIC_UNMASK(i->pic, i->intline);
+	PIC_UNMASK(i->pic, i->intline, i->priv);
 }
 
 static int
@@ -304,12 +348,12 @@ powerpc_assign_intr_cpu(void *arg, int cpu)
 	struct powerpc_intr *i = arg;
 
 	if (cpu == NOCPU)
-		i->cpu = all_cpus;
+		i->pi_cpuset = all_cpus;
 	else
-		CPU_SETOF(cpu, &i->cpu);
+		CPU_SETOF(cpu, &i->pi_cpuset);
 
 	if (!cold && i->pic != NULL && i->pic == root_pic)
-		PIC_BIND(i->pic, i->intline, i->cpu);
+		PIC_BIND(i->pic, i->intline, i->pi_cpuset, &i->priv);
 
 	return (0);
 #else
@@ -317,7 +361,7 @@ powerpc_assign_intr_cpu(void *arg, int cpu)
 #endif
 }
 
-void
+u_int
 powerpc_register_pic(device_t dev, uint32_t node, u_int irqs, u_int ipis,
     u_int atpic)
 {
@@ -352,7 +396,12 @@ powerpc_register_pic(device_t dev, uint32_t node, u_int irqs, u_int ipis,
 		npics++;
 	}
 
+	KASSERT(npics < MAX_PICS,
+	    ("Number of PICs exceeds maximum (%d)", MAX_PICS));
+
 	mtx_unlock(&intr_table_lock);
+
+	return (p->base);
 }
 
 u_int
@@ -382,8 +431,11 @@ powerpc_get_irq(uint32_t node, u_int pin)
 	piclist[idx].irqs = 124;
 	piclist[idx].ipis = 4;
 	piclist[idx].base = nirqs;
-	nirqs += 128;
+	nirqs += (1 << 25);
 	npics++;
+
+	KASSERT(npics < MAX_PICS,
+	    ("Number of PICs exceeds maximum (%d)", MAX_PICS));
 
 	mtx_unlock(&intr_table_lock);
 
@@ -418,7 +470,8 @@ powerpc_enable_intr(void)
 			error = powerpc_setup_intr("IPI",
 			    MAP_IRQ(piclist[n].node, piclist[n].irqs),
 			    powerpc_ipi_handler, NULL, NULL,
-			    INTR_TYPE_MISC | INTR_EXCL, &ipi_cookie);
+			    INTR_TYPE_MISC | INTR_EXCL, &ipi_cookie,
+			    0 /* domain XXX */);
 			if (error) {
 				printf("unable to setup IPI handler\n");
 				return (error);
@@ -445,7 +498,7 @@ powerpc_enable_intr(void)
 		if (error)
 			continue;
 
-		if (i->trig == -1)
+		if (i->trig == INTR_TRIGGER_INVALID)
 			PIC_TRANSLATE_CODE(i->pic, i->intline, i->fwcode,
 			    &i->trig, &i->pol);
 		if (i->trig != INTR_TRIGGER_CONFORM ||
@@ -453,7 +506,7 @@ powerpc_enable_intr(void)
 			PIC_CONFIG(i->pic, i->intline, i->trig, i->pol);
 
 		if (i->event != NULL)
-			PIC_ENABLE(i->pic, i->intline, vector);
+			PIC_ENABLE(i->pic, i->intline, vector, &i->priv);
 	}
 
 	return (0);
@@ -461,7 +514,8 @@ powerpc_enable_intr(void)
 
 int
 powerpc_setup_intr(const char *name, u_int irq, driver_filter_t filter,
-    driver_intr_t handler, void *arg, enum intr_type flags, void **cookiep)
+    driver_intr_t handler, void *arg, enum intr_type flags, void **cookiep,
+    int domain)
 {
 	struct powerpc_intr *i;
 	int error, enable = 0;
@@ -482,7 +536,13 @@ powerpc_setup_intr(const char *name, u_int irq, driver_filter_t filter,
 
 	error = intr_event_add_handler(i->event, name, filter, handler, arg,
 	    intr_priority(flags), flags, cookiep);
-
+	if (error)
+		return (error);
+	i->pi_domain = domain;
+	if (strcmp(name, "IPI") != 0)  {
+		CPU_ZERO(&i->pi_cpuset);
+		CPU_COPY(&cpuset_domain[domain], &i->pi_cpuset);
+	}
 	mtx_lock(&intr_table_lock);
 	intrcnt_setname(i->event->ie_fullname, i->cntindex);
 	mtx_unlock(&intr_table_lock);
@@ -491,7 +551,7 @@ powerpc_setup_intr(const char *name, u_int irq, driver_filter_t filter,
 		error = powerpc_map_irq(i);
 
 		if (!error) {
-			if (i->trig == -1)
+			if (i->trig == INTR_TRIGGER_INVALID)
 				PIC_TRANSLATE_CODE(i->pic, i->intline,
 				    i->fwcode, &i->trig, &i->pol);
 	
@@ -500,10 +560,11 @@ powerpc_setup_intr(const char *name, u_int irq, driver_filter_t filter,
 				PIC_CONFIG(i->pic, i->intline, i->trig, i->pol);
 
 			if (i->pic == root_pic)
-				PIC_BIND(i->pic, i->intline, i->cpu);
+				PIC_BIND(i->pic, i->intline, i->pi_cpuset, &i->priv);
 
 			if (enable)
-				PIC_ENABLE(i->pic, i->intline, i->vector);
+				PIC_ENABLE(i->pic, i->intline, i->vector,
+				    &i->priv);
 		}
 	}
 	return (error);
@@ -539,7 +600,7 @@ powerpc_fw_config_intr(int irq, int sense_code)
 	if (i == NULL)
 		return (ENOMEM);
 
-	i->trig = -1;
+	i->trig = INTR_TRIGGER_INVALID;
 	i->pol = INTR_POLARITY_CONFORM;
 	i->fwcode = sense_code;
 
@@ -590,7 +651,7 @@ powerpc_dispatch_intr(u_int vector, struct trapframe *tf)
 	 * This prevents races in IPI handling.
 	 */
 	if (i->ipi)
-		PIC_EOI(i->pic, i->intline);
+		PIC_EOI(i->pic, i->intline, i->priv);
 
 	if (intr_event_handle(ie, tf) != 0) {
 		goto stray;
@@ -607,5 +668,29 @@ stray:
 		}
 	}
 	if (i != NULL)
-		PIC_MASK(i->pic, i->intline);
+		PIC_MASK(i->pic, i->intline, i->priv);
+}
+
+void
+powerpc_intr_mask(u_int irq)
+{
+	struct powerpc_intr *i;
+
+	i = intr_lookup(irq);
+	if (i == NULL || i->pic == NULL)
+		return;
+
+	PIC_MASK(i->pic, i->intline, i->priv);
+}
+
+void
+powerpc_intr_unmask(u_int irq)
+{
+	struct powerpc_intr *i;
+
+	i = intr_lookup(irq);
+	if (i == NULL || i->pic == NULL)
+		return;
+
+	PIC_UNMASK(i->pic, i->intline, i->priv);
 }

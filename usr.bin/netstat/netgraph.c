@@ -38,6 +38,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/queue.h>
 #include <sys/socket.h>
+#define	_WANT_SOCKET
 #include <sys/socketvar.h>
 #include <sys/protosw.h>
 #include <sys/linker.h>
@@ -49,7 +50,6 @@ __FBSDID("$FreeBSD$");
 #include <netgraph/ng_socket.h>
 #include <netgraph/ng_socketvar.h>
 
-#include <nlist.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>

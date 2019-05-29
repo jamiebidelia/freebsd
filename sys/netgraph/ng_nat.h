@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright 2005, Gleb Smirnoff <glebius@FreeBSD.org>
  * All rights reserved.
  *
@@ -203,6 +205,8 @@ enum {
 	NGM_NAT_SET_IPADDR = 1,
 	NGM_NAT_SET_MODE,
 	NGM_NAT_SET_TARGET,
+	NGM_NAT_SET_DLT,
+	NGM_NAT_GET_DLT,
 	NGM_NAT_REDIRECT_PORT,
 	NGM_NAT_REDIRECT_ADDR,
 	NGM_NAT_REDIRECT_PROTO,

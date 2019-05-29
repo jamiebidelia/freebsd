@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2012 Juli Mallett <jmallett@FreeBSD.org>
  * All rights reserved.
  *
@@ -30,8 +32,6 @@
  * Based on nwhitehorn's COMPAT_FREEBSD32 support code for PowerPC64.
  */
 
-#include "opt_compat.h"
-
 #define __ELF_WORD_SIZE 32
 
 #include <sys/types.h>
@@ -41,6 +41,7 @@
 #include <sys/sysent.h>
 #include <sys/exec.h>
 #include <sys/imgact.h>
+#include <sys/ktr.h>
 #include <sys/malloc.h>
 #include <sys/proc.h>
 #include <sys/namei.h>
@@ -61,6 +62,7 @@
 #include <machine/reg.h>
 #include <machine/sigframe.h>
 #include <machine/sysarch.h>
+#include <machine/tls.h>
 
 #include <compat/freebsd32/freebsd32_signal.h>
 #include <compat/freebsd32/freebsd32_util.h>
@@ -76,9 +78,6 @@ extern const char *freebsd32_syscallnames[];
 struct sysentvec elf32_freebsd_sysvec = {
 	.sv_size	= SYS_MAXSYSCALL,
 	.sv_table	= freebsd32_sysent,
-	.sv_mask	= 0,
-	.sv_sigsize	= 0,
-	.sv_sigtbl	= NULL,
 	.sv_errsize	= 0,
 	.sv_errtbl	= NULL,
 	.sv_transtrap	= NULL,
@@ -86,12 +85,10 @@ struct sysentvec elf32_freebsd_sysvec = {
 	.sv_sendsig	= freebsd32_sendsig,
 	.sv_sigcode	= sigcode32,
 	.sv_szsigcode	= &szsigcode32,
-	.sv_prepsyscall	= NULL,
 	.sv_name	= "FreeBSD ELF32",
 	.sv_coredump	= __elfN(coredump),
 	.sv_imgact_try	= NULL,
 	.sv_minsigstksz	= MINSIGSTKSZ,
-	.sv_pagesize	= PAGE_SIZE,
 	.sv_minuser	= VM_MIN_ADDRESS,
 	.sv_maxuser	= ((vm_offset_t)0x80000000),
 	.sv_usrstack	= FREEBSD32_USRSTACK,
@@ -107,6 +104,7 @@ struct sysentvec elf32_freebsd_sysvec = {
 	.sv_syscallnames = freebsd32_syscallnames,
 	.sv_schedtail	= NULL,
 	.sv_thread_detach = NULL,
+	.sv_trap	= NULL,
 };
 INIT_SYSENTVEC(elf32_sysvec, &elf32_freebsd_sysvec);
 
@@ -118,7 +116,8 @@ static Elf32_Brandinfo freebsd_brand_info = {
 	.interp_path	= "/libexec/ld-elf.so.1",
 	.sysvec		= &elf32_freebsd_sysvec,
 	.interp_newpath	= "/libexec/ld-elf32.so.1",
-	.flags		= 0
+	.brand_note	= &elf32_freebsd_brandnote,
+	.flags		= BI_CAN_EXEC_DYN | BI_BRAND_NOTE
 };
 
 SYSINIT(elf32, SI_SUB_EXEC, SI_ORDER_FIRST,
@@ -140,6 +139,8 @@ freebsd32_exec_setregs(struct thread *td, struct image_params *imgp, u_long stac
 	 * Clear extended address space bit for userland.
 	 */
 	td->td_frame->sr &= ~MIPS_SR_UX;
+
+	td->td_md.md_tls_tcb_offset = TLS_TP_OFFSET + TLS_TCB_SIZE32;
 }
 
 int
@@ -292,6 +293,7 @@ freebsd32_getcontext(struct thread *td, struct freebsd32_getcontext_args *uap)
 	if (uap->ucp == NULL)
 		ret = EINVAL;
 	else {
+		bzero(&uc, sizeof(uc));
 		get_mcontext32(td, &uc.uc_mcontext, GET_MC_CLEAR_RET);
 		PROC_LOCK(td->td_proc);
 		uc.uc_sigmask = td->td_sigmask;
@@ -331,6 +333,7 @@ freebsd32_swapcontext(struct thread *td, struct freebsd32_swapcontext_args *uap)
 	if (uap->oucp == NULL || uap->ucp == NULL)
 		ret = EINVAL;
 	else {
+		bzero(&uc, sizeof(uc));
 		get_mcontext32(td, &uc.uc_mcontext, GET_MC_CLEAR_RET);
 		PROC_LOCK(td->td_proc);
 		uc.uc_sigmask = td->td_sigmask;
@@ -412,7 +415,7 @@ freebsd32_sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 	/* Allocate and validate space for the signal handler context. */
 	if ((td->td_pflags & TDP_ALTSTACK) != 0 && !oonstack &&
 	    SIGISMEMBER(psp->ps_sigonstack, sig)) {
-		sfp = (struct sigframe32 *)((vm_offset_t)(td->td_sigstk.ss_sp +
+		sfp = (struct sigframe32 *)(((uintptr_t)td->td_sigstk.ss_sp +
 		    td->td_sigstk.ss_size - sizeof(struct sigframe32))
 		    & ~(sizeof(__int64_t) - 1));
 	} else

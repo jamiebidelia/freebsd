@@ -24,7 +24,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd October 22, 2013
+.Dd November 2, 2018
 .Dt AHCI 4
 .Os
 .Sh NAME
@@ -141,7 +141,8 @@ API or emulated
 .Xr ses 4
 device for localization and status reporting purposes.
 Supporting AHCI controllers may transmit that information to the backplane
-controllers via SGPIO interface. Backplane controllers interpret received
+controllers via SGPIO interface.
+Backplane controllers interpret received
 statuses in some way (IBPI standard) to report them using present indicators.
 .Sh HARDWARE
 The
@@ -160,6 +161,14 @@ activity LED device nodes
 fault LED device nodes
 .It Pa /dev/led/ahci*.*.locate
 locate LED device nodes
+.El
+.Sh SYSCTL
+.Bl -tag
+.It Pa dev.ahcich.X.disable_phy
+Set to 1 to disable the phy for the drive on channel X.
+Set to 0 to enable the phy.
+Useful for turning off troublemakers.
+Also useful for debugging when you need the ada drive to come and go.
 .El
 .Sh SEE ALSO
 .Xr ada 4 ,

@@ -66,7 +66,6 @@
 #define	RSS_HASHTYPE_RSS_IPV6_EX	(1 << 5)	/* IPv6 2-tuple + ext hdrs */
 #define	RSS_HASHTYPE_RSS_TCP_IPV6_EX	(1 << 6)	/* TCPv6 4-tiple + ext hdrs */
 #define	RSS_HASHTYPE_RSS_UDP_IPV4	(1 << 7)	/* IPv4 UDP 4-tuple */
-#define	RSS_HASHTYPE_RSS_UDP_IPV4_EX	(1 << 8)	/* IPv4 UDP 4-tuple + ext hdrs */
 #define	RSS_HASHTYPE_RSS_UDP_IPV6	(1 << 9)	/* IPv6 UDP 4-tuple */
 #define	RSS_HASHTYPE_RSS_UDP_IPV6_EX	(1 << 10)	/* IPv6 UDP 4-tuple + ext hdrs */
 
@@ -91,6 +90,21 @@
  */
 #define	RSS_HASH_PKT_INGRESS	0
 #define	RSS_HASH_PKT_EGRESS	1
+
+/*
+ * Rate limited debugging routines.
+ */
+#define	RSS_DEBUG(format, ...)	do {					\
+	if (rss_debug) {						\
+		static struct timeval lastfail;				\
+		static int curfail;					\
+		if (ppsratecheck(&lastfail, &curfail, 5))		\
+			printf("RSS (%s:%u): " format, __func__, __LINE__,\
+			    ##__VA_ARGS__);				\
+	}								\
+} while (0)
+
+extern int	rss_debug;
 
 /*
  * Device driver interfaces to query RSS properties that must be programmed

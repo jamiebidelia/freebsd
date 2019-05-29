@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1998 John Birrell <jb@cimlogic.com.au>.
  * All rights reserved.
  *
@@ -42,7 +44,10 @@
  * or more threads. It is used to avoid calling locking functions
  * when they are not required.
  */
+#ifndef __LIBC_ISTHREADED_DECLARED
+#define __LIBC_ISTHREADED_DECLARED
 extern int	__isthreaded;
+#endif
 
 /*
  * Elf_Auxinfo *__elf_aux_vector, the pointer to the ELF aux vector
@@ -168,6 +173,9 @@ typedef enum {
 	PJT_CLEANUP_PUSH_IMP,
 	PJT_CANCEL_ENTER,
 	PJT_CANCEL_LEAVE,
+	PJT_MUTEX_CONSISTENT,
+	PJT_MUTEXATTR_GETROBUST,
+	PJT_MUTEXATTR_SETROBUST,
 	PJT_MAX
 } pjt_index_t;
 
@@ -224,6 +232,10 @@ enum {
 	INTERPOS_kevent,
 	INTERPOS_wait6,
 	INTERPOS_ppoll,
+	INTERPOS_map_stacks_exec,
+	INTERPOS_fdatasync,
+	INTERPOS_clock_nanosleep,
+	INTERPOS_distribute_static_tls,
 	INTERPOS_MAX
 };
 
@@ -263,6 +275,14 @@ extern const char *__progname;
 void _malloc_thread_cleanup(void);
 
 /*
+ * This function is used by the threading libraries to notify libc that a
+ * thread is exiting, so its thread-local dtors should be called.
+ */
+void __cxa_thread_call_dtors(void);
+int __cxa_thread_atexit_hidden(void (*dtor_func)(void *), void *obj,
+    void *dso_symbol) __hidden;
+
+/*
  * These functions are used by the threading libraries in order to protect
  * malloc across fork().
  */
@@ -293,6 +313,8 @@ struct pollfd;
 struct rusage;
 struct sigaction;
 struct sockaddr;
+struct stat;
+struct statfs;
 struct timespec;
 struct timeval;
 struct timezone;
@@ -305,12 +327,20 @@ int		__sys_aio_suspend(const struct aiocb * const[], int,
 int		__sys_accept(int, struct sockaddr *, __socklen_t *);
 int		__sys_accept4(int, struct sockaddr *, __socklen_t *, int);
 int		__sys_clock_gettime(__clockid_t, struct timespec *ts);
+int		__sys_clock_nanosleep(__clockid_t, int,
+		    const struct timespec *, struct timespec *);
 int		__sys_close(int);
 int		__sys_connect(int, const struct sockaddr *, __socklen_t);
 int		__sys_fcntl(int, int, ...);
+int		__sys_fdatasync(int);
+int		__sys_fstat(int fd, struct stat *);
+int		__sys_fstatfs(int fd, struct statfs *);
+int		__sys_fstatat(int, const char *, struct stat *, int);
 int		__sys_fsync(int);
 __pid_t		__sys_fork(void);
 int		__sys_ftruncate(int, __off_t);
+__ssize_t	__sys_getdirentries(int, char *, __size_t, __off_t *);
+int		__sys_getfsstat(struct statfs *, long, int);
 int		__sys_gettimeofday(struct timeval *, struct timezone *);
 int		__sys_kevent(int, const struct kevent *, int, struct kevent *,
 		    int, const struct timespec *);
@@ -323,6 +353,7 @@ int		__sys_openat(int, const char *, int, ...);
 int		__sys_pselect(int, struct fd_set *, struct fd_set *,
 		    struct fd_set *, const struct timespec *,
 		    const __sigset_t *);
+int		__sys_ptrace(int, __pid_t, char *, int);
 int		__sys_poll(struct pollfd *, unsigned, int);
 int		__sys_ppoll(struct pollfd *, unsigned, const struct timespec *,
 		    const __sigset_t *);
@@ -348,6 +379,7 @@ int		__sys_sigtimedwait(const __sigset_t *, struct __siginfo *,
 		    const struct timespec *);
 int		__sys_sigwait(const __sigset_t *, int *);
 int		__sys_sigwaitinfo(const __sigset_t *, struct __siginfo *);
+int		__sys_statfs(const char *, struct statfs *);
 int		__sys_swapcontext(struct __ucontext *,
 		    const struct __ucontext *);
 int		__sys_thr_kill(long, int);
@@ -359,6 +391,11 @@ __pid_t		__sys_wait6(enum idtype, __id_t, int *, int,
 __ssize_t	__sys_write(int, const void *, __size_t);
 __ssize_t	__sys_writev(int, const struct iovec *, int);
 
+int		__libc_sigaction(int, const struct sigaction *,
+		    struct sigaction *) __hidden;
+int		__libc_sigprocmask(int, const __sigset_t *, __sigset_t *)
+		    __hidden;
+int		__libc_sigsuspend(const __sigset_t *) __hidden;
 int		__libc_sigwait(const __sigset_t * __restrict,
 		    int * restrict sig);
 int		__libc_system(const char *);
@@ -376,8 +413,18 @@ int _elf_aux_info(int aux, void *buf, int buflen);
 struct dl_phdr_info;
 int __elf_phdr_match_addr(struct dl_phdr_info *, void *);
 void __init_elf_aux_vector(void);
+void __libc_map_stacks_exec(void);
+void __libc_distribute_static_tls(__size_t, void *, __size_t, __size_t);
+__uintptr_t __libc_static_tls_base(__size_t);
 
 void	_pthread_cancel_enter(int);
 void	_pthread_cancel_leave(int);
+
+struct _pthread_cleanup_info;
+void	___pthread_cleanup_push_imp(void (*)(void *), void *,
+	    struct _pthread_cleanup_info *);
+void	___pthread_cleanup_pop_imp(int);
+
+void __throw_constraint_handler_s(const char * restrict msg, int error);
 
 #endif /* _LIBC_PRIVATE_H_ */

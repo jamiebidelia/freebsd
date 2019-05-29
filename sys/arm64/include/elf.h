@@ -36,7 +36,10 @@
 #include <sys/elf32.h>	/* Definitions common to all 32 bit architectures. */
 #include <sys/elf64.h>	/* Definitions common to all 64 bit architectures. */
 
+#ifndef __ELF_WORD_SIZE
 #define	__ELF_WORD_SIZE	64	/* Used by <sys/elf_generic.h> */
+#endif
+
 #include <sys/elf_generic.h>
 
 /*
@@ -65,40 +68,23 @@ __ElfType(Auxinfo);
 
 #define	ELF_MACHINE_OK(x) ((x) == (ELF_ARCH))
 
-/* Values for a_type. */
-#define	AT_NULL		0	/* Terminates the vector. */
-#define	AT_IGNORE	1	/* Ignored entry. */
-#define	AT_EXECFD	2	/* File descriptor of program to load. */
-#define	AT_PHDR		3	/* Program header of program already loaded. */
-#define	AT_PHENT	4	/* Size of each program header entry. */
-#define	AT_PHNUM	5	/* Number of program header entries. */
-#define	AT_PAGESZ	6	/* Page size in bytes. */
-#define	AT_BASE		7	/* Interpreter's base address. */
-#define	AT_FLAGS	8	/* Flags (unused). */
-#define	AT_ENTRY	9	/* Where interpreter should transfer control. */
-#define	AT_NOTELF	10	/* Program is not ELF ?? */
-#define	AT_UID		11	/* Real uid. */
-#define	AT_EUID		12	/* Effective uid. */
-#define	AT_GID		13	/* Real gid. */
-#define	AT_EGID		14	/* Effective gid. */
-#define	AT_EXECPATH	15	/* Path to the executable. */
-#define	AT_CANARY	16	/* Canary for SSP */
-#define	AT_CANARYLEN	17	/* Length of the canary. */
-#define	AT_OSRELDATE	18	/* OSRELDATE. */
-#define	AT_NCPUS	19	/* Number of CPUs. */
-#define	AT_PAGESIZES	20	/* Pagesizes. */
-#define	AT_PAGESIZESLEN	21	/* Number of pagesizes. */
-#define	AT_TIMEKEEP	22	/* Pointer to timehands. */
-#define	AT_STACKPROT	23	/* Initial stack protection. */
-
-#define	AT_COUNT	24	/* Count of defined aux entry types. */
-
 /* Define "machine" characteristics */
+#if __ELF_WORD_SIZE == 64
 #define	ELF_TARG_CLASS	ELFCLASS64
 #define	ELF_TARG_DATA	ELFDATA2LSB
 #define	ELF_TARG_MACH	EM_AARCH64
 #define	ELF_TARG_VER	1
+#else
+#define	ELF_TARG_CLASS	ELFCLASS32
+#define	ELF_TARG_DATA	ELFDATA2LSB
+#define	ELF_TARG_MACH	EM_ARM
+#define	ELF_TARG_VER	1
+#endif
 
+#if __ELF_WORD_SIZE == 32
+#define	ET_DYN_LOAD_ADDR 0x12000
+#else
 #define	ET_DYN_LOAD_ADDR 0x100000
+#endif
 
 #endif /* !_MACHINE_ELF_H_ */

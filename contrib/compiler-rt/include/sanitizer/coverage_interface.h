@@ -19,25 +19,15 @@
 extern "C" {
 #endif
 
-  // Initialize coverage.
-  void __sanitizer_cov_init();
   // Record and dump coverage info.
-  void __sanitizer_cov_dump();
-  // Open <name>.sancov.packed in the coverage directory and return the file
-  // descriptor. Returns -1 on failure, or if coverage dumping is disabled.
-  // This is intended for use by sandboxing code.
-  intptr_t __sanitizer_maybe_open_cov_file(const char *name);
-  // Get the number of total unique covered entities (blocks, edges, calls).
-  // This can be useful for coverage-directed in-process fuzzers.
-  uintptr_t __sanitizer_get_total_unique_coverage();
+  void __sanitizer_cov_dump(void);
 
-  // Reset the basic-block (edge) coverage to the initial state.
-  // Useful for in-process fuzzing to start collecting coverage from scratch.
-  // Experimental, will likely not work for multi-threaded process.
-  void __sanitizer_reset_coverage();
-  // Set *data to the array of covered PCs and return the size of that array.
-  // Some of the entries in *data will be zero.
-  uintptr_t __sanitizer_get_coverage_guards(uintptr_t **data);
+  // Clear collected coverage info.
+  void __sanitizer_cov_reset(void);
+
+  // Dump collected coverage info. Sorts pcs by module into individual .sancov
+  // files.
+  void __sanitizer_dump_coverage(const uintptr_t *pcs, uintptr_t len);
 
 #ifdef __cplusplus
 }  // extern "C"

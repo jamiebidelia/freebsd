@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) 1994 John S. Dyson
  * All rights reserved.
  *
@@ -27,6 +29,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/conf.h>
 #include <sys/malloc.h>
 #include <sys/proc.h>
+#include <sys/racct.h>
 #include <sys/uio.h>
 #include <geom/geom.h>
 
@@ -38,6 +41,7 @@ __FBSDID("$FreeBSD$");
 int
 physio(struct cdev *dev, struct uio *uio, int ioflag)
 {
+	struct cdevsw *csw;
 	struct buf *pbuf;
 	struct bio *bp;
 	struct vm_page **pages;
@@ -45,6 +49,13 @@ physio(struct cdev *dev, struct uio *uio, int ioflag)
 	u_int iolen, poff;
 	int error, i, npages, maxpages;
 	vm_prot_t prot;
+
+	csw = dev->si_devsw;
+	npages = 0;
+	sa = NULL;
+	/* check if character device is being destroyed */
+	if (csw == NULL)
+		return (ENXIO);
 
 	/* XXX: sanity check */
 	if(dev->si_iosize_max < PAGE_SIZE) {
@@ -93,7 +104,7 @@ physio(struct cdev *dev, struct uio *uio, int ioflag)
 		maxpages = btoc(MIN(uio->uio_resid, MAXPHYS)) + 1;
 		pages = malloc(sizeof(*pages) * maxpages, M_DEVBUF, M_WAITOK);
 	} else {
-		pbuf = getpbuf(NULL);
+		pbuf = uma_zalloc(pbuf_zone, M_WAITOK);
 		sa = pbuf->b_data;
 		maxpages = btoc(MAXPHYS);
 		pages = pbuf->b_pages;
@@ -103,8 +114,24 @@ physio(struct cdev *dev, struct uio *uio, int ioflag)
 		prot |= VM_PROT_WRITE;	/* Less backwards than it looks */
 	error = 0;
 	for (i = 0; i < uio->uio_iovcnt; i++) {
+#ifdef RACCT
+		if (racct_enable) {
+			PROC_LOCK(curproc);
+			if (uio->uio_rw == UIO_READ) {
+				racct_add_force(curproc, RACCT_READBPS,
+				    uio->uio_iov[i].iov_len);
+				racct_add_force(curproc, RACCT_READIOPS, 1);
+			} else {
+				racct_add_force(curproc, RACCT_WRITEBPS,
+				    uio->uio_iov[i].iov_len);
+				racct_add_force(curproc, RACCT_WRITEIOPS, 1);
+			}
+			PROC_UNLOCK(curproc);
+		}
+#endif /* RACCT */
+
 		while (uio->uio_iov[i].iov_len) {
-			bzero(bp, sizeof(*bp));
+			g_reset_bio(bp);
 			if (uio->uio_rw == UIO_READ) {
 				bp->bio_cmd = BIO_READ;
 				curthread->td_ru.ru_inblock++;
@@ -152,7 +179,7 @@ physio(struct cdev *dev, struct uio *uio, int ioflag)
 					error = EFAULT;
 					goto doerror;
 				}
-				if (pbuf) {
+				if (pbuf && sa) {
 					pmap_qenter((vm_offset_t)sa,
 					    pages, npages);
 					bp->bio_data = sa + poff;
@@ -165,7 +192,7 @@ physio(struct cdev *dev, struct uio *uio, int ioflag)
 				}
 			}
 
-			dev->si_devsw->d_strategy(bp);
+			csw->d_strategy(bp);
 			if (uio->uio_rw == UIO_READ)
 				biowait(bp, "physrd");
 			else
@@ -193,7 +220,7 @@ physio(struct cdev *dev, struct uio *uio, int ioflag)
 	}
 doerror:
 	if (pbuf)
-		relpbuf(pbuf, NULL);
+		uma_zfree(pbuf_zone, pbuf);
 	else if (pages)
 		free(pages, M_DEVBUF);
 	g_destroy_bio(bp);

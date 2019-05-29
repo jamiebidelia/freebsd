@@ -1,6 +1,5 @@
 /*-
  * Copyright (c) 2014 John Baldwin <jhb@FreeBSD.org>
- * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -65,19 +64,27 @@ static int	devctl_table_handler(struct devctl_command **start,
 
 SET_DECLARE(DEVCTL_DATASET(top), struct devctl_command);
 
+DEVCTL_TABLE(top, clear);
 DEVCTL_TABLE(top, set);
 
 static void
 usage(void)
 {
-	fprintf(stderr, "%s\n%s\n%s\n%s\n%s\n%s\n%s\n",
-	    "usage: devctl attach device",
-	    "       devctl detach [-f] device",
-	    "       devctl disable [-f] device",
-	    "       devctl enable device",
-	    "       devctl suspend device",
-	    "       devctl resume device",
-	    "       devctl set driver [-f] device driver");
+	fprintf(stderr,
+	    "usage: devctl attach device\n"
+	    "       devctl detach [-f] device\n"
+	    "       devctl disable [-f] device\n"
+	    "       devctl enable device\n"
+	    "       devctl suspend device\n"
+	    "       devctl resume device\n"
+	    "       devctl set driver [-f] device driver\n"
+	    "       devctl clear driver [-f] device\n"
+	    "       devctl rescan device\n"
+	    "       devctl delete [-f] device\n"
+	    "       devctl freeze\n"
+	    "       devctl thaw\n"
+	    "       devctl reset [-d] device\n"
+	    );
 	exit(1);
 }
 
@@ -258,6 +265,160 @@ set_driver(int ac, char **av)
 	return (0);
 }
 DEVCTL_COMMAND(set, driver, set_driver);
+
+static void
+clear_driver_usage(void)
+{
+
+	fprintf(stderr, "usage: devctl clear driver [-f] device\n");
+	exit(1);
+}
+
+static int
+clear_driver(int ac, char **av)
+{
+	bool force;
+	int ch;
+
+	force = false;
+	while ((ch = getopt(ac, av, "f")) != -1)
+		switch (ch) {
+		case 'f':
+			force = true;
+			break;
+		default:
+			clear_driver_usage();
+		}
+	ac -= optind;
+	av += optind;
+
+	if (ac != 1)
+		clear_driver_usage();
+	if (devctl_clear_driver(av[0], force) < 0)
+		err(1, "Failed to clear %s driver", av[0]);
+	return (0);
+}
+DEVCTL_COMMAND(clear, driver, clear_driver);
+
+static int
+rescan(int ac, char **av)
+{
+
+	if (ac != 2)
+		usage();
+	if (devctl_rescan(av[1]) < 0)
+		err(1, "Failed to rescan %s", av[1]);
+	return (0);
+}
+DEVCTL_COMMAND(top, rescan, rescan);
+
+static void
+delete_usage(void)
+{
+
+	fprintf(stderr, "usage: devctl delete [-f] device\n");
+	exit(1);
+}
+
+static int
+delete(int ac, char **av)
+{
+	bool force;
+	int ch;
+
+	force = false;
+	while ((ch = getopt(ac, av, "f")) != -1)
+		switch (ch) {
+		case 'f':
+			force = true;
+			break;
+		default:
+			delete_usage();
+		}
+	ac -= optind;
+	av += optind;
+
+	if (ac != 1)
+		delete_usage();
+	if (devctl_delete(av[0], force) < 0)
+		err(1, "Failed to delete %s", av[0]);
+	return (0);
+}
+DEVCTL_COMMAND(top, delete, delete);
+
+static void
+freeze_usage(void)
+{
+
+	fprintf(stderr, "usage: devctl freeze\n");
+	exit(1);
+}
+
+static int
+freeze(int ac, char **av __unused)
+{
+
+	if (ac != 1)
+		freeze_usage();
+	if (devctl_freeze() < 0)
+		err(1, "Failed to freeze probe/attach");
+	return (0);
+}
+DEVCTL_COMMAND(top, freeze, freeze);
+
+static void
+thaw_usage(void)
+{
+
+	fprintf(stderr, "usage: devctl thaw\n");
+	exit(1);
+}
+
+static int
+thaw(int ac, char **av __unused)
+{
+
+	if (ac != 1)
+		thaw_usage();
+	if (devctl_thaw() < 0)
+		err(1, "Failed to thaw probe/attach");
+	return (0);
+}
+DEVCTL_COMMAND(top, thaw, thaw);
+
+static void
+reset_usage(void)
+{
+
+	fprintf(stderr, "usage: devctl reset [-d] device\n");
+	exit(1);
+}
+
+static int
+reset(int ac, char **av)
+{
+	bool detach_drv;
+	int ch;
+
+	detach_drv = false;
+	while ((ch = getopt(ac, av, "d")) != -1)
+		switch (ch) {
+		case 'd':
+			detach_drv = true;
+			break;
+		default:
+			reset_usage();
+		}
+	ac -= optind;
+	av += optind;
+
+	if (ac != 1)
+		reset_usage();
+	if (devctl_reset(av[0], detach_drv) < 0)
+		err(1, "Failed to reset %s", av[0]);
+	return (0);
+}
+DEVCTL_COMMAND(top, reset, reset);
 
 int
 main(int ac, char *av[])

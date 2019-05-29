@@ -1,5 +1,7 @@
 /* $FreeBSD$ */
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2010 Hans Petter Selasky. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -98,6 +100,7 @@ static int xhcidebug;
 static int xhciroute;
 static int xhcipolling;
 static int xhcidma32;
+static int xhcictlstep;
 
 SYSCTL_INT(_hw_usb_xhci, OID_AUTO, debug, CTLFLAG_RWTUN,
     &xhcidebug, 0, "Debug level");
@@ -107,9 +110,12 @@ SYSCTL_INT(_hw_usb_xhci, OID_AUTO, use_polling, CTLFLAG_RWTUN,
     &xhcipolling, 0, "Set to enable software interrupt polling for the XHCI controller");
 SYSCTL_INT(_hw_usb_xhci, OID_AUTO, dma32, CTLFLAG_RWTUN,
     &xhcidma32, 0, "Set to only use 32-bit DMA for the XHCI controller");
+SYSCTL_INT(_hw_usb_xhci, OID_AUTO, ctlstep, CTLFLAG_RWTUN,
+    &xhcictlstep, 0, "Set to enable control endpoint status stage stepping");
 #else
 #define	xhciroute 0
 #define	xhcidma32 0
+#define	xhcictlstep 0
 #endif
 
 #define	XHCI_INTR_ENDPT 1
@@ -210,7 +216,7 @@ static void
 xhci_iterate_hw_softc(struct usb_bus *bus, usb_bus_mem_sub_cb_t *cb)
 {
 	struct xhci_softc *sc = XHCI_BUS2SC(bus);
-	uint8_t i;
+	uint16_t i;
 
 	cb(bus, &sc->sc_hw.root_pc, &sc->sc_hw.root_pg,
 	   sizeof(struct xhci_hw_root), XHCI_PAGE_SIZE);
@@ -218,7 +224,7 @@ xhci_iterate_hw_softc(struct usb_bus *bus, usb_bus_mem_sub_cb_t *cb)
 	cb(bus, &sc->sc_hw.ctx_pc, &sc->sc_hw.ctx_pg,
 	   sizeof(struct xhci_dev_ctx_addr), XHCI_PAGE_SIZE);
 
-	for (i = 0; i != XHCI_MAX_SCRATCHPADS; i++) {
+	for (i = 0; i != sc->sc_noscratch; i++) {
 		cb(bus, &sc->sc_hw.scratch_pc[i], &sc->sc_hw.scratch_pg[i],
 		    XHCI_PAGE_SIZE, XHCI_PAGE_SIZE);
 	}
@@ -347,6 +353,7 @@ xhci_start_controller(struct xhci_softc *sc)
 	struct usb_page_search buf_res;
 	struct xhci_hw_root *phwr;
 	struct xhci_dev_ctx_addr *pdctxa;
+	usb_error_t err;
 	uint64_t addr;
 	uint32_t temp;
 	uint16_t i;
@@ -358,70 +365,15 @@ xhci_start_controller(struct xhci_softc *sc)
 	sc->sc_command_ccs = 1;
 	sc->sc_command_idx = 0;
 
-	/* Reset controller */
-	XWRITE4(sc, oper, XHCI_USBCMD, XHCI_CMD_HCRST);
-
-	for (i = 0; i != 100; i++) {
-		usb_pause_mtx(NULL, hz / 100);
-		temp = (XREAD4(sc, oper, XHCI_USBCMD) & XHCI_CMD_HCRST) |
-		    (XREAD4(sc, oper, XHCI_USBSTS) & XHCI_STS_CNR);
-		if (!temp)
-			break;
-	}
-
-	if (temp) {
-		device_printf(sc->sc_bus.parent, "Controller "
-		    "reset timeout.\n");
-		return (USB_ERR_IOERROR);
-	}
-
-	if (!(XREAD4(sc, oper, XHCI_PAGESIZE) & XHCI_PAGESIZE_4K)) {
-		device_printf(sc->sc_bus.parent, "Controller does "
-		    "not support 4K page size.\n");
-		return (USB_ERR_IOERROR);
-	}
-
-	temp = XREAD4(sc, capa, XHCI_HCSPARAMS1);
-
-	i = XHCI_HCS1_N_PORTS(temp);
-
-	if (i == 0) {
-		device_printf(sc->sc_bus.parent, "Invalid number "
-		    "of ports: %u\n", i);
-		return (USB_ERR_IOERROR);
-	}
-
-	sc->sc_noport = i;
-	sc->sc_noslot = XHCI_HCS1_DEVSLOT_MAX(temp);
-
-	if (sc->sc_noslot > XHCI_MAX_DEVICES)
-		sc->sc_noslot = XHCI_MAX_DEVICES;
+	err = xhci_reset_controller(sc);
+	if (err)
+		return (err);
 
 	/* set up number of device slots */
-
 	DPRINTF("CONFIG=0x%08x -> 0x%08x\n",
 	    XREAD4(sc, oper, XHCI_CONFIG), sc->sc_noslot);
 
 	XWRITE4(sc, oper, XHCI_CONFIG, sc->sc_noslot);
-
-	DPRINTF("Max slots: %u\n", sc->sc_noslot);
-
-	temp = XREAD4(sc, capa, XHCI_HCSPARAMS2);
-
-	sc->sc_noscratch = XHCI_HCS2_SPB_MAX(temp);
-
-	if (sc->sc_noscratch > XHCI_MAX_SCRATCHPADS) {
-		device_printf(sc->sc_bus.parent, "XHCI request "
-		    "too many scratchpads\n");
-		return (USB_ERR_NOMEM);
-	}
-
-	DPRINTF("Max scratch: %u\n", sc->sc_noscratch);
-
-	temp = XREAD4(sc, capa, XHCI_HCSPARAMS3);
-
-	sc->sc_exit_lat_max = XHCI_HCS3_U1_DEL(temp) +
-	    XHCI_HCS3_U2_DEL(temp) + 250 /* us */;
 
 	temp = XREAD4(sc, oper, XHCI_USBSTS);
 
@@ -454,29 +406,13 @@ xhci_start_controller(struct xhci_softc *sc)
 	XWRITE4(sc, oper, XHCI_DCBAAP_LO, (uint32_t)addr);
 	XWRITE4(sc, oper, XHCI_DCBAAP_HI, (uint32_t)(addr >> 32));
 
-	/* Setup event table size */
-
-	temp = XREAD4(sc, capa, XHCI_HCSPARAMS2);
-
-	DPRINTF("HCS2=0x%08x\n", temp);
-
-	temp = XHCI_HCS2_ERST_MAX(temp);
-	temp = 1U << temp;
-	if (temp > XHCI_MAX_RSEG)
-		temp = XHCI_MAX_RSEG;
-
-	sc->sc_erst_max = temp;
-
+	/* set up event table size */
 	DPRINTF("ERSTSZ=0x%08x -> 0x%08x\n",
-	    XREAD4(sc, runt, XHCI_ERSTSZ(0)), temp);
+	    XREAD4(sc, runt, XHCI_ERSTSZ(0)), sc->sc_erst_max);
 
-	XWRITE4(sc, runt, XHCI_ERSTSZ(0), XHCI_ERSTS_SET(temp));
+	XWRITE4(sc, runt, XHCI_ERSTSZ(0), XHCI_ERSTS_SET(sc->sc_erst_max));
 
-	/* Check if we should use the default IMOD value */
-	if (sc->sc_imod_default == 0)
-		sc->sc_imod_default = XHCI_IMOD_DEFAULT;
-
-	/* Setup interrupt rate */
+	/* set up interrupt rate */
 	XWRITE4(sc, runt, XHCI_IMOD(0), sc->sc_imod_default);
 
 	usbd_get_page(&sc->sc_hw.root_pc, 0, &buf_res);
@@ -503,8 +439,7 @@ xhci_start_controller(struct xhci_softc *sc)
 	XWRITE4(sc, runt, XHCI_ERSTBA_LO(0), (uint32_t)addr);
 	XWRITE4(sc, runt, XHCI_ERSTBA_HI(0), (uint32_t)(addr >> 32));
 
-	/* Setup interrupter registers */
-
+	/* set up interrupter registers */
 	temp = XREAD4(sc, runt, XHCI_IMAN(0));
 	temp |= XHCI_IMAN_INTR_ENA;
 	XWRITE4(sc, runt, XHCI_IMAN(0), temp);
@@ -580,6 +515,33 @@ xhci_halt_controller(struct xhci_softc *sc)
 }
 
 usb_error_t
+xhci_reset_controller(struct xhci_softc *sc)
+{
+	uint32_t temp = 0;
+	uint16_t i;
+
+	DPRINTF("\n");
+
+	/* Reset controller */
+	XWRITE4(sc, oper, XHCI_USBCMD, XHCI_CMD_HCRST);
+
+	for (i = 0; i != 100; i++) {
+		usb_pause_mtx(NULL, hz / 100);
+		temp = (XREAD4(sc, oper, XHCI_USBCMD) & XHCI_CMD_HCRST) |
+		    (XREAD4(sc, oper, XHCI_USBSTS) & XHCI_STS_CNR);
+		if (!temp)
+			break;
+	}
+
+	if (temp) {
+		device_printf(sc->sc_bus.parent, "Controller "
+		    "reset timeout.\n");
+		return (USB_ERR_IOERROR);
+	}
+	return (0);
+}
+
+usb_error_t
 xhci_init(struct xhci_softc *sc, device_t self, uint8_t dma32)
 {
 	uint32_t temp;
@@ -615,6 +577,12 @@ xhci_init(struct xhci_softc *sc, device_t self, uint8_t dma32)
 
 	DPRINTF("xHCI version = 0x%04x\n", XREAD2(sc, capa, XHCI_HCIVERSION));
 
+	if (!(XREAD4(sc, oper, XHCI_PAGESIZE) & XHCI_PAGESIZE_4K)) {
+		device_printf(sc->sc_bus.parent, "Controller does "
+		    "not support 4K page size.\n");
+		return (ENXIO);
+	}
+
 	temp = XREAD4(sc, capa, XHCI_HCSPARAMS0);
 
 	DPRINTF("HCS0 = 0x%08x\n", temp);
@@ -632,6 +600,55 @@ xhci_init(struct xhci_softc *sc, device_t self, uint8_t dma32)
 
 	device_printf(self, "%d bytes context size, %d-bit DMA\n",
 	    sc->sc_ctx_is_64_byte ? 64 : 32, (int)sc->sc_bus.dma_bits);
+
+	temp = XREAD4(sc, capa, XHCI_HCSPARAMS1);
+
+	/* get number of device slots */
+	sc->sc_noport = XHCI_HCS1_N_PORTS(temp);
+
+	if (sc->sc_noport == 0) {
+		device_printf(sc->sc_bus.parent, "Invalid number "
+		    "of ports: %u\n", sc->sc_noport);
+		return (ENXIO);
+	}
+
+	sc->sc_noport = sc->sc_noport;
+	sc->sc_noslot = XHCI_HCS1_DEVSLOT_MAX(temp);
+
+	DPRINTF("Max slots: %u\n", sc->sc_noslot);
+
+	if (sc->sc_noslot > XHCI_MAX_DEVICES)
+		sc->sc_noslot = XHCI_MAX_DEVICES;
+
+	temp = XREAD4(sc, capa, XHCI_HCSPARAMS2);
+
+	DPRINTF("HCS2=0x%08x\n", temp);
+
+	/* get number of scratchpads */
+	sc->sc_noscratch = XHCI_HCS2_SPB_MAX(temp);
+
+	if (sc->sc_noscratch > XHCI_MAX_SCRATCHPADS) {
+		device_printf(sc->sc_bus.parent, "XHCI request "
+		    "too many scratchpads\n");
+		return (ENOMEM);
+	}
+
+	DPRINTF("Max scratch: %u\n", sc->sc_noscratch);
+
+	/* get event table size */
+	sc->sc_erst_max = 1U << XHCI_HCS2_ERST_MAX(temp);
+	if (sc->sc_erst_max > XHCI_MAX_RSEG)
+		sc->sc_erst_max = XHCI_MAX_RSEG;
+
+	temp = XREAD4(sc, capa, XHCI_HCSPARAMS3);
+
+	/* get maximum exit latency */
+	sc->sc_exit_lat_max = XHCI_HCS3_U1_DEL(temp) +
+	    XHCI_HCS3_U2_DEL(temp) + 250 /* us */;
+
+	/* Check if we should use the default IMOD value. */
+	if (sc->sc_imod_default == 0)
+		sc->sc_imod_default = XHCI_IMOD_DEFAULT;
 
 	/* get all DMA memory */
 	if (usb_bus_mem_alloc_all(&sc->sc_bus,
@@ -675,10 +692,12 @@ xhci_set_hw_power_sleep(struct usb_bus *bus, uint32_t state)
 	case USB_HW_POWER_SUSPEND:
 		DPRINTF("Stopping the XHCI\n");
 		xhci_halt_controller(sc);
+		xhci_reset_controller(sc);
 		break;
 	case USB_HW_POWER_SHUTDOWN:
 		DPRINTF("Stopping the XHCI\n");
 		xhci_halt_controller(sc);
+		xhci_reset_controller(sc);
 		break;
 	case USB_HW_POWER_RESUME:
 		DPRINTF("Starting the XHCI\n");
@@ -1834,8 +1853,8 @@ restart:
 			}
 
 			/* set up npkt */
-			npkt = (len_old - npkt_off + temp->max_packet_size - 1) /
-			    temp->max_packet_size;
+			npkt = howmany(len_old - npkt_off,
+				       temp->max_packet_size);
 
 			if (npkt == 0)
 				npkt = 1;
@@ -2189,10 +2208,9 @@ xhci_setup_generic_chain(struct usb_xfer *xfer)
 				temp.len = xfer->max_frame_size;
 
 			/* compute TD packet count */
-			tdpc = (temp.len + xfer->max_packet_size - 1) /
-			    xfer->max_packet_size;
+			tdpc = howmany(temp.len, xfer->max_packet_size);
 
-			temp.tbc = ((tdpc + mult - 1) / mult) - 1;
+			temp.tbc = howmany(tdpc, mult) - 1;
 			temp.tlbpc = (tdpc % mult);
 
 			if (temp.tlbpc == 0)
@@ -2226,7 +2244,17 @@ xhci_setup_generic_chain(struct usb_xfer *xfer)
 		 * Send a DATA1 message and invert the current
 		 * endpoint direction.
 		 */
-		temp.step_td = (xfer->nframes != 0);
+		if (xhcictlstep || temp.sc->sc_ctlstep) {
+			/*
+			 * Some XHCI controllers will not delay the
+			 * status stage until the next SOF. Force this
+			 * behaviour to avoid failed control
+			 * transfers.
+			 */
+			temp.step_td = (xfer->nframes != 0);
+		} else {
+			temp.step_td = 0;
+		}
 		temp.direction = UE_GET_DIR(xfer->endpointno) ^ UE_DIR_IN;
 		temp.len = 0;
 		temp.pc = NULL;
@@ -2362,6 +2390,8 @@ xhci_configure_endpoint(struct usb_device *udev,
 
 	/* store endpoint mode */
 	pepext->trb_ep_mode = ep_mode;
+	/* store bMaxPacketSize for control endpoints */
+	pepext->trb_ep_maxp = edesc->wMaxPacketSize[0];
 	usb_pc_cpu_flush(pepext->page_cache);
 
 	if (ep_mode == USB_EP_MODE_STREAMS) {
@@ -2906,6 +2936,17 @@ xhci_transfer_insert(struct usb_xfer *xfer)
 	if (pepext->trb_used[id] >= trb_limit) {
 		DPRINTFN(8, "Too many TDs queued.\n");
 		return (USB_ERR_NOMEM);
+	}
+
+	/* check if bMaxPacketSize changed */
+	if (xfer->flags_int.control_xfr != 0 &&
+	    pepext->trb_ep_maxp != xfer->endpoint->edesc->wMaxPacketSize[0]) {
+
+		DPRINTFN(8, "Reconfigure control endpoint\n");
+
+		/* force driver to reconfigure endpoint */
+		pepext->trb_halted = 1;
+		pepext->trb_running = 0;
 	}
 
 	/* check for stopped condition, after putting transfer on interrupt queue */
@@ -3683,13 +3724,11 @@ xhci_xfer_setup(struct usb_setup_params *parm)
 {
 	struct usb_page_search page_info;
 	struct usb_page_cache *pc;
-	struct xhci_softc *sc;
 	struct usb_xfer *xfer;
 	void *last_obj;
 	uint32_t ntd;
 	uint32_t n;
 
-	sc = XHCI_BUS2SC(parm->udev->bus);
 	xfer = parm->curr_xfer;
 
 	/*
@@ -3859,12 +3898,10 @@ xhci_configure_reset_endpoint(struct usb_xfer *xfer)
 
 	xhci_configure_mask(udev, (1U << epno) | 1U, 0);
 
-	err = xhci_cmd_evaluate_ctx(sc, buf_inp.physaddr, index);
-
-	if (err != 0)
-		DPRINTF("Could not configure endpoint %u\n", epno);
-
-	err = xhci_cmd_configure_ep(sc, buf_inp.physaddr, 0, index);
+	if (epno > 1)
+		err = xhci_cmd_configure_ep(sc, buf_inp.physaddr, 0, index);
+	else
+		err = xhci_cmd_evaluate_ctx(sc, buf_inp.physaddr, index);
 
 	if (err != 0)
 		DPRINTF("Could not configure endpoint %u\n", epno);
@@ -4247,6 +4284,10 @@ xhci_device_state_change(struct usb_device *udev)
 
 		sc->sc_hw.devs[index].state = XHCI_ST_ADDRESSED;
 
+		/* set configure mask to slot only */
+		xhci_configure_mask(udev, 1, 0);
+
+		/* deconfigure all endpoints, except EP0 */
 		err = xhci_cmd_configure_ep(sc, 0, 1, index);
 
 		if (err) {

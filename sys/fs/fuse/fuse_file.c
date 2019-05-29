@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2007-2009 Google Inc. and Amit Singh
  * All rights reserved.
  *
@@ -56,11 +58,10 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
-#include <sys/types.h>
+#include <sys/param.h>
 #include <sys/module.h>
 #include <sys/systm.h>
 #include <sys/errno.h>
-#include <sys/param.h>
 #include <sys/kernel.h>
 #include <sys/conf.h>
 #include <sys/uio.h>
@@ -72,6 +73,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/proc.h>
 #include <sys/mount.h>
 #include <sys/vnode.h>
+#include <sys/sdt.h>
 #include <sys/sysctl.h>
 
 #include "fuse.h"
@@ -80,32 +82,30 @@ __FBSDID("$FreeBSD$");
 #include "fuse_ipc.h"
 #include "fuse_node.h"
 
-#define FUSE_DEBUG_MODULE FILE
-#include "fuse_debug.h"
+SDT_PROVIDER_DECLARE(fuse);
+/* 
+ * Fuse trace probe:
+ * arg0: verbosity.  Higher numbers give more verbose messages
+ * arg1: Textual message
+ */
+SDT_PROBE_DEFINE2(fuse, , file, trace, "int", "char*");
 
 static int fuse_fh_count = 0;
 
-SYSCTL_INT(_vfs_fuse, OID_AUTO, filehandle_count, CTLFLAG_RD,
-    &fuse_fh_count, 0, "");
+SYSCTL_INT(_vfs_fusefs, OID_AUTO, filehandle_count, CTLFLAG_RD,
+    &fuse_fh_count, 0, "number of open FUSE filehandles");
 
 int
-fuse_filehandle_open(struct vnode *vp,
-    fufh_type_t fufh_type,
-    struct fuse_filehandle **fufhp,
-    struct thread *td,
-    struct ucred *cred)
+fuse_filehandle_open(struct vnode *vp, fufh_type_t fufh_type,
+    struct fuse_filehandle **fufhp, struct thread *td, struct ucred *cred)
 {
 	struct fuse_dispatcher fdi;
 	struct fuse_open_in *foi;
 	struct fuse_open_out *foo;
 
 	int err = 0;
-	int isdir = 0;
 	int oflags = 0;
 	int op = FUSE_OPEN;
-
-	fuse_trace_printf("fuse_filehandle_open(vp=%p, fufh_type=%d)\n",
-	    vp, fufh_type);
 
 	if (fuse_filehandle_valid(vp, fufh_type)) {
 		panic("FUSE: filehandle_open called despite valid fufh (type=%d)",
@@ -113,14 +113,15 @@ fuse_filehandle_open(struct vnode *vp,
 		/* NOTREACHED */
 	}
 	/*
-         * Note that this means we are effectively FILTERING OUT open() flags.
-         */
+	 * Note that this means we are effectively FILTERING OUT open() flags.
+	 */
 	oflags = fuse_filehandle_xlate_to_oflags(fufh_type);
 
 	if (vnode_isdir(vp)) {
-		isdir = 1;
 		op = FUSE_OPENDIR;
 		if (fufh_type != FUFH_RDONLY) {
+			SDT_PROBE2(fuse, , file, trace, 1,
+				"non-rdonly fh requested for a directory?");
 			printf("FUSE:non-rdonly fh requested for a directory?\n");
 			fufh_type = FUFH_RDONLY;
 		}
@@ -132,7 +133,8 @@ fuse_filehandle_open(struct vnode *vp,
 	foi->flags = oflags;
 
 	if ((err = fdisp_wait_answ(&fdi))) {
-		debug_printf("OUCH ... daemon didn't give fh (err = %d)\n", err);
+		SDT_PROBE2(fuse, , file, trace, 1,
+			"OUCH ... daemon didn't give fh");
 		if (err == ENOENT) {
 			fuse_internal_vnode_disappear(vp);
 		}
@@ -141,7 +143,17 @@ fuse_filehandle_open(struct vnode *vp,
 	foo = fdi.answ;
 
 	fuse_filehandle_init(vp, fufh_type, fufhp, foo->fh);
-	fuse_vnode_open(vp, foo->open_flags, td);
+
+	/*
+	 * For WRONLY opens, force DIRECT_IO.  This is necessary
+	 * since writing a partial block through the buffer cache
+	 * will result in a read of the block and that read won't
+	 * be allowed by the WRONLY open.
+	 */
+	if (fufh_type == FUFH_WRONLY)
+		fuse_vnode_open(vp, foo->open_flags | FOPEN_DIRECT_IO, td);
+	else
+		fuse_vnode_open(vp, foo->open_flags, td);
 
 out:
 	fdisp_destroy(&fdi);
@@ -149,10 +161,8 @@ out:
 }
 
 int
-fuse_filehandle_close(struct vnode *vp,
-    fufh_type_t fufh_type,
-    struct thread *td,
-    struct ucred *cred)
+fuse_filehandle_close(struct vnode *vp, fufh_type_t fufh_type,
+    struct thread *td, struct ucred *cred)
 {
 	struct fuse_dispatcher fdi;
 	struct fuse_release_in *fri;
@@ -160,11 +170,7 @@ fuse_filehandle_close(struct vnode *vp,
 	struct fuse_filehandle *fufh = NULL;
 
 	int err = 0;
-	int isdir = 0;
 	int op = FUSE_RELEASE;
-
-	fuse_trace_printf("fuse_filehandle_put(vp=%p, fufh_type=%d)\n",
-	    vp, fufh_type);
 
 	fufh = &(fvdat->fufh[fufh_type]);
 	if (!FUFH_IS_VALID(fufh)) {
@@ -175,10 +181,8 @@ fuse_filehandle_close(struct vnode *vp,
 	if (fuse_isdeadfs(vp)) {
 		goto out;
 	}
-	if (vnode_isdir(vp)) {
+	if (vnode_isdir(vp))
 		op = FUSE_RELEASEDIR;
-		isdir = 1;
-	}
 	fdisp_init(&fdi, sizeof(*fri));
 	fdisp_make_vp(&fdi, op, vp, td, cred);
 	fri = fdi.indata;
@@ -204,6 +208,28 @@ fuse_filehandle_valid(struct vnode *vp, fufh_type_t fufh_type)
 
 	fufh = &(fvdat->fufh[fufh_type]);
 	return FUFH_IS_VALID(fufh);
+}
+
+/*
+ * Check for a valid file handle, first the type requested, but if that
+ * isn't valid, try for FUFH_RDWR.
+ * Return the FUFH type that is valid or FUFH_INVALID if there are none.
+ * This is a variant of fuse_filehandle_vaild() analogous to
+ * fuse_filehandle_getrw().
+ */
+fufh_type_t
+fuse_filehandle_validrw(struct vnode *vp, fufh_type_t fufh_type)
+{
+	struct fuse_vnode_data *fvdat = VTOFUD(vp);
+	struct fuse_filehandle *fufh;
+
+	fufh = &fvdat->fufh[fufh_type];
+	if (FUFH_IS_VALID(fufh) != 0)
+		return (fufh_type);
+	fufh = &fvdat->fufh[FUFH_RDWR];
+	if (FUFH_IS_VALID(fufh) != 0)
+		return (FUFH_RDWR);
+	return (FUFH_INVALID);
 }
 
 int
@@ -236,15 +262,12 @@ fuse_filehandle_getrw(struct vnode *vp, fufh_type_t fufh_type,
 }
 
 void
-fuse_filehandle_init(struct vnode *vp,
-    fufh_type_t fufh_type,
-    struct fuse_filehandle **fufhp,
-    uint64_t fh_id)
+fuse_filehandle_init(struct vnode *vp, fufh_type_t fufh_type,
+    struct fuse_filehandle **fufhp, uint64_t fh_id)
 {
 	struct fuse_vnode_data *fvdat = VTOFUD(vp);
 	struct fuse_filehandle *fufh;
 
-	FS_DEBUG("id=%jd type=%d\n", (intmax_t)fh_id, fufh_type);
 	fufh = &(fvdat->fufh[fufh_type]);
 	MPASS(!FUFH_IS_VALID(fufh));
 	fufh->fh_id = fh_id;

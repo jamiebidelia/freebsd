@@ -1,5 +1,7 @@
 /*-
- * Copyright (c) 2001 M. Warner Losh.  All rights reserved.
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
+ * Copyright (c) 2001 M. Warner Losh.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -173,3 +175,4 @@ DRIVER_MODULE(sio, isa, sio_isa_driver, sio_devclass, 0, 0);
 #ifndef COM_NO_ACPI
 DRIVER_MODULE(sio, acpi, sio_isa_driver, sio_devclass, 0, 0);
 #endif
+ISA_PNP_INFO(sio_ids);

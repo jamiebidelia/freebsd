@@ -32,7 +32,7 @@
 #include "file.h"
 
 #ifndef	lint
-FILE_RCSID("@(#)$File: file.c,v 1.160 2014/12/16 23:18:40 christos Exp $")
+FILE_RCSID("@(#)$File: file.c,v 1.175 2018/03/02 16:11:37 christos Exp $")
 #endif	/* lint */
 
 #include "magic.h"
@@ -59,26 +59,38 @@ FILE_RCSID("@(#)$File: file.c,v 1.160 2014/12/16 23:18:40 christos Exp $")
 #endif
 
 #if defined(HAVE_GETOPT_H) && defined(HAVE_STRUCT_OPTION)
-#include <getopt.h>
-#ifndef HAVE_GETOPT_LONG
-int getopt_long(int argc, char * const *argv, const char *optstring, const struct option *longopts, int *longindex);
-#endif
-#else
-#include "mygetopt.h"
+# include <getopt.h>
+# ifndef HAVE_GETOPT_LONG
+int getopt_long(int, char * const *, const char *,
+    const struct option *, int *);
+# endif
+# else
+#  include "mygetopt.h"
 #endif
 
 #ifdef S_IFLNK
-#define FILE_FLAGS "-bcEhikLlNnprsvz0"
+# define IFLNK_h "h"
+# define IFLNK_L "L"
 #else
-#define FILE_FLAGS "-bcEiklNnprsvz0"
+# define IFLNK_h ""
+# define IFLNK_L ""
 #endif
 
+#ifdef HAVE_LIBSECCOMP
+# define SECCOMP_S "S"
+#else
+# define SECCOMP_S ""
+#endif
+
+#define FILE_FLAGS	"bcCdE" IFLNK_h "ik" IFLNK_L "lNnprs" SECCOMP_S "vzZ0"
+#define OPTSTRING	"bcCde:Ef:F:hiklLm:nNpP:rsSvzZ0"
+
 # define USAGE  \
-    "Usage: %s [" FILE_FLAGS \
-	"] [--apple] [--mime-encoding] [--mime-type]\n" \
-    "            [-e testname] [-F separator] [-f namefile] [-m magicfiles] " \
-    "file ...\n" \
-    "       %s -C [-m magicfiles]\n" \
+    "Usage: %s [-" FILE_FLAGS "] [--apple] [--extension] [--mime-encoding]\n" \
+    "            [--mime-type] [-e <testname>] [-F <separator>] " \
+    " [-f <namefile>]\n" \
+    "            [-m <magicfiles>] [-P <parameter=value>] <file> ...\n" \
+    "       %s -C [-m <magicfiles>]\n" \
     "       %s [--help]\n"
 
 private int 		/* Global command-line options 		*/
@@ -89,16 +101,20 @@ private int 		/* Global command-line options 		*/
 
 private const char *separator = ":";	/* Default field separator	*/
 private const struct option long_options[] = {
-#define OPT(shortname, longname, opt, doc)      \
+#define OPT_HELP		1
+#define OPT_APPLE		2
+#define OPT_EXTENSIONS		3
+#define OPT_MIME_TYPE		4
+#define OPT_MIME_ENCODING	5
+#define OPT(shortname, longname, opt, def, doc)      \
     {longname, opt, NULL, shortname},
-#define OPT_LONGONLY(longname, opt, doc)        \
-    {longname, opt, NULL, 0},
+#define OPT_LONGONLY(longname, opt, def, doc, id)        \
+    {longname, opt, NULL, id},
 #include "file_opts.h"
 #undef OPT
 #undef OPT_LONGONLY
     {0, 0, NULL, 0}
-};
-#define OPTSTRING	"bcCde:Ef:F:hiklLm:nNpP:rsvz0"
+    };
 
 private const struct {
 	const char *name;
@@ -126,12 +142,20 @@ private struct {
 	{ "elf_phnum",	MAGIC_PARAM_ELF_PHNUM_MAX, 0 },
 	{ "elf_shnum",	MAGIC_PARAM_ELF_SHNUM_MAX, 0 },
 	{ "elf_notes",	MAGIC_PARAM_ELF_NOTES_MAX, 0 },
+	{ "regex",	MAGIC_PARAM_REGEX_MAX, 0 },
+	{ "bytes",	MAGIC_PARAM_BYTES_MAX, 0 },
 };
 
-private char *progname;		/* used throughout 		*/
+private int posixly;
 
+#ifdef __dead
+__dead
+#endif
 private void usage(void);
-private void docprint(const char *);
+private void docprint(const char *, int);
+#ifdef __dead
+__dead
+#endif
 private void help(void);
 
 private int unwrap(struct magic_set *, const char *);
@@ -151,9 +175,13 @@ main(int argc, char *argv[])
 	size_t i;
 	int action = 0, didsomefiles = 0, errflg = 0;
 	int flags = 0, e = 0;
+#ifdef HAVE_LIBSECCOMP
+	int sandbox = 1;
+#endif
 	struct magic_set *magic = NULL;
 	int longindex;
 	const char *magicfile = NULL;		/* where the magic is	*/
+	char *progname;
 
 	/* makes islower etc work for other langs */
 #ifdef HAVE_SETLOCALE
@@ -170,30 +198,33 @@ main(int argc, char *argv[])
 	else
 		progname = argv[0];
 
+	file_setprogname(progname);
+
+
 #ifdef S_IFLNK
-	flags |= getenv("POSIXLY_CORRECT") ? MAGIC_SYMLINK : 0;
+	posixly = getenv("POSIXLY_CORRECT") != NULL;
+	flags |=  posixly ? MAGIC_SYMLINK : 0;
 #endif
 	while ((c = getopt_long(argc, argv, OPTSTRING, long_options,
 	    &longindex)) != -1)
 		switch (c) {
-		case 0 :
-			switch (longindex) {
-			case 0:
-				help();
-				break;
-			case 10:
-				flags |= MAGIC_APPLE;
-				break;
-			case 11:
-				flags |= MAGIC_MIME_TYPE;
-				break;
-			case 12:
-				flags |= MAGIC_MIME_ENCODING;
-				break;
-			}
+		case OPT_HELP:
+			help();
+			break;
+		case OPT_APPLE:
+			flags |= MAGIC_APPLE;
+			break;
+		case OPT_EXTENSIONS:
+			flags |= MAGIC_EXTENSION;
+			break;
+		case OPT_MIME_TYPE:
+			flags |= MAGIC_MIME_TYPE;
+			break;
+		case OPT_MIME_ENCODING:
+			flags |= MAGIC_MIME_ENCODING;
 			break;
 		case '0':
-			nulsep = 1;
+			nulsep++;
 			break;
 		case 'b':
 			bflag++;
@@ -227,6 +258,7 @@ main(int argc, char *argv[])
 			if (magic == NULL)
 				if ((magic = load(magicfile, flags)) == NULL)
 					return 1;
+			applyparam(magic);
 			e |= unwrap(magic, optarg);
 			++didsomefiles;
 			break;
@@ -262,19 +294,28 @@ main(int argc, char *argv[])
 		case 'r':
 			flags |= MAGIC_RAW;
 			break;
-			break;
 		case 's':
 			flags |= MAGIC_DEVICES;
 			break;
+#ifdef HAVE_LIBSECCOMP
+		case 'S':
+			sandbox = 0;
+			break;
+#endif
 		case 'v':
 			if (magicfile == NULL)
 				magicfile = magic_getpath(magicfile, action);
-			(void)fprintf(stdout, "%s-%s\n", progname, VERSION);
+			(void)fprintf(stdout, "%s-%s\n", file_getprogname(),
+			    VERSION);
 			(void)fprintf(stdout, "magic file from %s\n",
-				       magicfile);
+			    magicfile);
 			return 0;
 		case 'z':
 			flags |= MAGIC_COMPRESS;
+			break;
+
+		case 'Z':
+			flags |= MAGIC_COMPRESS|MAGIC_COMPRESS_TRANSP;
 			break;
 #ifdef S_IFLNK
 		case 'L':
@@ -296,10 +337,19 @@ main(int argc, char *argv[])
 	if (e)
 		return e;
 
+#ifdef HAVE_LIBSECCOMP
+#if 0
+	if (sandbox && enable_sandbox_basic() == -1)
+#else
+	if (sandbox && enable_sandbox_full() == -1)
+#endif
+		file_err(EXIT_FAILURE, "SECCOMP initialisation failed");
+#endif /* HAVE_LIBSECCOMP */
+
 	if (MAGIC_VERSION != magic_version())
-		(void)fprintf(stderr, "%s: compiled magic version [%d] "
+		file_warnx("Compiled magic version [%d] "
 		    "does not match with shared library magic version [%d]\n",
-		    progname, MAGIC_VERSION, magic_version());
+		    MAGIC_VERSION, magic_version());
 
 	switch(action) {
 	case FILE_CHECK:
@@ -311,8 +361,7 @@ main(int argc, char *argv[])
 		 */
 		magic = magic_open(flags|MAGIC_CHECK);
 		if (magic == NULL) {
-			(void)fprintf(stderr, "%s: %s\n", progname,
-			    strerror(errno));
+			file_warn("Can't create magic");
 			return 1;
 		}
 
@@ -331,11 +380,11 @@ main(int argc, char *argv[])
 			abort();
 		}
 		if (c == -1) {
-			(void)fprintf(stderr, "%s: %s\n", progname,
-			    magic_error(magic));
-			return 1;
+			file_warnx("%s", magic_error(magic));
+			e = 1;
+			goto out;
 		}
-		return 0;
+		goto out;
 	default:
 		if (magic == NULL)
 			if ((magic = load(magicfile, flags)) == NULL)
@@ -365,6 +414,7 @@ main(int argc, char *argv[])
 			e |= process(magic, argv[optind], wid);
 	}
 
+out:
 	if (magic)
 		magic_close(magic);
 	return e;
@@ -378,11 +428,8 @@ applyparam(magic_t magic)
 	for (i = 0; i < __arraycount(pm); i++) {
 		if (pm[i].value == 0)
 			continue;
-		if (magic_setparam(magic, pm[i].tag, &pm[i].value) == -1) {
-			(void)fprintf(stderr, "%s: Can't set %s %s\n", progname,
-				pm[i].name, strerror(errno));
-			exit(1);
-		}
+		if (magic_setparam(magic, pm[i].tag, &pm[i].value) == -1)
+			file_err(EXIT_FAILURE, "Can't set %s", pm[i].name);
 	}
 }
 
@@ -402,8 +449,7 @@ setparam(const char *p)
 		return;
 	}
 badparm:
-	(void)fprintf(stderr, "%s: Unknown param %s\n", progname, p);
-	exit(1);
+	file_errx(EXIT_FAILURE, "Unknown param %s", p);
 }
 
 private struct magic_set *
@@ -411,16 +457,19 @@ private struct magic_set *
 load(const char *magicfile, int flags)
 {
 	struct magic_set *magic = magic_open(flags);
+	const char *e;
+
 	if (magic == NULL) {
-		(void)fprintf(stderr, "%s: %s\n", progname, strerror(errno));
+		file_warn("Can't create magic");
 		return NULL;
 	}
 	if (magic_load(magic, magicfile) == -1) {
-		(void)fprintf(stderr, "%s: %s\n",
-		    progname, magic_error(magic));
+		file_warn("%s", magic_error(magic));
 		magic_close(magic);
 		return NULL;
 	}
+	if ((e = magic_error(magic)) != NULL)
+		file_warn("%s", e);
 	return magic;
 }
 
@@ -442,8 +491,7 @@ unwrap(struct magic_set *ms, const char *fn)
 		wid = 1;
 	} else {
 		if ((f = fopen(fn, "r")) == NULL) {
-			(void)fprintf(stderr, "%s: Cannot open `%s' (%s).\n",
-			    progname, fn, strerror(errno));
+			file_warn("Cannot open `%s'", fn);
 			return 1;
 		}
 
@@ -477,24 +525,28 @@ unwrap(struct magic_set *ms, const char *fn)
 private int
 process(struct magic_set *ms, const char *inname, int wid)
 {
-	const char *type;
+	const char *type, c = nulsep > 1 ? '\0' : '\n';
 	int std_in = strcmp(inname, "-") == 0;
 
 	if (wid > 0 && !bflag) {
 		(void)printf("%s", std_in ? "/dev/stdin" : inname);
 		if (nulsep)
 			(void)putc('\0', stdout);
-		(void)printf("%s", separator);
-		(void)printf("%*s ",
-		    (int) (nopad ? 0 : (wid - file_mbswidth(inname))), "");
+		if (nulsep < 2) {
+			(void)printf("%s", separator);
+			(void)printf("%*s ",
+			    (int) (nopad ? 0 : (wid - file_mbswidth(inname))),
+			    "");
+		}
 	}
 
 	type = magic_file(ms, std_in ? NULL : inname);
+
 	if (type == NULL) {
-		(void)printf("ERROR: %s\n", magic_error(ms));
+		(void)printf("ERROR: %s%c", magic_error(ms), c);
 		return 1;
 	} else {
-		(void)printf("%s\n", type);
+		(void)printf("%s%c", type, c);
 		return 0;
 	}
 }
@@ -539,12 +591,23 @@ file_mbswidth(const char *s)
 private void
 usage(void)
 {
-	(void)fprintf(stderr, USAGE, progname, progname, progname);
-	exit(1);
+	const char *pn = file_getprogname();
+	(void)fprintf(stderr, USAGE, pn, pn, pn);
+	exit(EXIT_FAILURE);
 }
 
 private void
-docprint(const char *opts)
+defprint(int def)
+{
+	if (!def)
+		return;
+	if (((def & 1) && posixly) || ((def & 2) && !posixly))
+		fprintf(stdout, " (default)");
+	fputc('\n', stdout);
+}
+
+private void
+docprint(const char *opts, int def)
 {
 	size_t i;
 	int comma;
@@ -553,6 +616,7 @@ docprint(const char *opts)
 	p = strstr(opts, "%o");
 	if (p == NULL) {
 		fprintf(stdout, "%s", opts);
+		defprint(def);
 		return;
 	}
 
@@ -580,15 +644,84 @@ help(void)
 "Usage: file [OPTION...] [FILE...]\n"
 "Determine type of FILEs.\n"
 "\n", stdout);
-#define OPT(shortname, longname, opt, doc)      \
+#define OPT(shortname, longname, opt, def, doc)      \
 	fprintf(stdout, "  -%c, --" longname, shortname), \
-	docprint(doc);
-#define OPT_LONGONLY(longname, opt, doc)        \
+	docprint(doc, def);
+#define OPT_LONGONLY(longname, opt, def, doc, id)        \
 	fprintf(stdout, "      --" longname),	\
-	docprint(doc);
+	docprint(doc, def);
 #include "file_opts.h"
 #undef OPT
 #undef OPT_LONGONLY
 	fprintf(stdout, "\nReport bugs to http://bugs.gw.com/\n");
-	exit(0);
+	exit(EXIT_SUCCESS);
+}
+
+private const char *file_progname;
+
+protected void
+file_setprogname(const char *progname)
+{
+	file_progname = progname;
+}
+
+protected const char *
+file_getprogname(void)
+{
+	return file_progname;
+}
+
+protected void
+file_err(int e, const char *fmt, ...)
+{
+	va_list ap;
+	int se = errno;
+
+	va_start(ap, fmt);
+	fprintf(stderr, "%s: ", file_progname);
+	vfprintf(stderr, fmt, ap);
+	va_end(ap);
+	fprintf(stderr, " (%s)\n", strerror(se));
+	exit(e);
+}
+
+protected void
+file_errx(int e, const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	fprintf(stderr, "%s: ", file_progname);
+	vfprintf(stderr, fmt, ap);
+	va_end(ap);
+	fprintf(stderr, "\n");
+	exit(e);
+}
+
+protected void
+file_warn(const char *fmt, ...)
+{
+	va_list ap;
+	int se = errno;
+
+	va_start(ap, fmt);
+	fprintf(stderr, "%s: ", file_progname);
+	vfprintf(stderr, fmt, ap);
+	va_end(ap);
+	fprintf(stderr, " (%s)\n", strerror(se));
+	errno = se;
+}
+
+protected void
+file_warnx(const char *fmt, ...)
+{
+	va_list ap;
+	int se = errno;
+
+	va_start(ap, fmt);
+	fprintf(stderr, "%s: ", file_progname);
+	vfprintf(stderr, fmt, ap);
+	va_end(ap);
+	fprintf(stderr, "\n");
+	errno = se;
 }

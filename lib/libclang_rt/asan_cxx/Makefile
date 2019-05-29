@@ -2,10 +2,13 @@
 
 .include <bsd.init.mk>
 
-LIB=	clang_rt.asan_cxx-${CRTARCH}
+LIB=		clang_rt.asan_cxx-${CRTARCH}
 
-.PATH:	${CRTSRC}/lib/asan
+CXXFLAGS+=	-frtti
 
-SRCS=	asan_new_delete.cc
+SRCS+=		asan/asan_new_delete.cc
+SRCS+=		ubsan/ubsan_handlers_cxx.cc
+SRCS+=		ubsan/ubsan_type_hash.cc
+SRCS+=		ubsan/ubsan_type_hash_itanium.cc
 
 .include <bsd.lib.mk>

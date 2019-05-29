@@ -29,12 +29,6 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
-#ifndef lint
-#ifndef __GNUC__
-#error "GCC is needed to compile this file"
-#endif
-#endif /* lint */
-
 #include <stdlib.h>
 
 #include "libc_private.h"
@@ -62,10 +56,12 @@ _start1(fptr cleanup, int argc, char *argv[])
 
 	env = argv + argc + 1;
 	handle_argv(argc, argv, env);
-	if (&_DYNAMIC != NULL)
+	if (&_DYNAMIC != NULL) {
 		atexit(cleanup);
-	else
+	} else {
+		process_irelocs();
 		_init_tls();
+	}
 
 #ifdef GCRT
 	atexit(_mcleanup);

@@ -37,9 +37,10 @@
 __FBSDID("$FreeBSD$");
 
 /*
- * Intel fourth generation mobile cpus integrated I2C device, smbus driver.
+ * Intel fourth generation mobile cpus integrated I2C device.
  *
  * See ig4_reg.h for datasheet reference and notes.
+ * See ig4_var.h for locking semantics.
  */
 
 #include <sys/param.h>
@@ -49,6 +50,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/errno.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
+#include <sys/sx.h>
 #include <sys/syslog.h>
 #include <sys/bus.h>
 #include <sys/sysctl.h>
@@ -58,7 +60,8 @@ __FBSDID("$FreeBSD$");
 
 #include <dev/pci/pcivar.h>
 #include <dev/pci/pcireg.h>
-#include <dev/smbus/smbconf.h>
+#include <dev/iicbus/iicbus.h>
+#include <dev/iicbus/iiconf.h>
 
 #include <dev/ichiic/ig4_reg.h>
 #include <dev/ichiic/ig4_var.h>
@@ -72,8 +75,8 @@ static void ig4iic_intr(void *cookie);
 static void ig4iic_dump(ig4iic_softc_t *sc);
 
 static int ig4_dump;
-SYSCTL_INT(_debug, OID_AUTO, ig4_dump, CTLTYPE_INT | CTLFLAG_RW,
-	   &ig4_dump, 0, "");
+SYSCTL_INT(_debug, OID_AUTO, ig4_dump, CTLFLAG_RW,
+	   &ig4_dump, 0, "Dump controller registers");
 
 /*
  * Low-level inline support functions
@@ -106,8 +109,19 @@ set_controller(ig4iic_softc_t *sc, uint32_t ctl)
 	int error;
 	uint32_t v;
 
+	/*
+	 * When the controller is enabled, interrupt on STOP detect
+	 * or receive character ready and clear pending interrupts.
+	 */
+	if (ctl & IG4_I2C_ENABLE) {
+		reg_write(sc, IG4_REG_INTR_MASK, IG4_INTR_STOP_DET |
+						 IG4_INTR_RX_FULL);
+		reg_read(sc, IG4_REG_CLR_INTR);
+	} else
+		reg_write(sc, IG4_REG_INTR_MASK, 0);
+
 	reg_write(sc, IG4_REG_I2C_EN, ctl);
-	error = SMB_ETIMEOUT;
+	error = IIC_ETIMEOUT;
 
 	for (retry = 100; retry > 0; --retry) {
 		v = reg_read(sc, IG4_REG_ENABLE_STATUS);
@@ -115,7 +129,10 @@ set_controller(ig4iic_softc_t *sc, uint32_t ctl)
 			error = 0;
 			break;
 		}
-		mtx_sleep(sc, &sc->mutex, 0, "i2cslv", 1);
+		if (cold)
+			DELAY(1000);
+		else
+			mtx_sleep(sc, &sc->io_lock, 0, "i2cslv", 1);
 	}
 	return (error);
 }
@@ -132,7 +149,7 @@ wait_status(ig4iic_softc_t *sc, uint32_t status)
 	u_int count_us = 0;
 	u_int limit_us = 25000; /* 25ms */
 
-	error = SMB_ETIMEOUT;
+	error = IIC_ETIMEOUT;
 
 	for (;;) {
 		/*
@@ -179,7 +196,7 @@ wait_status(ig4iic_softc_t *sc, uint32_t status)
 		 * work, otherwise poll with the lock held.
 		 */
 		if (status & IG4_STATUS_RX_NOTEMPTY) {
-			mtx_sleep(sc, &sc->mutex, PZERO, "i2cwait",
+			mtx_sleep(sc, &sc->io_lock, 0, "i2cwait",
 				  (hz + 99) / 100); /* sleep up to 10ms */
 			count_us += 10000;
 		} else {
@@ -218,18 +235,13 @@ data_read(ig4iic_softc_t *sc)
  * the target address for when the controller later issues a START.
  */
 static void
-set_slave_addr(ig4iic_softc_t *sc, uint8_t slave, int trans_op)
+set_slave_addr(ig4iic_softc_t *sc, uint8_t slave)
 {
 	uint32_t tar;
 	uint32_t ctl;
 	int use_10bit;
 
-	use_10bit = sc->use_10bit;
-	if (trans_op & SMB_TRANS_7BIT)
-		use_10bit = 0;
-	if (trans_op & SMB_TRANS_10BIT)
-		use_10bit = 1;
-
+	use_10bit = 0;
 	if (sc->slave_valid && sc->last_slave == slave &&
 	    sc->use_10bit == use_10bit) {
 		return;
@@ -273,50 +285,156 @@ set_slave_addr(ig4iic_softc_t *sc, uint8_t slave, int trans_op)
 }
 
 /*
- * Issue START with byte command, possible count, and a variable length
- * read or write buffer, then possible turn-around read.  The read also
- * has a possible count received.
- *
- * For SMBUS -
- *
- * Quick:		START+ADDR+RD/WR STOP
- *
- * Normal:		START+ADDR+WR CMD DATA..DATA STOP
- *
- *			START+ADDR+RD CMD
- *			RESTART+ADDR RDATA..RDATA STOP
- *			(can also be used for I2C transactions)
- *
- * Process Call:	START+ADDR+WR CMD DATAL DATAH
- *			RESTART+ADDR+RD RDATAL RDATAH STOP
- *
- * Block:		START+ADDR+RD CMD
- *			RESTART+ADDR+RD RCOUNT DATA... STOP
- *
- * 			START+ADDR+WR CMD
- *			RESTART+ADDR+WR WCOUNT DATA... STOP
- *
- * For I2C - basically, no *COUNT fields, possibly no *CMD field.  If the
- *	     sender needs to issue a 2-byte command it will incorporate it
- *	     into the write buffer and also set NOCMD.
- *
- * Generally speaking, the START+ADDR / RESTART+ADDR is handled automatically
- * by the controller at the beginning of a command sequence or on a data
- * direction turn-around, and we only need to tell it when to issue the STOP.
+ *				IICBUS API FUNCTIONS
  */
 static int
-smb_transaction(ig4iic_softc_t *sc, char cmd, int op,
-		char *wbuf, int wcount, char *rbuf, int rcount, int *actualp)
+ig4iic_xfer_start(ig4iic_softc_t *sc, uint16_t slave)
 {
+	set_slave_addr(sc, slave >> 1);
+	return (0);
+}
+
+static int
+ig4iic_read(ig4iic_softc_t *sc, uint8_t *buf, uint16_t len,
+    bool repeated_start, bool stop)
+{
+	uint32_t cmd;
+	uint16_t i;
+	int error;
+
+	if (len == 0)
+		return (0);
+
+	cmd = IG4_DATA_COMMAND_RD;
+	cmd |= repeated_start ? IG4_DATA_RESTART : 0;
+	cmd |= stop && len == 1 ? IG4_DATA_STOP : 0;
+
+	/* Issue request for the first byte (could be last as well). */
+	reg_write(sc, IG4_REG_DATA_CMD, cmd);
+
+	for (i = 0; i < len; i++) {
+		/*
+		 * Maintain a pipeline by queueing the allowance for the next
+		 * read before waiting for the current read.
+		 */
+		cmd = IG4_DATA_COMMAND_RD;
+		if (i < len - 1) {
+			cmd = IG4_DATA_COMMAND_RD;
+			cmd |= stop && i == len - 2 ? IG4_DATA_STOP : 0;
+			reg_write(sc, IG4_REG_DATA_CMD, cmd);
+		}
+		error = wait_status(sc, IG4_STATUS_RX_NOTEMPTY);
+		if (error)
+			break;
+		buf[i] = data_read(sc);
+	}
+
+	(void)reg_read(sc, IG4_REG_TX_ABRT_SOURCE);
+	return (error);
+}
+
+static int
+ig4iic_write(ig4iic_softc_t *sc, uint8_t *buf, uint16_t len,
+    bool repeated_start, bool stop)
+{
+	uint32_t cmd;
+	uint16_t i;
+	int error;
+
+	if (len == 0)
+		return (0);
+
+	cmd = repeated_start ? IG4_DATA_RESTART : 0;
+	for (i = 0; i < len; i++) {
+		error = wait_status(sc, IG4_STATUS_TX_NOTFULL);
+		if (error)
+			break;
+		cmd |= buf[i];
+		cmd |= stop && i == len - 1 ? IG4_DATA_STOP : 0;
+		reg_write(sc, IG4_REG_DATA_CMD, cmd);
+		cmd = 0;
+	}
+
+	(void)reg_read(sc, IG4_REG_TX_ABRT_SOURCE);
+	return (error);
+}
+
+int
+ig4iic_transfer(device_t dev, struct iic_msg *msgs, uint32_t nmsgs)
+{
+	ig4iic_softc_t *sc = device_get_softc(dev);
+	const char *reason = NULL;
+	uint32_t i;
 	int error;
 	int unit;
-	uint32_t last;
+	bool rpstart;
+	bool stop;
 
 	/*
-	 * Debugging - dump registers
+	 * The hardware interface imposes limits on allowed I2C messages.
+	 * It is not possible to explicitly send a start or stop.
+	 * They are automatically sent (or not sent, depending on the
+	 * configuration) when a data byte is transferred.
+	 * For this reason it's impossible to send a message with no data
+	 * at all (like an SMBus quick message).
+	 * The start condition is automatically generated after the stop
+	 * condition, so it's impossible to not have a start after a stop.
+	 * The repeated start condition is automatically sent if a change
+	 * of the transfer direction happens, so it's impossible to have
+	 * a change of direction without a (repeated) start.
+	 * The repeated start can be forced even without the change of
+	 * direction.
+	 * Changing the target slave address requires resetting the hardware
+	 * state, so it's impossible to do that without the stop followed
+	 * by the start.
 	 */
+	for (i = 0; i < nmsgs; i++) {
+#if 0
+		if (i == 0 && (msgs[i].flags & IIC_M_NOSTART) != 0) {
+			reason = "first message without start";
+			break;
+		}
+		if (i == nmsgs - 1 && (msgs[i].flags & IIC_M_NOSTOP) != 0) {
+			reason = "last message without stop";
+			break;
+		}
+#endif
+		if (msgs[i].len == 0) {
+			reason = "message with no data";
+			break;
+		}
+		if (i > 0) {
+			if ((msgs[i].flags & IIC_M_NOSTART) != 0 &&
+			    (msgs[i - 1].flags & IIC_M_NOSTOP) == 0) {
+				reason = "stop not followed by start";
+				break;
+			}
+			if ((msgs[i - 1].flags & IIC_M_NOSTOP) != 0 &&
+			    msgs[i].slave != msgs[i - 1].slave) {
+				reason = "change of slave without stop";
+				break;
+			}
+			if ((msgs[i].flags & IIC_M_NOSTART) != 0 &&
+			    (msgs[i].flags & IIC_M_RD) !=
+			    (msgs[i - 1].flags & IIC_M_RD)) {
+				reason = "change of direction without repeated"
+				    " start";
+				break;
+			}
+		}
+	}
+	if (reason != NULL) {
+		if (bootverbose)
+			device_printf(dev, "%s\n", reason);
+		return (IIC_ENOTSUPP);
+	}
+
+	sx_xlock(&sc->call_lock);
+	mtx_lock(&sc->io_lock);
+
+	/* Debugging - dump registers. */
 	if (ig4_dump) {
-		unit = device_get_unit(sc->dev);
+		unit = device_get_unit(dev);
 		if (ig4_dump & (1 << unit)) {
 			ig4_dump &= ~(1 << unit);
 			ig4iic_dump(sc);
@@ -324,152 +442,78 @@ smb_transaction(ig4iic_softc_t *sc, char cmd, int op,
 	}
 
 	/*
-	 * Issue START or RESTART with next data byte, clear any previous
-	 * abort condition that may have been holding the txfifo in reset.
+	 * Clear any previous abort condition that may have been holding
+	 * the txfifo in reset.
 	 */
-	last = IG4_DATA_RESTART;
 	reg_read(sc, IG4_REG_CLR_TX_ABORT);
-	if (actualp)
-		*actualp = 0;
-
-	/*
-	 * Issue command if not told otherwise (smbus).
-	 */
-	if ((op & SMB_TRANS_NOCMD) == 0) {
-		error = wait_status(sc, IG4_STATUS_TX_NOTFULL);
-		if (error)
-			goto done;
-		last |= (u_char)cmd;
-		if (wcount == 0 && rcount == 0 && (op & SMB_TRANS_NOSTOP) == 0)
-			last |= IG4_DATA_STOP;
-		reg_write(sc, IG4_REG_DATA_CMD, last);
-		last = 0;
-	}
 
 	/*
 	 * Clean out any previously received data.
 	 */
-	if (sc->rpos != sc->rnext &&
-	    (op & SMB_TRANS_NOREPORT) == 0) {
-		device_printf(sc->dev,
-			      "discarding %d bytes of spurious data\n",
-			      sc->rnext - sc->rpos);
+	if (sc->rpos != sc->rnext && bootverbose) {
+		device_printf(sc->dev, "discarding %d bytes of spurious data\n",
+		    sc->rnext - sc->rpos);
 	}
 	sc->rpos = 0;
 	sc->rnext = 0;
 
-	/*
-	 * If writing and not told otherwise, issue the write count (smbus).
-	 */
-	if (wcount && (op & SMB_TRANS_NOCNT) == 0) {
-		error = wait_status(sc, IG4_STATUS_TX_NOTFULL);
-		if (error)
-			goto done;
-		last |= (u_char)cmd;
-		reg_write(sc, IG4_REG_DATA_CMD, last);
-		last = 0;
-	}
-
-	/*
-	 * Bulk write (i2c)
-	 */
-	while (wcount) {
-		error = wait_status(sc, IG4_STATUS_TX_NOTFULL);
-		if (error)
-			goto done;
-		last |= (u_char)*wbuf;
-		if (wcount == 1 && rcount == 0 && (op & SMB_TRANS_NOSTOP) == 0)
-			last |= IG4_DATA_STOP;
-		reg_write(sc, IG4_REG_DATA_CMD, last);
-		--wcount;
-		++wbuf;
-		last = 0;
-	}
-
-	/*
-	 * Issue reads to xmit FIFO (strange, I know) to tell the controller
-	 * to clock in data.  At the moment just issue one read ahead to
-	 * pipeline the incoming data.
-	 *
-	 * NOTE: In the case of NOCMD and wcount == 0 we still issue a
-	 *	 RESTART here, even if the data direction has not changed
-	 *	 from the previous CHAINing call.  This we force the RESTART.
-	 *	 (A new START is issued automatically by the controller in
-	 *	 the other nominal cases such as a data direction change or
-	 *	 a previous STOP was issued).
-	 *
-	 * If this will be the last byte read we must also issue the STOP
-	 * at the end of the read.
-	 */
-	if (rcount) {
-		last = IG4_DATA_RESTART | IG4_DATA_COMMAND_RD;
-		if (rcount == 1 &&
-		    (op & (SMB_TRANS_NOSTOP | SMB_TRANS_NOCNT)) ==
-		    SMB_TRANS_NOCNT) {
-			last |= IG4_DATA_STOP;
-		}
-		reg_write(sc, IG4_REG_DATA_CMD, last);
-		last = IG4_DATA_COMMAND_RD;
-	}
-
-	/*
-	 * Bulk read (i2c) and count field handling (smbus)
-	 */
-	while (rcount) {
-		/*
-		 * Maintain a pipeline by queueing the allowance for the next
-		 * read before waiting for the current read.
-		 */
-		if (rcount > 1) {
-			if (op & SMB_TRANS_NOCNT)
-				last = (rcount == 2) ? IG4_DATA_STOP : 0;
-			else
-				last = 0;
-			reg_write(sc, IG4_REG_DATA_CMD, IG4_DATA_COMMAND_RD |
-							last);
-		}
-		error = wait_status(sc, IG4_STATUS_RX_NOTEMPTY);
-		if (error) {
-			if ((op & SMB_TRANS_NOREPORT) == 0) {
-				device_printf(sc->dev,
-					      "rx timeout addr 0x%02x\n",
-					      sc->last_slave);
-			}
-			goto done;
-		}
-		last = data_read(sc);
-
-		if (op & SMB_TRANS_NOCNT) {
-			*rbuf = (u_char)last;
-			++rbuf;
-			--rcount;
-			if (actualp)
-				++*actualp;
-		} else {
-			/*
-			 * Handle count field (smbus), which is not part of
-			 * the rcount'ed buffer.  The first read data in a
-			 * bulk transfer is the count.
-			 *
-			 * XXX if rcount is loaded as 0 how do I generate a
-			 *     STOP now without issuing another RD or WR?
-			 */
-			if (rcount > (u_char)last)
-				rcount = (u_char)last;
-			op |= SMB_TRANS_NOCNT;
-		}
-	}
+	rpstart = false;
 	error = 0;
-done:
-	/* XXX wait for xmit buffer to become empty */
-	last = reg_read(sc, IG4_REG_TX_ABRT_SOURCE);
+	for (i = 0; i < nmsgs; i++) {
+		if ((msgs[i].flags & IIC_M_NOSTART) == 0) {
+			error = ig4iic_xfer_start(sc, msgs[i].slave);
+		} else {
+			if (!sc->slave_valid ||
+			    (msgs[i].slave >> 1) != sc->last_slave) {
+				device_printf(dev, "start condition suppressed"
+				    "but slave address is not set up");
+				error = EINVAL;
+				break;
+			}
+			rpstart = false;
+		}
+		if (error != 0)
+			break;
 
+		stop = (msgs[i].flags & IIC_M_NOSTOP) == 0;
+		if (msgs[i].flags & IIC_M_RD)
+			error = ig4iic_read(sc, msgs[i].buf, msgs[i].len,
+			    rpstart, stop);
+		else
+			error = ig4iic_write(sc, msgs[i].buf, msgs[i].len,
+			    rpstart, stop);
+		if (error != 0)
+			break;
+
+		rpstart = !stop;
+	}
+
+	mtx_unlock(&sc->io_lock);
+	sx_unlock(&sc->call_lock);
 	return (error);
 }
 
+int
+ig4iic_reset(device_t dev, u_char speed, u_char addr, u_char *oldaddr)
+{
+	ig4iic_softc_t *sc = device_get_softc(dev);
+
+	sx_xlock(&sc->call_lock);
+	mtx_lock(&sc->io_lock);
+
+	/* TODO handle speed configuration? */
+	if (oldaddr != NULL)
+		*oldaddr = sc->last_slave << 1;
+	set_slave_addr(sc, addr >> 1);
+	if (addr == IIC_UNKNOWN)
+		sc->slave_valid = false;
+
+	mtx_unlock(&sc->io_lock);
+	sx_unlock(&sc->call_lock);
+	return (0);
+}
+
 /*
- *				SMBUS API FUNCTIONS
- *
  * Called from ig4iic_pci_attach/detach()
  */
 int
@@ -478,22 +522,51 @@ ig4iic_attach(ig4iic_softc_t *sc)
 	int error;
 	uint32_t v;
 
-	v = reg_read(sc, IG4_REG_COMP_TYPE);
-	v = reg_read(sc, IG4_REG_COMP_PARAM1);
-	v = reg_read(sc, IG4_REG_GENERAL);
-	if ((v & IG4_GENERAL_SWMODE) == 0) {
-		v |= IG4_GENERAL_SWMODE;
-		reg_write(sc, IG4_REG_GENERAL, v);
-		v = reg_read(sc, IG4_REG_GENERAL);
+	mtx_init(&sc->io_lock, "IG4 I/O lock", NULL, MTX_DEF);
+	sx_init(&sc->call_lock, "IG4 call lock");
+
+	v = reg_read(sc, IG4_REG_DEVIDLE_CTRL);
+	if (sc->version == IG4_SKYLAKE && (v & IG4_RESTORE_REQUIRED) ) {
+		reg_write(sc, IG4_REG_DEVIDLE_CTRL, IG4_DEVICE_IDLE | IG4_RESTORE_REQUIRED);
+		reg_write(sc, IG4_REG_DEVIDLE_CTRL, 0);
+
+		reg_write(sc, IG4_REG_RESETS_SKL, IG4_RESETS_ASSERT_SKL);
+		reg_write(sc, IG4_REG_RESETS_SKL, IG4_RESETS_DEASSERT_SKL);
+		DELAY(1000);
 	}
 
-	v = reg_read(sc, IG4_REG_SW_LTR_VALUE);
-	v = reg_read(sc, IG4_REG_AUTO_LTR_VALUE);
+	if (sc->version == IG4_ATOM)
+		v = reg_read(sc, IG4_REG_COMP_TYPE);
+	
+	if (sc->version == IG4_HASWELL || sc->version == IG4_ATOM) {
+		v = reg_read(sc, IG4_REG_COMP_PARAM1);
+		v = reg_read(sc, IG4_REG_GENERAL);
+		/*
+		 * The content of IG4_REG_GENERAL is different for each
+		 * controller version.
+		 */
+		if (sc->version == IG4_HASWELL &&
+		    (v & IG4_GENERAL_SWMODE) == 0) {
+			v |= IG4_GENERAL_SWMODE;
+			reg_write(sc, IG4_REG_GENERAL, v);
+			v = reg_read(sc, IG4_REG_GENERAL);
+		}
+	}
 
-	v = reg_read(sc, IG4_REG_COMP_VER);
-	if (v != IG4_COMP_VER) {
-		error = ENXIO;
-		goto done;
+	if (sc->version == IG4_HASWELL) {
+		v = reg_read(sc, IG4_REG_SW_LTR_VALUE);
+		v = reg_read(sc, IG4_REG_AUTO_LTR_VALUE);
+	} else if (sc->version == IG4_SKYLAKE) {
+		v = reg_read(sc, IG4_REG_ACTIVE_LTR_VALUE);
+		v = reg_read(sc, IG4_REG_IDLE_LTR_VALUE);
+	}
+
+	if (sc->version == IG4_HASWELL || sc->version == IG4_ATOM) {
+		v = reg_read(sc, IG4_REG_COMP_VER);
+		if (v < IG4_COMP_MIN_VER) {
+			error = ENXIO;
+			goto done;
+		}
 	}
 	v = reg_read(sc, IG4_REG_SS_SCL_HCNT);
 	v = reg_read(sc, IG4_REG_SS_SCL_LCNT);
@@ -522,6 +595,8 @@ ig4iic_attach(ig4iic_softc_t *sc)
 	 * Use a threshold of 1 so we get interrupted on each character,
 	 * allowing us to use mtx_sleep() in our poll code.  Not perfect
 	 * but this is better than using DELAY() for receiving data.
+	 *
+	 * See ig4_var.h for details on interrupt handler synchronization.
 	 */
 	reg_write(sc, IG4_REG_RX_TL, 1);
 
@@ -531,9 +606,9 @@ ig4iic_attach(ig4iic_softc_t *sc)
 		  IG4_CTL_RESTARTEN |
 		  IG4_CTL_SPEED_STD);
 
-	sc->smb = device_add_child(sc->dev, "smbus", -1);
-	if (sc->smb == NULL) {
-		device_printf(sc->dev, "smbus driver not found\n");
+	sc->iicbus = device_add_child(sc->dev, "iicbus", -1);
+	if (sc->iicbus == NULL) {
+		device_printf(sc->dev, "iicbus driver not found\n");
 		error = ENXIO;
 		goto done;
 	}
@@ -542,21 +617,21 @@ ig4iic_attach(ig4iic_softc_t *sc)
 	/*
 	 * Don't do this, it blows up the PCI config
 	 */
-	reg_write(sc, IG4_REG_RESETS, IG4_RESETS_ASSERT);
-	reg_write(sc, IG4_REG_RESETS, IG4_RESETS_DEASSERT);
+	if (sc->version == IG4_HASWELL || sc->version == IG4_ATOM) {
+		reg_write(sc, IG4_REG_RESETS_HSW, IG4_RESETS_ASSERT_HSW);
+		reg_write(sc, IG4_REG_RESETS_HSW, IG4_RESETS_DEASSERT_HSW);
+	} else if (sc->version = IG4_SKYLAKE) {
+		reg_write(sc, IG4_REG_RESETS_SKL, IG4_RESETS_ASSERT_SKL);
+		reg_write(sc, IG4_REG_RESETS_SKL, IG4_RESETS_DEASSERT_SKL);
+	}
 #endif
 
-	/*
-	 * Interrupt on STOP detect or receive character ready
-	 */
-	reg_write(sc, IG4_REG_INTR_MASK, IG4_INTR_STOP_DET |
-					 IG4_INTR_RX_FULL);
-	mtx_lock(&sc->mutex);
+	mtx_lock(&sc->io_lock);
 	if (set_controller(sc, 0))
 		device_printf(sc->dev, "controller error during attach-1\n");
 	if (set_controller(sc, IG4_I2C_ENABLE))
 		device_printf(sc->dev, "controller error during attach-2\n");
-	mtx_unlock(&sc->mutex);
+	mtx_unlock(&sc->io_lock);
 	error = bus_setup_intr(sc->dev, sc->intr_res, INTR_TYPE_MISC | INTR_MPSAFE,
 			       NULL, ig4iic_intr, sc, &sc->intr_handle);
 	if (error) {
@@ -567,7 +642,8 @@ ig4iic_attach(ig4iic_softc_t *sc)
 	sc->enum_hook.ich_func = ig4iic_start;
 	sc->enum_hook.ich_arg = sc->dev;
 
-	/* We have to wait until interrupts are enabled. I2C read and write
+	/*
+	 * We have to wait until interrupts are enabled. I2C read and write
 	 * only works if the interrupts are available.
 	 */
 	if (config_intrhook_establish(&sc->enum_hook) != 0)
@@ -590,15 +666,12 @@ ig4iic_start(void *xdev)
 
 	config_intrhook_disestablish(&sc->enum_hook);
 
-	/* Attach us to the smbus */
 	error = bus_generic_attach(sc->dev);
 	if (error) {
 		device_printf(sc->dev,
 			      "failed to attach child: error %d\n", error);
 	}
 }
-
-
 
 int
 ig4iic_detach(ig4iic_softc_t *sc)
@@ -610,297 +683,30 @@ ig4iic_detach(ig4iic_softc_t *sc)
 		if (error)
 			return (error);
 	}
-	if (sc->smb)
-		device_delete_child(sc->dev, sc->smb);
+	if (sc->iicbus)
+		device_delete_child(sc->dev, sc->iicbus);
 	if (sc->intr_handle)
 		bus_teardown_intr(sc->dev, sc->intr_res, sc->intr_handle);
 
-	mtx_lock(&sc->mutex);
+	sx_xlock(&sc->call_lock);
+	mtx_lock(&sc->io_lock);
 
-	sc->smb = NULL;
+	sc->iicbus = NULL;
 	sc->intr_handle = NULL;
 	reg_write(sc, IG4_REG_INTR_MASK, 0);
-	reg_read(sc, IG4_REG_CLR_INTR);
 	set_controller(sc, 0);
 
-	mtx_unlock(&sc->mutex);
+	mtx_unlock(&sc->io_lock);
+	sx_xunlock(&sc->call_lock);
+
+	mtx_destroy(&sc->io_lock);
+	sx_destroy(&sc->call_lock);
+
 	return (0);
 }
 
-int
-ig4iic_smb_callback(device_t dev, int index, void *data)
-{
-	ig4iic_softc_t *sc = device_get_softc(dev);
-	int error;
-
-	mtx_lock(&sc->mutex);
-
-	switch (index) {
-	case SMB_REQUEST_BUS:
-		error = 0;
-		break;
-	case SMB_RELEASE_BUS:
-		error = 0;
-		break;
-	default:
-		error = SMB_EABORT;
-		break;
-	}
-
-	mtx_unlock(&sc->mutex);
-
-	return (error);
-}
-
 /*
- * Quick command.  i.e. START + cmd + R/W + STOP and no data.  It is
- * unclear to me how I could implement this with the intel i2c controller
- * because the controler sends STARTs and STOPs automatically with data.
- */
-int
-ig4iic_smb_quick(device_t dev, u_char slave, int how)
-{
-	ig4iic_softc_t *sc = device_get_softc(dev);
-	int error;
-
-	mtx_lock(&sc->mutex);
-
-	switch (how) {
-	case SMB_QREAD:
-		error = SMB_ENOTSUPP;
-		break;
-	case SMB_QWRITE:
-		error = SMB_ENOTSUPP;
-		break;
-	default:
-		error = SMB_ENOTSUPP;
-		break;
-	}
-	mtx_unlock(&sc->mutex);
-
-	return (error);
-}
-
-/*
- * Incremental send byte without stop (?).  It is unclear why the slave
- * address is specified if this presumably is used in combination with
- * ig4iic_smb_quick().
- *
- * (Also, how would this work anyway?  Issue the last byte with writeb()?)
- */
-int
-ig4iic_smb_sendb(device_t dev, u_char slave, char byte)
-{
-	ig4iic_softc_t *sc = device_get_softc(dev);
-	uint32_t cmd;
-	int error;
-
-	mtx_lock(&sc->mutex);
-
-	set_slave_addr(sc, slave, 0);
-	cmd = byte;
-	if (wait_status(sc, IG4_STATUS_TX_NOTFULL) == 0) {
-		reg_write(sc, IG4_REG_DATA_CMD, cmd);
-		error = 0;
-	} else {
-		error = SMB_ETIMEOUT;
-	}
-
-	mtx_unlock(&sc->mutex);
-	return (error);
-}
-
-/*
- * Incremental receive byte without stop (?).  It is unclear why the slave
- * address is specified if this presumably is used in combination with
- * ig4iic_smb_quick().
- */
-int
-ig4iic_smb_recvb(device_t dev, u_char slave, char *byte)
-{
-	ig4iic_softc_t *sc = device_get_softc(dev);
-	int error;
-
-	mtx_lock(&sc->mutex);
-
-	set_slave_addr(sc, slave, 0);
-	reg_write(sc, IG4_REG_DATA_CMD, IG4_DATA_COMMAND_RD);
-	if (wait_status(sc, IG4_STATUS_RX_NOTEMPTY) == 0) {
-		*byte = data_read(sc);
-		error = 0;
-	} else {
-		*byte = 0;
-		error = SMB_ETIMEOUT;
-	}
-
-	mtx_unlock(&sc->mutex);
-	return (error);
-}
-
-/*
- * Write command and single byte in transaction.
- */
-int
-ig4iic_smb_writeb(device_t dev, u_char slave, char cmd, char byte)
-{
-	ig4iic_softc_t *sc = device_get_softc(dev);
-	int error;
-
-	mtx_lock(&sc->mutex);
-
-	set_slave_addr(sc, slave, 0);
-	error = smb_transaction(sc, cmd, SMB_TRANS_NOCNT,
-				&byte, 1, NULL, 0, NULL);
-
-	mtx_unlock(&sc->mutex);
-	return (error);
-}
-
-/*
- * Write command and single word in transaction.
- */
-int
-ig4iic_smb_writew(device_t dev, u_char slave, char cmd, short word)
-{
-	ig4iic_softc_t *sc = device_get_softc(dev);
-	char buf[2];
-	int error;
-
-	mtx_lock(&sc->mutex);
-
-	set_slave_addr(sc, slave, 0);
-	buf[0] = word & 0xFF;
-	buf[1] = word >> 8;
-	error = smb_transaction(sc, cmd, SMB_TRANS_NOCNT,
-				buf, 2, NULL, 0, NULL);
-
-	mtx_unlock(&sc->mutex);
-	return (error);
-}
-
-/*
- * write command and read single byte in transaction.
- */
-int
-ig4iic_smb_readb(device_t dev, u_char slave, char cmd, char *byte)
-{
-	ig4iic_softc_t *sc = device_get_softc(dev);
-	int error;
-
-	mtx_lock(&sc->mutex);
-
-	set_slave_addr(sc, slave, 0);
-	error = smb_transaction(sc, cmd, SMB_TRANS_NOCNT,
-				NULL, 0, byte, 1, NULL);
-
-	mtx_unlock(&sc->mutex);
-	return (error);
-}
-
-/*
- * write command and read word in transaction.
- */
-int
-ig4iic_smb_readw(device_t dev, u_char slave, char cmd, short *word)
-{
-	ig4iic_softc_t *sc = device_get_softc(dev);
-	char buf[2];
-	int error;
-
-	mtx_lock(&sc->mutex);
-
-	set_slave_addr(sc, slave, 0);
-	if ((error = smb_transaction(sc, cmd, SMB_TRANS_NOCNT,
-				     NULL, 0, buf, 2, NULL)) == 0) {
-		*word = (u_char)buf[0] | ((u_char)buf[1] << 8);
-	}
-
-	mtx_unlock(&sc->mutex);
-	return (error);
-}
-
-/*
- * write command and word and read word in transaction
- */
-int
-ig4iic_smb_pcall(device_t dev, u_char slave, char cmd,
-		 short sdata, short *rdata)
-{
-	ig4iic_softc_t *sc = device_get_softc(dev);
-	char rbuf[2];
-	char wbuf[2];
-	int error;
-
-	mtx_lock(&sc->mutex);
-
-	set_slave_addr(sc, slave, 0);
-	wbuf[0] = sdata & 0xFF;
-	wbuf[1] = sdata >> 8;
-	if ((error = smb_transaction(sc, cmd, SMB_TRANS_NOCNT,
-				     wbuf, 2, rbuf, 2, NULL)) == 0) {
-		*rdata = (u_char)rbuf[0] | ((u_char)rbuf[1] << 8);
-	}
-
-	mtx_unlock(&sc->mutex);
-	return (error);
-}
-
-int
-ig4iic_smb_bwrite(device_t dev, u_char slave, char cmd,
-		  u_char wcount, char *buf)
-{
-	ig4iic_softc_t *sc = device_get_softc(dev);
-	int error;
-
-	mtx_lock(&sc->mutex);
-
-	set_slave_addr(sc, slave, 0);
-	error = smb_transaction(sc, cmd, 0,
-				buf, wcount, NULL, 0, NULL);
-
-	mtx_unlock(&sc->mutex);
-	return (error);
-}
-
-int
-ig4iic_smb_bread(device_t dev, u_char slave, char cmd,
-		 u_char *countp_char, char *buf)
-{
-	ig4iic_softc_t *sc = device_get_softc(dev);
-	int rcount = *countp_char;
-	int error;
-
-	mtx_lock(&sc->mutex);
-
-	set_slave_addr(sc, slave, 0);
-	error = smb_transaction(sc, cmd, 0,
-				NULL, 0, buf, rcount, &rcount);
-	*countp_char = rcount;
-
-	mtx_unlock(&sc->mutex);
-	return (error);
-}
-
-int
-ig4iic_smb_trans(device_t dev, int slave, char cmd, int op,
-		 char *wbuf, int wcount, char *rbuf, int rcount,
-		 int *actualp)
-{
-	ig4iic_softc_t *sc = device_get_softc(dev);
-	int error;
-
-	mtx_lock(&sc->mutex);
-
-	set_slave_addr(sc, slave, op);
-	error = smb_transaction(sc, cmd, op,
-				wbuf, wcount, rbuf, rcount, actualp);
-
-	mtx_unlock(&sc->mutex);
-	return (error);
-}
-
-/*
- * Interrupt Operation
+ * Interrupt Operation, see ig4_var.h for locking semantics.
  */
 static void
 ig4iic_intr(void *cookie)
@@ -908,8 +714,9 @@ ig4iic_intr(void *cookie)
 	ig4iic_softc_t *sc = cookie;
 	uint32_t status;
 
-	mtx_lock(&sc->mutex);
+	mtx_lock(&sc->io_lock);
 /*	reg_write(sc, IG4_REG_INTR_MASK, IG4_INTR_STOP_DET);*/
+	reg_read(sc, IG4_REG_CLR_INTR);
 	status = reg_read(sc, IG4_REG_I2C_STA);
 	while (status & IG4_STATUS_RX_NOTEMPTY) {
 		sc->rbuf[sc->rnext & IG4_RBUFMASK] =
@@ -917,9 +724,21 @@ ig4iic_intr(void *cookie)
 		++sc->rnext;
 		status = reg_read(sc, IG4_REG_I2C_STA);
 	}
-	reg_read(sc, IG4_REG_CLR_INTR);
+
+	/* 
+	 * Workaround to trigger pending interrupt if IG4_REG_INTR_STAT
+	 * is changed after clearing it
+	 */
+	if (sc->access_intr_mask != 0) {
+		status = reg_read(sc, IG4_REG_INTR_MASK);
+		if (status != 0) {
+			reg_write(sc, IG4_REG_INTR_MASK, 0);
+			reg_write(sc, IG4_REG_INTR_MASK, status);
+		}
+	}
+
 	wakeup(sc);
-	mtx_unlock(&sc->mutex);
+	mtx_unlock(&sc->io_lock);
 }
 
 #define REGDUMP(sc, reg)	\
@@ -952,15 +771,29 @@ ig4iic_dump(ig4iic_softc_t *sc)
 	REGDUMP(sc, IG4_REG_DMA_RDLR);
 	REGDUMP(sc, IG4_REG_SDA_SETUP);
 	REGDUMP(sc, IG4_REG_ENABLE_STATUS);
-	REGDUMP(sc, IG4_REG_COMP_PARAM1);
-	REGDUMP(sc, IG4_REG_COMP_VER);
-	REGDUMP(sc, IG4_REG_COMP_TYPE);
-	REGDUMP(sc, IG4_REG_CLK_PARMS);
-	REGDUMP(sc, IG4_REG_RESETS);
-	REGDUMP(sc, IG4_REG_GENERAL);
-	REGDUMP(sc, IG4_REG_SW_LTR_VALUE);
-	REGDUMP(sc, IG4_REG_AUTO_LTR_VALUE);
+	if (sc->version == IG4_HASWELL || sc->version == IG4_ATOM) {
+		REGDUMP(sc, IG4_REG_COMP_PARAM1);
+		REGDUMP(sc, IG4_REG_COMP_VER);
+	}
+	if (sc->version == IG4_ATOM) {
+		REGDUMP(sc, IG4_REG_COMP_TYPE);
+		REGDUMP(sc, IG4_REG_CLK_PARMS);
+	}
+	if (sc->version == IG4_HASWELL || sc->version == IG4_ATOM) {
+		REGDUMP(sc, IG4_REG_RESETS_HSW);
+		REGDUMP(sc, IG4_REG_GENERAL);
+	} else if (sc->version == IG4_SKYLAKE) {
+		REGDUMP(sc, IG4_REG_RESETS_SKL);
+	}
+	if (sc->version == IG4_HASWELL) {
+		REGDUMP(sc, IG4_REG_SW_LTR_VALUE);
+		REGDUMP(sc, IG4_REG_AUTO_LTR_VALUE);
+	} else if (sc->version == IG4_SKYLAKE) {
+		REGDUMP(sc, IG4_REG_ACTIVE_LTR_VALUE);
+		REGDUMP(sc, IG4_REG_IDLE_LTR_VALUE);
+	}
 }
 #undef REGDUMP
 
-DRIVER_MODULE(smbus, ig4iic, smbus_driver, smbus_devclass, NULL, NULL);
+DRIVER_MODULE(iicbus, ig4iic_acpi, iicbus_driver, iicbus_devclass, NULL, NULL);
+DRIVER_MODULE(iicbus, ig4iic_pci, iicbus_driver, iicbus_devclass, NULL, NULL);

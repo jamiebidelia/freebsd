@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (C) 2002 Benno Rice.
  * All rights reserved.
  *
@@ -30,7 +32,7 @@
 
 #define	INTR_VECTORS	256
 
-#define	MAX_PICS		5
+#define	MAX_PICS		32
 #define	MAP_IRQ(node, pin)	powerpc_get_irq(node, pin)
 
 /*
@@ -46,16 +48,19 @@ driver_filter_t powerpc_ipi_handler;
 
 void	intrcnt_add(const char *name, u_long **countp);
 
-void	powerpc_register_pic(device_t, uint32_t, u_int, u_int, u_int);
+u_int	powerpc_register_pic(device_t, uint32_t, u_int, u_int, u_int);
 u_int	powerpc_get_irq(uint32_t, u_int);
 
 void	powerpc_dispatch_intr(u_int, struct trapframe *);
 int	powerpc_enable_intr(void);
 int	powerpc_setup_intr(const char *, u_int, driver_filter_t, driver_intr_t,
-	    void *, enum intr_type, void **);
+	    void *, enum intr_type, void **, int);
 int	powerpc_teardown_intr(void *);
 int	powerpc_bind_intr(u_int irq, u_char cpu);
 int	powerpc_config_intr(int, enum intr_trigger, enum intr_polarity);
 int	powerpc_fw_config_intr(int irq, int sense_code);
+
+void	powerpc_intr_mask(u_int irq);
+void	powerpc_intr_unmask(u_int irq);
 
 #endif /* _MACHINE_INTR_MACHDEP_H_ */

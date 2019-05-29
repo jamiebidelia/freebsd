@@ -1,6 +1,5 @@
 /*-
- * Copyright (c) 2015 Netflix Inc.
- * All rights reserved.
+ * Copyright (c) 2015 Netflix, Inc.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -444,7 +443,7 @@ parse_expression(char *str)
 	 *      val OP val <or>
 	 *      val OP (   <recursively>
 	 * d) A final optional step (not implemented yet) would be
-	 *    to insert the mathimatical precedence paran's. For
+	 *    to insert the mathematical precedence paran's. For
 	 *    the start we will just do the left to right evaluation and
 	 *    then later we can add this guy to add paran's to make it
 	 *    mathimatically correct... i.e instead of 1 + 2 * 3 we

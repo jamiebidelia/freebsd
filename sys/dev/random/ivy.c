@@ -44,26 +44,24 @@ __FBSDID("$FreeBSD$");
 
 #include <machine/md_var.h>
 #include <machine/specialreg.h>
+#include <x86/ifunc.h>
 
 #include <dev/random/randomdev.h>
-#include <dev/random/randomdev_soft.h>
-#include <dev/random/random_adaptors.h>
-#include <dev/random/live_entropy_sources.h>
 
 #define	RETRY_COUNT	10
 
+static bool has_rdrand, has_rdseed;
 static u_int random_ivy_read(void *, u_int);
 
-static struct live_entropy_source random_ivy = {
-	.les_ident = "Intel Secure Key RNG",
-	.les_source = RANDOM_PURE_RDRAND,
-	.les_read = random_ivy_read
+static struct random_source random_ivy = {
+	.rs_ident = "Intel Secure Key RNG",
+	.rs_source = RANDOM_PURE_RDRAND,
+	.rs_read = random_ivy_read
 };
 
-static inline int
-ivy_rng_store(u_long *buf)
+static int
+x86_rdrand_store(u_long *buf)
 {
-#ifdef __GNUCLIKE_ASM
 	u_long rndval;
 	int retry;
 
@@ -78,9 +76,45 @@ ivy_rng_store(u_long *buf)
 	    : "+r" (retry), "=r" (rndval) : : "cc");
 	*buf = rndval;
 	return (retry);
-#else /* __GNUCLIKE_ASM */
-	return (0);
-#endif
+}
+
+static int
+x86_rdseed_store(u_long *buf)
+{
+	u_long rndval;
+	int retry;
+
+	retry = RETRY_COUNT;
+	__asm __volatile(
+	    "1:\n\t"
+	    "rdseed	%1\n\t"	/* read randomness into rndval */
+	    "jc		2f\n\t" /* CF is set on success, exit retry loop */
+	    "dec	%0\n\t" /* otherwise, retry-- */
+	    "jne	1b\n\t" /* and loop if retries are not exhausted */
+	    "2:"
+	    : "+r" (retry), "=r" (rndval) : : "cc");
+	*buf = rndval;
+	return (retry);
+}
+
+static int
+x86_unimpl_store(u_long *buf __unused)
+{
+
+	panic("%s called", __func__);
+}
+
+DEFINE_IFUNC(static, int, x86_rng_store, (u_long *buf))
+{
+	has_rdrand = (cpu_feature2 & CPUID2_RDRAND);
+	has_rdseed = (cpu_stdext_feature & CPUID_STDEXT_RDSEED);
+
+	if (has_rdseed)
+		return (x86_rdseed_store);
+	else if (has_rdrand)
+		return (x86_rdrand_store);
+	else
+		return (x86_unimpl_store);
 }
 
 /* It is required that buf length is a multiple of sizeof(u_long). */
@@ -93,7 +127,7 @@ random_ivy_read(void *buf, u_int c)
 	KASSERT(c % sizeof(*b) == 0, ("partial read %d", c));
 	b = buf;
 	for (count = c; count > 0; count -= sizeof(*b)) {
-		if (ivy_rng_store(&rndval) == 0)
+		if (x86_rng_store(&rndval) == 0)
 			break;
 		*b++ = rndval;
 	}
@@ -107,15 +141,15 @@ rdrand_modevent(module_t mod, int type, void *unused)
 
 	switch (type) {
 	case MOD_LOAD:
-		if (cpu_feature2 & CPUID2_RDRAND) {
-			live_entropy_source_register(&random_ivy);
-			printf("random: live provider: \"%s\"\n", random_ivy.les_ident);
+		if (has_rdrand || has_rdseed) {
+			random_source_register(&random_ivy);
+			printf("random: fast provider: \"%s\"\n", random_ivy.rs_ident);
 		}
 		break;
 
 	case MOD_UNLOAD:
-		if (cpu_feature2 & CPUID2_RDRAND)
-			live_entropy_source_deregister(&random_ivy);
+		if (has_rdrand || has_rdseed)
+			random_source_deregister(&random_ivy);
 		break;
 
 	case MOD_SHUTDOWN:
@@ -132,4 +166,4 @@ rdrand_modevent(module_t mod, int type, void *unused)
 
 DEV_MODULE(rdrand, rdrand_modevent, NULL);
 MODULE_VERSION(rdrand, 1);
-MODULE_DEPEND(rdrand, randomdev, 1, 1, 1);
+MODULE_DEPEND(rdrand, random_device, 1, 1, 1);

@@ -38,6 +38,8 @@ __FBSDID("$FreeBSD$");
 #include <sys/kernel.h>
 #include <sys/mbuf.h>
 #include <sys/uio.h>
+#include <sys/limits.h>
+#include <sys/lock.h>
 
 #include <opencrypto/cryptodev.h>
 
@@ -79,7 +81,7 @@ cuio_copydata(struct uio* uio, int off, int len, caddr_t cp)
 }
 
 void
-cuio_copyback(struct uio* uio, int off, int len, caddr_t cp)
+cuio_copyback(struct uio* uio, int off, int len, c_caddr_t cp)
 {
 	struct iovec *iov = uio->uio_iov;
 	int iol = uio->uio_iovcnt;
@@ -155,7 +157,7 @@ cuio_apply(struct uio *uio, int off, int len, int (*f)(void *, void *, u_int),
 }
 
 void
-crypto_copyback(int flags, caddr_t buf, int off, int size, caddr_t in)
+crypto_copyback(int flags, caddr_t buf, int off, int size, c_caddr_t in)
 {
 
 	if ((flags & CRYPTO_F_IMBUF) != 0)
@@ -193,7 +195,7 @@ crypto_apply(int flags, caddr_t buf, int off, int len,
 	return (error);
 }
 
-void
+int
 crypto_mbuftoiov(struct mbuf *mbuf, struct iovec **iovptr, int *cnt,
     int *allocated)
 {
@@ -216,7 +218,9 @@ crypto_mbuftoiov(struct mbuf *mbuf, struct iovec **iovptr, int *cnt,
 			while ((mtmp = mtmp->m_next) != NULL)
 				j++;
 			iov = malloc(sizeof *iov * (i + j), M_CRYPTO_DATA,
-			    M_WAITOK);
+			    M_NOWAIT);
+			if (iov == NULL)
+				return ENOMEM;
 			*allocated = 1;
 			*cnt = i + j;
 			memcpy(iov, *iovptr, sizeof *iov * i);
@@ -235,4 +239,57 @@ crypto_mbuftoiov(struct mbuf *mbuf, struct iovec **iovptr, int *cnt,
 
 	*iovptr = iov;
 	*cnt = i;
+	return 0;
 }
+
+static inline void *
+m_contiguous_subsegment(struct mbuf *m, size_t skip, size_t len)
+{
+	int rel_off;
+
+	MPASS(skip <= INT_MAX);
+
+	m = m_getptr(m, (int)skip, &rel_off);
+	if (m == NULL)
+		return (NULL);
+
+	MPASS(rel_off >= 0);
+	skip = rel_off;
+	if (skip + len > m->m_len)
+		return (NULL);
+
+	return (mtod(m, char*) + skip);
+}
+
+static inline void *
+cuio_contiguous_segment(struct uio *uio, size_t skip, size_t len)
+{
+	int rel_off, idx;
+
+	MPASS(skip <= INT_MAX);
+	idx = cuio_getptr(uio, (int)skip, &rel_off);
+	if (idx < 0)
+		return (NULL);
+
+	MPASS(rel_off >= 0);
+	skip = rel_off;
+	if (skip + len > uio->uio_iov[idx].iov_len)
+		return (NULL);
+	return ((char *)uio->uio_iov[idx].iov_base + skip);
+}
+
+void *
+crypto_contiguous_subsegment(int crp_flags, void *crpbuf,
+    size_t skip, size_t len)
+{
+	if ((crp_flags & CRYPTO_F_IMBUF) != 0)
+		return (m_contiguous_subsegment(crpbuf, skip, len));
+	else if ((crp_flags & CRYPTO_F_IOV) != 0)
+		return (cuio_contiguous_segment(crpbuf, skip, len));
+	else {
+		MPASS((crp_flags & (CRYPTO_F_IMBUF | CRYPTO_F_IOV)) !=
+		    (CRYPTO_F_IMBUF | CRYPTO_F_IOV));
+		return ((char*)crpbuf + skip);
+	}
+}
+

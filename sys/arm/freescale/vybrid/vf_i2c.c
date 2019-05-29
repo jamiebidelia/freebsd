@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2014 Ruslan Bukin <br@bsdpad.com>
  * All rights reserved.
  *
@@ -51,7 +53,6 @@ __FBSDID("$FreeBSD$");
 
 #include "iicbus_if.h"
 
-#include <dev/fdt/fdt_common.h>
 #include <dev/ofw/openfirm.h>
 #include <dev/ofw/ofw_bus.h>
 #include <dev/ofw/ofw_bus_subr.h>
@@ -232,7 +233,7 @@ i2c_repeated_start(device_t dev, u_char slave, int timeout)
 
 	if ((READ1(sc, I2C_IBSR) & IBSR_IBB) == 0) {
 		mtx_unlock(&sc->mutex);
-		return (IIC_EBUSBSY);
+		return (IIC_EBUSERR);
 	}
 
 	/* Set repeated start condition */
@@ -275,7 +276,7 @@ i2c_start(device_t dev, u_char slave, int timeout)
 	if (READ1(sc, I2C_IBSR) & IBSR_IBB) {
 		mtx_unlock(&sc->mutex);
 		vf_i2c_dbg(sc, "cant i2c start: IIC_EBUSBSY\n");
-		return (IIC_EBUSBSY);
+		return (IIC_EBUSERR);
 	}
 
 	/* Set start condition */

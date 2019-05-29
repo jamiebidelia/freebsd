@@ -31,11 +31,11 @@
  */
 
 
+#include <sys/param.h>
+#include <sys/eventhandler.h>
 #include <sys/stdint.h>
 #include <sys/stddef.h>
-#include <sys/param.h>
 #include <sys/queue.h>
-#include <sys/types.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
 #include <sys/bus.h>
@@ -198,13 +198,9 @@ static driver_t u3g_driver = {
 	.size = sizeof(struct u3g_softc),
 };
 
-DRIVER_MODULE(u3g, uhub, u3g_driver, u3g_devclass, u3g_driver_loaded, 0);
-MODULE_DEPEND(u3g, ucom, 1, 1, 1);
-MODULE_DEPEND(u3g, usb, 1, 1, 1);
-MODULE_VERSION(u3g, 1);
-
 static const STRUCT_USB_HOST_ID u3g_devs[] = {
 #define	U3G_DEV(v,p,i) { USB_VPI(USB_VENDOR_##v, USB_PRODUCT_##v##_##p, i) }
+	U3G_DEV(ABIT, AK_020, 0),
 	U3G_DEV(ACERP, H10, 0),
 	U3G_DEV(AIRPLUS, MCD650, 0),
 	U3G_DEV(AIRPRIME, PC5220, 0),
@@ -212,6 +208,7 @@ static const STRUCT_USB_HOST_ID u3g_devs[] = {
 	U3G_DEV(ALINK, 3G, 0),
 	U3G_DEV(ALINK, 3GU, 0),
 	U3G_DEV(ALINK, DWM652U5, 0),
+	U3G_DEV(ALINK, SIM7600E, 0),
 	U3G_DEV(AMOI, H01, 0),
 	U3G_DEV(AMOI, H01A, 0),
 	U3G_DEV(AMOI, H02, 0),
@@ -241,6 +238,8 @@ static const STRUCT_USB_HOST_ID u3g_devs[] = {
 	U3G_DEV(DLINK, DWR510, 0),
 	U3G_DEV(DLINK, DWM157_CD, U3GINIT_SCSIEJECT),
 	U3G_DEV(DLINK, DWM157, 0),
+	U3G_DEV(DLINK, DWM222_CD, U3GINIT_SCSIEJECT),
+	U3G_DEV(DLINK, DWM222, 0),
 	U3G_DEV(DLINK3, DWM652, 0),
 	U3G_DEV(HP, EV2200, 0),
 	U3G_DEV(HP, HS2300, 0),
@@ -311,14 +310,18 @@ static const STRUCT_USB_HOST_ID u3g_devs[] = {
 	U3G_DEV(HUAWEI, E173, 0),
 	U3G_DEV(HUAWEI, E173_INIT, U3GINIT_HUAWEISCSI),
 	U3G_DEV(HUAWEI, E3131, 0),
-	U3G_DEV(HUAWEI, E3131_INIT, U3GINIT_HUAWEISCSI),
+	U3G_DEV(HUAWEI, E3131_INIT, U3GINIT_HUAWEISCSI2),
 	U3G_DEV(HUAWEI, E180V, U3GINIT_HUAWEI),
 	U3G_DEV(HUAWEI, E220, U3GINIT_HUAWEI),
 	U3G_DEV(HUAWEI, E220BIS, U3GINIT_HUAWEI),
 	U3G_DEV(HUAWEI, E392, U3GINIT_HUAWEISCSI),
+	U3G_DEV(HUAWEI, ME909U, U3GINIT_HUAWEISCSI2),
+	U3G_DEV(HUAWEI, ME909S, U3GINIT_HUAWEISCSI2),
 	U3G_DEV(HUAWEI, MOBILE, U3GINIT_HUAWEI),
 	U3G_DEV(HUAWEI, E1752, U3GINIT_HUAWEISCSI),
 	U3G_DEV(HUAWEI, E1820, U3GINIT_HUAWEISCSI),
+	U3G_DEV(HUAWEI, K3771, U3GINIT_HUAWEI),
+	U3G_DEV(HUAWEI, K3771_INIT, U3GINIT_HUAWEISCSI2),
 	U3G_DEV(HUAWEI, K3772, U3GINIT_HUAWEI),
 	U3G_DEV(HUAWEI, K3772_INIT, U3GINIT_HUAWEISCSI2),
 	U3G_DEV(HUAWEI, K3765, U3GINIT_HUAWEI),
@@ -328,6 +331,8 @@ static const STRUCT_USB_HOST_ID u3g_devs[] = {
 	U3G_DEV(HUAWEI, K4505, U3GINIT_HUAWEI),
 	U3G_DEV(HUAWEI, K4505_INIT, U3GINIT_HUAWEISCSI),
 	U3G_DEV(HUAWEI, ETS2055, U3GINIT_HUAWEI),
+	U3G_DEV(HUAWEI, E3272_INIT, U3GINIT_HUAWEISCSI2),
+	U3G_DEV(HUAWEI, E3272, 0),
 	U3G_DEV(KYOCERA2, CDMA_MSM_K, 0),
 	U3G_DEV(KYOCERA2, KPC680, 0),
 	U3G_DEV(LONGCHEER, WM66, U3GINIT_HUAWEI),
@@ -477,6 +482,7 @@ static const STRUCT_USB_HOST_ID u3g_devs[] = {
 	U3G_DEV(QUALCOMMINC, E2003, 0),
 	U3G_DEV(QUALCOMMINC, K3772_Z, 0),
 	U3G_DEV(QUALCOMMINC, K3772_Z_INIT, U3GINIT_SCSIEJECT),
+	U3G_DEV(QUALCOMMINC, MF112, U3GINIT_ZTESTOR),
 	U3G_DEV(QUALCOMMINC, MF195E, 0),
 	U3G_DEV(QUALCOMMINC, MF195E_INIT, U3GINIT_SCSIEJECT),
 	U3G_DEV(QUALCOMMINC, MF626, 0),
@@ -489,10 +495,12 @@ static const STRUCT_USB_HOST_ID u3g_devs[] = {
 	U3G_DEV(QUANTA, GLX, 0),
 	U3G_DEV(QUANTA, Q101, 0),
 	U3G_DEV(QUANTA, Q111, 0),
+	U3G_DEV(QUECTEL, EC25, 0),
 	U3G_DEV(SIERRA, AC402, 0),
 	U3G_DEV(SIERRA, AC595U, 0),
 	U3G_DEV(SIERRA, AC313U, 0),
 	U3G_DEV(SIERRA, AC597E, 0),
+	U3G_DEV(SIERRA, AC875, 0),
 	U3G_DEV(SIERRA, AC875E, 0),
 	U3G_DEV(SIERRA, AC875U, 0),
 	U3G_DEV(SIERRA, AC875U_2, 0),
@@ -507,7 +515,6 @@ static const STRUCT_USB_HOST_ID u3g_devs[] = {
 	U3G_DEV(SIERRA, AC885U, 0),
 	U3G_DEV(SIERRA, AIRCARD580, 0),
 	U3G_DEV(SIERRA, AIRCARD595, 0),
-	U3G_DEV(SIERRA, AIRCARD875, 0),
 	U3G_DEV(SIERRA, C22, 0),
 	U3G_DEV(SIERRA, C597, 0),
 	U3G_DEV(SIERRA, C888, 0),
@@ -523,6 +530,8 @@ static const STRUCT_USB_HOST_ID u3g_devs[] = {
 	U3G_DEV(SIERRA, MC5727_2, 0),
 	U3G_DEV(SIERRA, MC5728, 0),
 	U3G_DEV(SIERRA, MC7354, 0),
+	U3G_DEV(SIERRA, MC7355, 0),
+	U3G_DEV(SIERRA, MC7430, 0),
 	U3G_DEV(SIERRA, MC8700, 0),
 	U3G_DEV(SIERRA, MC8755, 0),
 	U3G_DEV(SIERRA, MC8755_2, 0),
@@ -584,6 +593,12 @@ static const STRUCT_USB_HOST_ID u3g_devs[] = {
 #undef	U3G_DEV
 };
 
+DRIVER_MODULE(u3g, uhub, u3g_driver, u3g_devclass, u3g_driver_loaded, 0);
+MODULE_DEPEND(u3g, ucom, 1, 1, 1);
+MODULE_DEPEND(u3g, usb, 1, 1, 1);
+MODULE_VERSION(u3g, 1);
+USB_PNP_HOST_INFO(u3g_devs);
+
 static int
 u3g_sierra_init(struct usb_device *udev)
 {
@@ -620,13 +635,52 @@ u3g_huawei_init(struct usb_device *udev)
 	return (0);
 }
 
+static int
+u3g_huawei_is_cdce(uint16_t idVendor, uint8_t bInterfaceSubClass,
+    uint8_t bInterfaceProtocol)
+{
+	/*
+	 * This function returns non-zero if the interface being
+	 * probed is of type CDC ethernet, which the U3G driver should
+	 * not attach to. See sys/dev/usb/net/if_cdce.c for matching
+	 * entries.
+	 */
+	if (idVendor != USB_VENDOR_HUAWEI)
+		goto done;
+
+	switch (bInterfaceSubClass) {
+	case 0x02:
+		switch (bInterfaceProtocol) {
+		case 0x16:
+		case 0x46:
+		case 0x76:
+			return (1);
+		default:
+			break;
+		}
+		break;
+	case 0x03:
+		switch (bInterfaceProtocol) {
+		case 0x16:
+			return (1);
+		default:
+			break;
+		}
+		break;
+	default:
+		break;
+	}
+done:
+	return (0);
+}
+
 static void
 u3g_sael_m460_init(struct usb_device *udev)
 {
 	static const uint8_t setup[][24] = {
 	     { 0x41, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
 	     { 0x41, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00 },
-	     { 0x41, 0x13, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 
+	     { 0x41, 0x13, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
 	       0x01, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00,
 	       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
 	     { 0xc1, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x40, 0x02 },
@@ -638,7 +692,7 @@ u3g_sael_m460_init(struct usb_device *udev)
 	     { 0x41, 0x03, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00 },
 	     { 0x41, 0x19, 0x00, 0x00, 0x00, 0x00, 0x06, 0x00,
 	       0x00, 0x00, 0x00, 0x00, 0x11, 0x13 },
-	     { 0x41, 0x13, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 
+	     { 0x41, 0x13, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
 	       0x09, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00,
 	       0x0a, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00 },
 	     { 0x41, 0x12, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00 },
@@ -648,7 +702,7 @@ u3g_sael_m460_init(struct usb_device *udev)
 	     { 0x41, 0x19, 0x00, 0x00, 0x00, 0x00, 0x06, 0x00,
 	       0x00, 0x00, 0x00, 0x00, 0x11, 0x13 },
 	     { 0x41, 0x13, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
-	       0x09, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 
+	       0x09, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00,
 	       0x0a, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00 },
 	     { 0x41, 0x07, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00 },
 	};
@@ -666,7 +720,7 @@ u3g_sael_m460_init(struct usb_device *udev)
 		return;
 	}
 
-	for (n = 0; n != (sizeof(setup)/sizeof(setup[0])); n++) {
+	for (n = 0; n != nitems(setup); n++) {
 
 		memcpy(&req, setup[n], sizeof(req));
 
@@ -682,7 +736,7 @@ u3g_sael_m460_init(struct usb_device *udev)
 				DPRINTFN(0, "too small buffer\n");
 				continue;
 			}
-			err = usbd_do_request(udev, NULL, &req, 
+			err = usbd_do_request(udev, NULL, &req,
 			    __DECONST(uint8_t *, &setup[n][8]));
 		}
 		if (err) {
@@ -833,6 +887,10 @@ u3g_probe(device_t self)
 	if (uaa->info.bInterfaceClass != UICLASS_VENDOR) {
 		return (ENXIO);
 	}
+	if (u3g_huawei_is_cdce(uaa->info.idVendor, uaa->info.bInterfaceSubClass,
+	    uaa->info.bInterfaceProtocol)) {
+		return (ENXIO);
+	}
 	return (usbd_lookup_id_by_uaa(u3g_devs, sizeof(u3g_devs), uaa));
 }
 
@@ -858,7 +916,7 @@ u3g_attach(device_t dev)
 	}
 
 	/* copy in USB config */
-	for (n = 0; n != U3G_N_TRANSFER; n++) 
+	for (n = 0; n != U3G_N_TRANSFER; n++)
 		u3g_config_tmp[n] = u3g_config[n];
 
 	device_set_usb_desc(dev);
@@ -875,6 +933,9 @@ u3g_attach(device_t dev)
 			break;
 		id = usbd_get_interface_descriptor(iface);
 		if (id == NULL || id->bInterfaceClass != UICLASS_VENDOR)
+			continue;
+		if (u3g_huawei_is_cdce(uaa->info.idVendor,
+		    id->bInterfaceSubClass, id->bInterfaceProtocol))
 			continue;
 		usbd_set_parent_iface(uaa->device, i, uaa->info.bIfaceIndex);
 		iface_valid |= (1<<i);
@@ -1096,6 +1157,7 @@ u3g_cfg_get_status(struct ucom_softc *ucom, uint8_t *lsr, uint8_t *msr)
 {
 	struct u3g_softc *sc = ucom->sc_parent;
 
+	/* XXX Note: sc_lsr is always zero */
 	*lsr = sc->sc_lsr[ucom->sc_subunit];
 	*msr = sc->sc_msr[ucom->sc_subunit];
 }

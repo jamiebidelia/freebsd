@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-NetBSD
+ *
  * Copyright (c) 1995, David Greenman
  * Copyright (c) 2001 Jonathan Lemon <jlemon@freebsd.org>
  * All rights reserved.
@@ -45,6 +47,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/kernel.h>
 #include <sys/mbuf.h>
 #include <sys/lock.h>
+#include <sys/malloc.h>
 #include <sys/module.h>
 #include <sys/mutex.h>
 #include <sys/rman.h>
@@ -304,6 +307,8 @@ static devclass_t fxp_devclass;
 
 DRIVER_MODULE_ORDERED(fxp, pci, fxp_driver, fxp_devclass, NULL, NULL,
     SI_ORDER_ANY);
+MODULE_PNP_INFO("U16:vendor;U16:device", pci, fxp, fxp_ident_table,
+    nitems(fxp_ident_table) - 1);
 DRIVER_MODULE(miibus, fxp, miibus_driver, miibus_devclass, NULL, NULL);
 
 static struct resource_spec fxp_res_spec_mem[] = {
@@ -1262,7 +1267,7 @@ fxp_eeprom_putword(struct fxp_softc *sc, int offset, uint16_t data)
  *
  * 559's can have either 64-word or 256-word EEPROMs, the 558
  * datasheet only talks about 64-word EEPROMs, and the 557 datasheet
- * talks about the existance of 16 to 256 word EEPROMs.
+ * talks about the existence of 16 to 256 word EEPROMs.
  *
  * The only known sizes are 64 and 256, where the 256 version is used
  * by CardBus cards to store CIS information.
@@ -1622,7 +1627,7 @@ fxp_encap(struct fxp_softc *sc, struct mbuf **m_head)
 		cbp->tbd_number = nseg;
 	/* Configure TSO. */
 	if (m->m_pkthdr.csum_flags & CSUM_TSO) {
-		cbp->tbd[-1].tb_size = htole32(m->m_pkthdr.tso_segsz << 16);
+		cbp->tbdtso.tb_size = htole32(m->m_pkthdr.tso_segsz << 16);
 		cbp->tbd[1].tb_size |= htole32(tcp_payload << 16);
 		cbp->ipcb_ip_schedule |= FXP_IPCB_LARGESEND_ENABLE |
 		    FXP_IPCB_IP_CHECKSUM_ENABLE |
@@ -2089,7 +2094,7 @@ fxp_update_stats(struct fxp_softc *sc)
 		    le32toh(sp->rx_rnr_errors) +
 		    le32toh(sp->rx_overrun_errors));
 		/*
-		 * If any transmit underruns occured, bump up the transmit
+		 * If any transmit underruns occurred, bump up the transmit
 		 * threshold by another 512 bytes (64 * 8).
 		 */
 		if (sp->tx_underruns) {
@@ -2140,7 +2145,7 @@ fxp_tick(void *xsc)
 	 * then assume the receiver has locked up and attempt to clear
 	 * the condition by reprogramming the multicast filter. This is
 	 * a work-around for a bug in the 82557 where the receiver locks
-	 * up if it gets certain types of garbage in the syncronization
+	 * up if it gets certain types of garbage in the synchronization
 	 * bits prior to the packet header. This bug is supposed to only
 	 * occur in 10Mbps mode, but has been seen to occur in 100Mbps
 	 * mode as well (perhaps due to a 10/100 speed transition).
@@ -2211,18 +2216,15 @@ fxp_stop(struct fxp_softc *sc)
 	 * Release any xmit buffers.
 	 */
 	txp = sc->fxp_desc.tx_list;
-	if (txp != NULL) {
-		for (i = 0; i < FXP_NTXCB; i++) {
-			if (txp[i].tx_mbuf != NULL) {
-				bus_dmamap_sync(sc->fxp_txmtag, txp[i].tx_map,
-				    BUS_DMASYNC_POSTWRITE);
-				bus_dmamap_unload(sc->fxp_txmtag,
-				    txp[i].tx_map);
-				m_freem(txp[i].tx_mbuf);
-				txp[i].tx_mbuf = NULL;
-				/* clear this to reset csum offload bits */
-				txp[i].tx_cb->tbd[0].tb_addr = 0;
-			}
+	for (i = 0; i < FXP_NTXCB; i++) {
+		if (txp[i].tx_mbuf != NULL) {
+			bus_dmamap_sync(sc->fxp_txmtag, txp[i].tx_map,
+			    BUS_DMASYNC_POSTWRITE);
+			bus_dmamap_unload(sc->fxp_txmtag, txp[i].tx_map);
+			m_freem(txp[i].tx_mbuf);
+			txp[i].tx_mbuf = NULL;
+			/* clear this to reset csum offload bits */
+			txp[i].tx_cb->tbd[0].tb_addr = 0;
 		}
 	}
 	bus_dmamap_sync(sc->cbl_tag, sc->cbl_map,

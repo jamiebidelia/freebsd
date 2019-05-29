@@ -29,16 +29,75 @@
 #ifndef _MACHINE_CPUFUNC_H_
 #define	_MACHINE_CPUFUNC_H_
 
-#ifdef _KERNEL
-
-#include <machine/armreg.h>
-
 static __inline void
 breakpoint(void)
 {
 
 	__asm("brk #0");
 }
+
+#ifdef _KERNEL
+
+#define	HAVE_INLINE_FFS
+
+static __inline __pure2 int
+ffs(int mask)
+{
+
+	return (__builtin_ffs(mask));
+}
+
+#define	HAVE_INLINE_FFSL
+
+static __inline __pure2 int
+ffsl(long mask)
+{
+
+	return (__builtin_ffsl(mask));
+}
+
+#define	HAVE_INLINE_FFSLL
+
+static __inline __pure2 int
+ffsll(long long mask)
+{
+
+	return (__builtin_ffsll(mask));
+}
+
+#define	HAVE_INLINE_FLS
+
+static __inline __pure2 int
+fls(int mask)
+{
+
+	return (mask == 0 ? 0 :
+	    8 * sizeof(mask) - __builtin_clz((u_int)mask));
+}
+
+#define	HAVE_INLINE_FLSL
+
+static __inline __pure2 int
+flsl(long mask)
+{
+
+	return (mask == 0 ? 0 :
+	    8 * sizeof(mask) - __builtin_clzl((u_long)mask));
+}
+
+#define	HAVE_INLINE_FLSLL
+
+static __inline __pure2 int
+flsll(long long mask)
+{
+
+	return (mask == 0 ? 0 :
+	    8 * sizeof(mask) - __builtin_clzll((unsigned long long)mask));
+}
+
+#include <machine/armreg.h>
+
+void pan_enable(void);
 
 static __inline register_t
 dbg_disable(void)
@@ -108,12 +167,27 @@ get_mpidr(void)
 	return (mpidr);
 }
 
+static __inline void
+clrex(void)
+{
+
+	/*
+	 * Ensure compiler barrier, otherwise the monitor clear might
+	 * occur too late for us ?
+	 */
+	__asm __volatile("clrex" : : : "memory");
+}
+
+extern int64_t dcache_line_size;
+extern int64_t icache_line_size;
+extern int64_t idcache_line_size;
+extern int64_t dczva_line_size;
+
 #define	cpu_nullop()			arm64_nullop()
 #define	cpufunc_nullop()		arm64_nullop()
 #define	cpu_setttb(a)			arm64_setttb(a)
 
 #define	cpu_tlb_flushID()		arm64_tlb_flushID()
-#define	cpu_tlb_flushID_SE(e)		arm64_tlb_flushID_SE(e)
 
 #define	cpu_dcache_wbinv_range(a, s)	arm64_dcache_wbinv_range((a), (s))
 #define	cpu_dcache_inv_range(a, s)	arm64_dcache_inv_range((a), (s))
@@ -121,12 +195,14 @@ get_mpidr(void)
 
 #define	cpu_idcache_wbinv_range(a, s)	arm64_idcache_wbinv_range((a), (s))
 #define	cpu_icache_sync_range(a, s)	arm64_icache_sync_range((a), (s))
+#define cpu_icache_sync_range_checked(a, s) arm64_icache_sync_range_checked((a), (s))
 
 void arm64_nullop(void);
 void arm64_setttb(vm_offset_t);
 void arm64_tlb_flushID(void);
 void arm64_tlb_flushID_SE(vm_offset_t);
 void arm64_icache_sync_range(vm_offset_t, vm_size_t);
+int arm64_icache_sync_range_checked(vm_offset_t, vm_size_t);
 void arm64_idcache_wbinv_range(vm_offset_t, vm_size_t);
 void arm64_dcache_wbinv_range(vm_offset_t, vm_size_t);
 void arm64_dcache_inv_range(vm_offset_t, vm_size_t);

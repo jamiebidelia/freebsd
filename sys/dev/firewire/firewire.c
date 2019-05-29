@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) 2003 Hidetoshi Shimokawa
  * Copyright (c) 1998-2002 Katsushi Kobayashi and Hidetoshi Shimokawa
  * All rights reserved.
@@ -36,16 +38,15 @@
 __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
-#include <sys/systm.h>
-#include <sys/types.h>
-
+#include <sys/conf.h>
+#include <sys/eventhandler.h>
 #include <sys/jail.h>
 #include <sys/kernel.h>
-#include <sys/module.h>
-#include <sys/malloc.h>
-#include <sys/conf.h>
-#include <sys/sysctl.h>
 #include <sys/kthread.h>
+#include <sys/malloc.h>
+#include <sys/module.h>
+#include <sys/sysctl.h>
+#include <sys/systm.h>
 
 #include <sys/kdb.h>
 #include <sys/bus.h>		/* used by smbus and newbus */
@@ -1098,6 +1099,7 @@ fw_xfer_alloc(struct malloc_type *type)
 		return xfer;
 
 	xfer->malloc = type;
+	xfer->tl = -1;
 
 	return xfer;
 }
@@ -1584,7 +1586,7 @@ fw_explore_node(struct fw_device *dfwdev)
 		 * speed map value.
 		 * 1394a-2000 compliant devices only use
 		 * the Bus Info Block link spd value, so
-		 * ignore the speed map alltogether. SWB
+		 * ignore the speed map altogether. SWB
 		 */
 		if (binfo->link_spd == FWSPD_S100 /* 0 */) {
 			device_printf(fc->bdev, "%s: "

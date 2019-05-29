@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2007-2008 Sam Leffler, Errno Consulting
  * All rights reserved.
  *
@@ -154,8 +156,7 @@ cac_timeout(void *arg)
 		/* XXX clobbers any existing desired channel */
 		/* NB: dfs->newchan may be NULL, that's ok */
 		vap->iv_des_chan = dfs->newchan;
-		/* XXX recursive lock need ieee80211_new_state_locked */
-		ieee80211_new_state(vap, IEEE80211_S_SCAN, 0);
+		ieee80211_new_state_locked(vap, IEEE80211_S_SCAN, 0);
 	} else {
 		if_printf(vap->iv_ifp,
 		    "CAC timer on channel %u (%u MHz) expired; "
@@ -245,7 +246,7 @@ dfs_timeout(void *arg)
 	for (i = 0; i < ic->ic_nchans; i++) {
 		c = &ic->ic_channels[i];
 		if (IEEE80211_IS_CHAN_RADAR(c)) {
-			if (time_after_eq(now, dfs->nol_event[i]+NOL_TIMEOUT)) {
+			if (ieee80211_time_after_eq(now, dfs->nol_event[i]+NOL_TIMEOUT)) {
 				c->ic_state &= ~IEEE80211_CHANSTATE_RADAR;
 				if (c->ic_state & IEEE80211_CHANSTATE_NORADAR) {
 					/*

@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause-NetBSD
+ *
  * Copyright (c) 2002 The NetBSD Foundation, Inc.
  * All rights reserved.
  *
@@ -110,7 +112,8 @@ __FBSDID("$FreeBSD$");
 	"Device: %Hd,%Ld   Inode: %i    Links: %l%n" \
 	"Access: %Sa%n" \
 	"Modify: %Sm%n" \
-	"Change: %Sc"
+	"Change: %Sc%n"	\
+	" Birth: %SB"
 
 #define TIME_FORMAT	"%b %e %T %Y"
 
@@ -617,8 +620,6 @@ format1(const struct stat *st,
 	char *stmp, lfmt[24], tmp[20];
 	const char *sdata;
 	char smode[12], sid[12], path[PATH_MAX + 4];
-	struct passwd *pw;
-	struct group *gr;
 	const struct timespec *tsp;
 	struct timespec ts;
 	struct tm *tm;
@@ -715,9 +716,8 @@ format1(const struct stat *st,
 	case SHOW_st_uid:
 		small = (sizeof(st->st_uid) == 4);
 		data = st->st_uid;
-		if ((pw = getpwuid(st->st_uid)) != NULL)
-			sdata = pw->pw_name;
-		else {
+		sdata = user_from_uid(st->st_uid, 1);
+		if (sdata == NULL) {
 			snprintf(sid, sizeof(sid), "(%ld)", (long)st->st_uid);
 			sdata = sid;
 		}
@@ -729,9 +729,8 @@ format1(const struct stat *st,
 	case SHOW_st_gid:
 		small = (sizeof(st->st_gid) == 4);
 		data = st->st_gid;
-		if ((gr = getgrgid(st->st_gid)) != NULL)
-			sdata = gr->gr_name;
-		else {
+		sdata = group_from_gid(st->st_gid, 1);
+		if (sdata == NULL) {
 			snprintf(sid, sizeof(sid), "(%ld)", (long)st->st_gid);
 			sdata = sid;
 		}
@@ -1025,7 +1024,7 @@ format1(const struct stat *st,
 		 *
 		 * Nanoseconds: long.
 		 */
-		(void)snprintf(tmp, sizeof(tmp), "%dld", prec > 9 ? 9 : prec);
+		(void)snprintf(tmp, sizeof(tmp), "%dld", MIN(prec, 9));
 		(void)strcat(lfmt, tmp);
 
 		/*

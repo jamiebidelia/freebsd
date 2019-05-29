@@ -10,6 +10,10 @@ PROG=	athstats
 
 SRCS=	main.c athstats.c opt_ah.h ah_osdep.h
 
+CFLAGS+=	-I${.CURDIR}/../common/
+.PATH.c: ${.CURDIR}/../common/
+SRCS+=	ctrl.c
+
 CLEANFILES+=	opt_ah.h
 
 .include <../Makefile.inc>
@@ -26,7 +30,6 @@ LIBADD=	bsdstat
 opt_ah.h:
 	echo "#define AH_DEBUG 1" > opt_ah.h
 	echo "#define AH_DEBUG_COUNTRY 1" >> opt_ah.h
-	echo "#define AH_SUPPORT_AR5416 1" >> opt_ah.h
 
 ah_osdep.h:
 	echo 'typedef void *HAL_SOFTC;' >ah_osdep.h

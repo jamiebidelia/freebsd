@@ -155,37 +155,37 @@ clear_config_entry_part(struct configuration_entry *config_entry,
 static int
 on_query_startup(struct query_state *qstate)
 {
-	struct msghdr	cred_hdr;
-	struct iovec	iov;
+	union {
+		struct cmsghdr hdr;
+		char pad[CMSG_SPACE(sizeof(struct cmsgcred))];
+	} cmsg;
+	struct msghdr mhdr;
+	struct iovec iov;
 	struct cmsgcred *cred;
 	int elem_type;
-
-	struct {
-		struct cmsghdr	hdr;
-		char cred[CMSG_SPACE(sizeof(struct cmsgcred))];
-	} cmsg;
 
 	TRACE_IN(on_query_startup);
 	assert(qstate != NULL);
 
-	memset(&cred_hdr, 0, sizeof(struct msghdr));
-	cred_hdr.msg_iov = &iov;
-	cred_hdr.msg_iovlen = 1;
-	cred_hdr.msg_control = (caddr_t)&cmsg;
-	cred_hdr.msg_controllen = CMSG_LEN(sizeof(struct cmsgcred));
+	memset(&mhdr, 0, sizeof(mhdr));
+	mhdr.msg_iov = &iov;
+	mhdr.msg_iovlen = 1;
+	mhdr.msg_control = &cmsg;
+	mhdr.msg_controllen = sizeof(cmsg);
 
-	memset(&iov, 0, sizeof(struct iovec));
+	memset(&iov, 0, sizeof(iov));
 	iov.iov_base = &elem_type;
-	iov.iov_len = sizeof(int);
+	iov.iov_len = sizeof(elem_type);
 
-	if (recvmsg(qstate->sockfd, &cred_hdr, 0) == -1) {
+	if (recvmsg(qstate->sockfd, &mhdr, 0) == -1) {
 		TRACE_OUT(on_query_startup);
 		return (-1);
 	}
 
-	if (cmsg.hdr.cmsg_len < CMSG_LEN(sizeof(struct cmsgcred))
-		|| cmsg.hdr.cmsg_level != SOL_SOCKET
-		|| cmsg.hdr.cmsg_type != SCM_CREDS) {
+	if (mhdr.msg_controllen != CMSG_SPACE(sizeof(struct cmsgcred)) ||
+	    cmsg.hdr.cmsg_len != CMSG_LEN(sizeof(struct cmsgcred)) ||
+	    cmsg.hdr.cmsg_level != SOL_SOCKET ||
+	    cmsg.hdr.cmsg_type != SCM_CREDS) {
 		TRACE_OUT(on_query_startup);
 		return (-1);
 	}
@@ -205,9 +205,9 @@ on_query_startup(struct query_state *qstate)
 		return (-1);
 #else
 		if ((elem_type != CET_READ_REQUEST) &&
-			(elem_type != CET_MP_READ_SESSION_REQUEST) &&
-			(elem_type != CET_WRITE_REQUEST) &&
-			(elem_type != CET_MP_WRITE_SESSION_REQUEST)) {
+		    (elem_type != CET_MP_READ_SESSION_REQUEST) &&
+		    (elem_type != CET_WRITE_REQUEST) &&
+		    (elem_type != CET_MP_WRITE_SESSION_REQUEST)) {
 			TRACE_OUT(on_query_startup);
 			return (-1);
 		}
@@ -725,7 +725,7 @@ on_read_request_process(struct query_state *qstate)
 		if (read_response->error_code == -2) {
 			read_response->data = malloc(
 				read_response->data_size);
-			assert(read_response != NULL);
+			assert(read_response->data != NULL);
 			read_response->error_code = cache_read(c_entry,
 				read_request->cache_key,
 		    		read_request->cache_key_size,
@@ -743,9 +743,14 @@ on_read_request_process(struct query_state *qstate)
 				&read_response->data_size);
 
 			if (read_response->error_code == -2) {
-				read_response->error_code = 0;
-				read_response->data = NULL;
-				read_response->data_size = 0;
+				read_response->data = malloc(
+					read_response->data_size);
+				assert(read_response->data != NULL);
+				read_response->error_code = cache_read(neg_c_entry,
+					read_request->cache_key,
+		    			read_request->cache_key_size,
+		    			read_response->data,
+		    			&read_response->data_size);
 			}
 		}
 		configuration_unlock_entry(qstate->config_entry, CELT_NEGATIVE);

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2001-2007, by Cisco Systems, Inc. All rights reserved.
  * Copyright (c) 2008-2012, by Randall Stewart. All rights reserved.
  * Copyright (c) 2008-2012, by Michael Tuexen. All rights reserved.
@@ -413,7 +415,7 @@ sctp_getpaddrs(int sd, sctp_assoc_t id, struct sockaddr **raddrs)
 		return (-1);
 	}
 	/* size required is returned in 'asoc' */
-	opt_len = (socklen_t) ((size_t)asoc + sizeof(struct sctp_getaddresses));
+	opt_len = (socklen_t) ((size_t)asoc + sizeof(sctp_assoc_t));
 	addrs = calloc(1, (size_t)opt_len);
 	if (addrs == NULL) {
 		errno = ENOMEM;
@@ -473,9 +475,7 @@ sctp_getladdrs(int sd, sctp_assoc_t id, struct sockaddr **raddrs)
 		errno = ENOTCONN;
 		return (-1);
 	}
-	opt_len = (socklen_t) (size_of_addresses +
-	    sizeof(struct sockaddr_storage) +
-	    sizeof(struct sctp_getaddresses));
+	opt_len = (socklen_t) (size_of_addresses + sizeof(sctp_assoc_t));
 	addrs = calloc(1, (size_t)opt_len);
 	if (addrs == NULL) {
 		errno = ENOMEM;
@@ -700,14 +700,19 @@ sctp_sendx(int sd, const void *msg, size_t msg_len,
 #ifdef SYS_sctp_generic_sendmsg
 	if (addrcnt == 1) {
 		socklen_t l;
+		ssize_t ret;
 
 		/*
 		 * Quick way, we don't need to do a connectx so lets use the
 		 * syscall directly.
 		 */
 		l = addrs->sa_len;
-		return (syscall(SYS_sctp_generic_sendmsg, sd,
-		    msg, msg_len, addrs, l, sinfo, flags));
+		ret = syscall(SYS_sctp_generic_sendmsg, sd,
+		    msg, msg_len, addrs, l, sinfo, flags);
+		if ((ret >= 0) && (sinfo != NULL)) {
+			sinfo->sinfo_assoc_id = sctp_getassocid(sd, addrs);
+		}
+		return (ret);
 	}
 #endif
 
@@ -792,7 +797,7 @@ sctp_sendmsgx(int sd,
 	memset((void *)&sinfo, 0, sizeof(struct sctp_sndrcvinfo));
 	sinfo.sinfo_ppid = ppid;
 	sinfo.sinfo_flags = flags;
-	sinfo.sinfo_ssn = stream_no;
+	sinfo.sinfo_stream = stream_no;
 	sinfo.sinfo_timetolive = timetolive;
 	sinfo.sinfo_context = context;
 	return (sctp_sendx(sd, msg, len, addrs, addrcnt, &sinfo, 0));
@@ -984,6 +989,7 @@ sctp_sendv(int sd,
 	struct sockaddr *addr;
 	struct sockaddr_in *addr_in;
 	struct sockaddr_in6 *addr_in6;
+	sctp_assoc_t *assoc_id;
 
 	if ((addrcnt < 0) ||
 	    (iovcnt < 0) ||
@@ -1002,6 +1008,7 @@ sctp_sendv(int sd,
 		errno = ENOMEM;
 		return (-1);
 	}
+	assoc_id = NULL;
 	msg.msg_control = cmsgbuf;
 	msg.msg_controllen = 0;
 	cmsg = (struct cmsghdr *)cmsgbuf;
@@ -1025,6 +1032,7 @@ sctp_sendv(int sd,
 		memcpy(CMSG_DATA(cmsg), info, sizeof(struct sctp_sndinfo));
 		msg.msg_controllen += CMSG_SPACE(sizeof(struct sctp_sndinfo));
 		cmsg = (struct cmsghdr *)((caddr_t)cmsg + CMSG_SPACE(sizeof(struct sctp_sndinfo)));
+		assoc_id = &(((struct sctp_sndinfo *)info)->snd_assoc_id);
 		break;
 	case SCTP_SENDV_PRINFO:
 		if ((info == NULL) || (infolen < sizeof(struct sctp_prinfo))) {
@@ -1066,6 +1074,7 @@ sctp_sendv(int sd,
 			memcpy(CMSG_DATA(cmsg), &spa_info->sendv_sndinfo, sizeof(struct sctp_sndinfo));
 			msg.msg_controllen += CMSG_SPACE(sizeof(struct sctp_sndinfo));
 			cmsg = (struct cmsghdr *)((caddr_t)cmsg + CMSG_SPACE(sizeof(struct sctp_sndinfo)));
+			assoc_id = &(spa_info->sendv_sndinfo.snd_assoc_id);
 		}
 		if (spa_info->sendv_flags & SCTP_SEND_PRINFO_VALID) {
 			cmsg->cmsg_level = IPPROTO_SCTP;
@@ -1164,6 +1173,9 @@ sctp_sendv(int sd,
 	msg.msg_flags = 0;
 	ret = sendmsg(sd, &msg, flags);
 	free(cmsgbuf);
+	if ((ret >= 0) && (addrs != NULL) && (assoc_id != NULL)) {
+		*assoc_id = sctp_getassocid(sd, addrs);
+	}
 	return (ret);
 }
 

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) 1997, 1998, 1999, 2000
  *	Bill Paul <wpaul@ee.columbia.edu>.  All rights reserved.
  *
@@ -219,6 +221,7 @@ MODULE_DEPEND(kue, uether, 1, 1, 1);
 MODULE_DEPEND(kue, usb, 1, 1, 1);
 MODULE_DEPEND(kue, ether, 1, 1, 1);
 MODULE_VERSION(kue, 1);
+USB_PNP_HOST_INFO(kue_devs);
 
 static const struct usb_ether_methods kue_ue_methods = {
 	.ue_attach_post = kue_attach_post,
@@ -374,7 +377,7 @@ kue_setmulti(struct usb_ether *ue)
 	sc->sc_rxfilt &= ~KUE_RXFILT_ALLMULTI;
 
 	if_maddr_rlock(ifp);
-	TAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link)
+	CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link)
 	{
 		if (ifma->ifma_addr->sa_family != AF_LINK)
 			continue;

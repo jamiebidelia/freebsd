@@ -1,5 +1,7 @@
 /*-
- * Copyright (c) 2009-2015 Solarflare Communications Inc.
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
+ * Copyright (c) 2009-2016 Solarflare Communications Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -31,18 +33,16 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
-#include "efsys.h"
 #include "efx.h"
-#include "efx_types.h"
 #include "efx_impl.h"
 
-	__checkReturn	int
+	__checkReturn	efx_rc_t
 efx_port_init(
 	__in		efx_nic_t *enp)
 {
 	efx_port_t *epp = &(enp->en_port);
-	efx_phy_ops_t *epop = epp->ep_epop;
-	int rc;
+	const efx_phy_ops_t *epop = epp->ep_epop;
+	efx_rc_t rc;
 
 	EFSYS_ASSERT3U(enp->en_magic, ==, EFX_NIC_MAGIC);
 	EFSYS_ASSERT3U(enp->en_mod_flags, &, EFX_MOD_PROBE);
@@ -57,7 +57,6 @@ efx_port_init(
 
 	epp->ep_mac_type = EFX_MAC_INVALID;
 	epp->ep_link_mode = EFX_LINK_UNKNOWN;
-	epp->ep_mac_poll_needed = B_TRUE;
 	epp->ep_mac_drain = B_TRUE;
 
 	/* Configure the MAC */
@@ -67,7 +66,7 @@ efx_port_init(
 	epp->ep_emop->emo_reconfigure(enp);
 
 	/* Pick up current phy capababilities */
-	efx_port_poll(enp, NULL);
+	(void) efx_port_poll(enp, NULL);
 
 	/*
 	 * Turn on the PHY if available, otherwise reset it, and
@@ -94,28 +93,27 @@ fail3:
 fail2:
 	EFSYS_PROBE(fail2);
 fail1:
-	EFSYS_PROBE1(fail1, int, rc);
+	EFSYS_PROBE1(fail1, efx_rc_t, rc);
 
 	enp->en_mod_flags &= ~EFX_MOD_PORT;
 
 	return (rc);
 }
 
-	__checkReturn	int
+	__checkReturn	efx_rc_t
 efx_port_poll(
 	__in		efx_nic_t *enp,
 	__out_opt	efx_link_mode_t	*link_modep)
 {
 	efx_port_t *epp = &(enp->en_port);
-	efx_mac_ops_t *emop = epp->ep_emop;
+	const efx_mac_ops_t *emop = epp->ep_emop;
 	efx_link_mode_t ignore_link_mode;
-	int rc;
+	efx_rc_t rc;
 
 	EFSYS_ASSERT3U(enp->en_magic, ==, EFX_NIC_MAGIC);
 	EFSYS_ASSERT3U(enp->en_mod_flags, &, EFX_MOD_PORT);
 
 	EFSYS_ASSERT(emop != NULL);
-	EFSYS_ASSERT(!epp->ep_mac_stats_pending);
 
 	if (link_modep == NULL)
 		link_modep = &ignore_link_mode;
@@ -126,14 +124,14 @@ efx_port_poll(
 	return (0);
 
 fail1:
-	EFSYS_PROBE1(fail1, int, rc);
+	EFSYS_PROBE1(fail1, efx_rc_t, rc);
 
 	return (rc);
 }
 
 #if EFSYS_OPT_LOOPBACK
 
-	__checkReturn	int
+	__checkReturn	efx_rc_t
 efx_port_loopback_set(
 	__in		efx_nic_t *enp,
 	__in		efx_link_mode_t link_mode,
@@ -141,8 +139,8 @@ efx_port_loopback_set(
 {
 	efx_port_t *epp = &(enp->en_port);
 	efx_nic_cfg_t *encp = &(enp->en_nic_cfg);
-	efx_mac_ops_t *emop = epp->ep_emop;
-	int rc;
+	const efx_mac_ops_t *emop = epp->ep_emop;
+	efx_rc_t rc;
 
 	EFSYS_ASSERT3U(enp->en_magic, ==, EFX_NIC_MAGIC);
 	EFSYS_ASSERT3U(enp->en_mod_flags, &, EFX_MOD_PORT);
@@ -151,7 +149,7 @@ efx_port_loopback_set(
 	EFSYS_ASSERT(link_mode < EFX_LINK_NMODES);
 
 	if (EFX_TEST_QWORD_BIT(encp->enc_loopback_types[link_mode],
-		loopback_type) == 0) {
+		(int)loopback_type) == 0) {
 		rc = ENOTSUP;
 		goto fail1;
 	}
@@ -168,14 +166,14 @@ efx_port_loopback_set(
 fail2:
 	EFSYS_PROBE(fail2);
 fail1:
-	EFSYS_PROBE1(fail1, int, rc);
+	EFSYS_PROBE1(fail1, efx_rc_t, rc);
 
 	return (rc);
 }
 
 #if EFSYS_OPT_NAMES
 
-static const char 	*__efx_loopback_type_name[] = {
+static const char * const __efx_loopback_type_name[] = {
 	"OFF",
 	"DATA",
 	"GMAC",
@@ -211,6 +209,9 @@ static const char 	*__efx_loopback_type_name[] = {
 	"SD_FEP1_5_WS",
 	"SD_FEP_WS",
 	"SD_FES_WS",
+	"AOE_INT_NEAR",
+	"DATA_WS",
+	"FORCE_EXT_LINK",
 };
 
 	__checkReturn	const char *
@@ -237,7 +238,7 @@ efx_port_fini(
 	__in		efx_nic_t *enp)
 {
 	efx_port_t *epp = &(enp->en_port);
-	efx_phy_ops_t *epop = epp->ep_epop;
+	const efx_phy_ops_t *epop = epp->ep_epop;
 
 	EFSYS_ASSERT3U(enp->en_magic, ==, EFX_NIC_MAGIC);
 	EFSYS_ASSERT3U(enp->en_mod_flags, &, EFX_MOD_PROBE);
@@ -249,7 +250,6 @@ efx_port_fini(
 	epp->ep_emop = NULL;
 	epp->ep_mac_type = EFX_MAC_INVALID;
 	epp->ep_mac_drain = B_FALSE;
-	epp->ep_mac_poll_needed = B_FALSE;
 
 	/* Turn off the PHY */
 	if (epop->epo_power != NULL)

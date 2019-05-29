@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2005 David Xu <davidxu@freebsd.org>
  * Copyright (C) 2003 Daniel M. Eischen <deischen@freebsd.org>
  * All rights reserved.
@@ -23,9 +25,10 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * $FreeBSD$
  */
+
+#include <sys/cdefs.h>
+__FBSDID("$FreeBSD$");
 
 #include <sys/types.h>
 #include <sys/signalvar.h>
@@ -50,18 +53,14 @@ static struct wake_addr default_wake_addr;
  * This is called when the first thread (other than the initial
  * thread) is created.
  */
-int
+void
 _thr_setthreaded(int threaded)
 {
-	if (((threaded == 0) ^ (__isthreaded == 0)) == 0)
-		return (0);
-
 	__isthreaded = threaded;
-	return (0);
 }
 
 void
-_thr_assert_lock_level()
+_thr_assert_lock_level(void)
 {
 	PANIC("locklevel <= 0");
 }
